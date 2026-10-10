@@ -59,11 +59,11 @@ export class LocalASRProvider implements ASRProvider {
       if (this.cancelled) throw new Error('转写已取消')
 
       if (!response.ok) {
-        const error = await response.json()
+        const error = await response.json() as { detail?: string }
         throw new Error(error.detail || `Python ASR service error: ${response.status}`)
       }
 
-      const result = await response.json()
+      const result = await response.json() as { segments: Array<{ startTime: number; endTime: number; text: string }> }
 
       if (this.cancelled) throw new Error('转写已取消')
 

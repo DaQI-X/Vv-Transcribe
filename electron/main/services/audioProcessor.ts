@@ -5,14 +5,64 @@
  * - extractAudio: 将任意音视频文件转换为 16kHz 单声道 PCM WAV（ASR 所需格式）
  * - cleanupTemp: 清理临时文件目录
  */
+import { app } from 'electron'
 import ffmpeg from 'fluent-ffmpeg'
-import ffmpegPath from '@ffmpeg-installer/ffmpeg'
 import { mkdir, rm, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { logger } from './logger'
 
-ffmpeg.setFfmpegPath(ffmpegPath.path)
+// 手动解析 ffmpeg 和 ffprobe 路径，避免 asar 打包后 require.resolve 失效
+function getBinaryPath(binaryName: string): string {
+  const isPackaged = process.env.NODE_ENV === 'production' || app.isPackaged
+  const platform = process.platform
+  const arch = process.arch
+  const binary = platform === 'win32' ? `${binaryName}.exe` : binaryName
+
+  logger.debug('AudioProcessor', `Getting ${binaryName} path`, { isPackaged, platform, arch, resourcesPath: process.resourcesPath })
+
+  if (isPackaged) {
+    const unpackedPath = join(
+      process.resourcesPath || '',
+      'app.asar.unpacked',
+      'node_modules',
+      `@${binaryName}-installer`,
+      `${platform}-${arch}`,
+      binary
+    )
+    logger.debug('AudioProcessor', `Trying unpacked path: ${unpackedPath}`)
+    if (existsSync(unpackedPath)) {
+      logger.info('AudioProcessor', `Found ${binaryName} at: ${unpackedPath}`)
+      return unpackedPath
+    }
+    logger.warn('AudioProcessor', `Unpacked path not found: ${unpackedPath}`)
+  }
+
+  try {
+    const resolved = require.resolve(`@${binaryName}-installer/${platform}-${arch}/${binary}`)
+    logger.info('AudioProcessor', `Resolved ${binaryName} path: ${resolved}`)
+    return resolved
+  } catch (err: any) {
+    logger.error('AudioProcessor', `Failed to resolve ${binaryName}`, err.message)
+    throw new Error(`无法找到 ${binaryName} 二进制文件`)
+  }
+}
+
+// 延迟初始化，避免 app 未就绪时访问
+let ffmpegInitialized = false
+function ensureFfmpegPaths() {
+  if (ffmpegInitialized) return
+  logger.info('AudioProcessor', 'Initializing ffmpeg paths...')
+  const ffmpegPath = getBinaryPath('ffmpeg')
+  const ffprobePath = getBinaryPath('ffprobe')
+  logger.info('AudioProcessor', 'Setting ffmpeg paths', { ffmpegPath, ffprobePath })
+  ;(ffmpeg as any).setFfmpegPath(ffmpegPath)
+  ;(ffmpeg as any).setFfprobePath(ffprobePath)
+  ffmpegInitialized = true
+  logger.info('AudioProcessor', 'FFmpeg paths initialized successfully')
+}
 
 export interface AudioMetadata {
   duration: number
@@ -28,12 +78,17 @@ export interface ExtractResult {
 }
 
 export function probeFile(filePath: string): Promise<AudioMetadata> {
+  logger.serviceCall('AudioProcessor', 'probeFile', { filePath })
+  ensureFfmpegPaths()
   return new Promise((resolve, reject) => {
+    logger.debug('AudioProcessor', 'Calling ffmpeg.ffprobe...')
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       if (err) {
+        logger.serviceError('AudioProcessor', 'probeFile', err)
         reject(new Error(`无法读取文件信息: ${err.message}`))
         return
       }
+      logger.info('AudioProcessor', 'ffprobe success', { duration: metadata.format.duration })
       const audioStream = metadata.streams.find((s) => s.codec_type === 'audio')
       resolve({
         duration: metadata.format.duration ?? 0,
@@ -46,21 +101,31 @@ export function probeFile(filePath: string): Promise<AudioMetadata> {
 }
 
 export async function extractAudio(filePath: string): Promise<ExtractResult> {
+  logger.serviceCall('AudioProcessor', 'extractAudio', { filePath })
   const tempDir = join(tmpdir(), `transcribe-${randomUUID()}`)
   await mkdir(tempDir, { recursive: true })
+  logger.debug('AudioProcessor', 'Created temp directory', { tempDir })
 
   const wavPath = join(tempDir, 'audio.wav')
 
   const metadata = await probeFile(filePath)
+  logger.info('AudioProcessor', 'Audio metadata extracted', metadata)
 
   await new Promise<void>((resolve, reject) => {
+    logger.debug('AudioProcessor', 'Starting audio extraction...')
     ffmpeg(filePath)
       .audioFrequency(16000)
       .audioChannels(1)
       .audioCodec('pcm_s16le')
       .format('wav')
-      .on('end', () => resolve())
-      .on('error', (err: Error) => reject(new Error(`音频提取失败: ${err.message}`)))
+      .on('end', () => {
+        logger.info('AudioProcessor', 'Audio extraction completed', { wavPath })
+        resolve()
+      })
+      .on('error', (err: Error) => {
+        logger.serviceError('AudioProcessor', 'extractAudio', err)
+        reject(new Error(`音频提取失败: ${err.message}`))
+      })
       .save(wavPath)
   })
 

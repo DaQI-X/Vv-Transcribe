@@ -52,6 +52,12 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: unknown) =>
     ipcRenderer.invoke('settings:save', settings),
+
+  getServiceReady: () =>
+    ipcRenderer.invoke('app:getServiceReady'),
+
+  log: (entry: unknown) =>
+    ipcRenderer.invoke('app:log', entry),
 }
 
 contextBridge.exposeInMainWorld('electronAPI', api)

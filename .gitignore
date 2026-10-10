@@ -16,8 +16,12 @@ dist-ssr
 # Python ASR
 python-asr/venv/
 python-asr/dist/
+python-asr/build/
 python-asr/__pycache__/
 *.pyc
+
+# Build output
+build-output/
 
 # Misc
 Vv-Transcribe/

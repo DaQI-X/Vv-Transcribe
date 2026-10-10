@@ -48,7 +48,7 @@ export function AudioPlayer() {
   const audioRef = useRef<HTMLAudioElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const { filePath, fileName, fileSize, duration: fileDuration } = useTranscriptionStore()
-  const { isPlaying, currentTime, duration, playbackRate, seekTo, setIsPlaying, setCurrentTime, setDuration, setPlaybackRate, setActiveSegment, clearSeek } = usePlayerStore()
+  const { isPlaying, currentTime, duration, playbackRate, seekTo, setIsPlaying, setCurrentTime, setDuration, setActiveSegment, clearSeek } = usePlayerStore()
   const { segments } = useTranscriptionStore()
   const isDraggingRef = useRef(false)
   const lastSeekValueRef = useRef(0)
@@ -161,8 +161,8 @@ export function AudioPlayer() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVideo])
 
-  const handleSeekEnd = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = Number(e.target.value)
+  const handleSeekEnd = useCallback((e: React.SyntheticEvent<HTMLInputElement>) => {
+    const val = Number((e.target as HTMLInputElement).value)
     const media = isVideo ? videoRef.current : audioRef.current
     if (!media) return
     media.currentTime = val

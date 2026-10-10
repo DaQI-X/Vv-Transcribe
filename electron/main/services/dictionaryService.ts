@@ -31,7 +31,7 @@ const GITHUB_API = `https://api.github.com/repos/${SOURCE_REPO}`
 
 function getBuiltinDictionaryPath(): string {
   if (process.env.VITE_DEV_SERVER_URL) {
-    return join(import.meta.dirname, '../../resources/dictionary')
+    return join(import.meta.dirname, '../../electron/resources/dictionary')
   }
   return join(process.resourcesPath, 'resources/dictionary')
 }

@@ -40,7 +40,8 @@ export async function loadSettings(): Promise<AppSettings> {
 
   try {
     const raw = await readFile(getSettingsPath(), 'utf-8')
-    cachedSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+    const parsed = JSON.parse(raw) as Partial<AppSettings>
+    cachedSettings = { ...DEFAULT_SETTINGS, ...parsed }
   } catch {
     cachedSettings = { ...DEFAULT_SETTINGS }
   }

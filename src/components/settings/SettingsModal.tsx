@@ -64,7 +64,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     if (!api) return
     setSaving(true)
     try {
-      await api.saveSettings(form.getFieldsValue())
+      await api.saveSettings(form.getFieldsValue() as unknown as Record<string, unknown>)
       message.success('设置已保存')
       onClose()
     } catch {

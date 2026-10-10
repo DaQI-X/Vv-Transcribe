@@ -121,7 +121,6 @@ function FailureView({ title, message, fileName, onRetry, buttonLabel = '重新�
 export function UploadStatus() {
   const { fileName, fileSize, status, progress, error, reset } = useTranscriptionStore()
 
-  const isUploading = status === 'idle' || status === 'extracting_audio'
   const isProcessing = status === 'transcribing'
   const isFailed = status === 'error' || !!error
 

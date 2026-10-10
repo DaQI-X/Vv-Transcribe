@@ -70,6 +70,10 @@ export interface ElectronAPI {
 
   getSettings: () => Promise<Record<string, unknown>>
   saveSettings: (settings: Record<string, unknown>) => Promise<void>
+
+  getServiceReady: () => Promise<{ ready: boolean; error: string | null }>
+
+  log: (entry: Record<string, unknown>) => Promise<void>
 }
 
 declare global {

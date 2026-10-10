@@ -4,7 +4,7 @@
  * 1. 若配置了云端 API Key 且服务可用，优先使用云端转写（OpenAI Whisper API）
  * 2. 云端不可用或失败时，自动降级到本地 Python ASR 服务（faster-whisper）
  */
-import type { ASRProvider, ASRSegment, ASROptions, ASRProgress } from './types'
+import type { ASRSegment, ASROptions, ASRProgress } from './types'
 import { CloudASRProvider } from './cloudASR'
 import { LocalASRProvider } from './localASR'
 

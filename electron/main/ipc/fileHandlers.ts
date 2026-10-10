@@ -7,6 +7,7 @@ import { ipcMain, dialog } from 'electron'
 import { stat } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { extractAudio, cleanupTemp, probeFile } from '../services/audioProcessor'
+import { logger } from '../services/logger'
 
 const ALLOWED_EXTENSIONS = [
   '.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma',
@@ -15,6 +16,7 @@ const ALLOWED_EXTENSIONS = [
 
 export function registerFileHandlers() {
   ipcMain.handle('dialog:selectFile', async () => {
+    logger.userAction('Select file dialog opened')
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -24,13 +26,17 @@ export function registerFileHandlers() {
         },
       ],
     })
-    if (result.canceled || result.filePaths.length === 0) return null
+    if (result.canceled || result.filePaths.length === 0) {
+      logger.userAction('File selection cancelled')
+      return null
+    }
+    logger.userAction('File selected', { path: result.filePaths[0] })
     return result.filePaths[0]
   })
 
   ipcMain.handle('file:getMetadata', async (_event, filePath: string) => {
+    logger.serviceCall('FileHandlers', 'getMetadata', { filePath })
     try {
-      console.log('[fileHandlers] getMetadata for:', filePath)
       const stats = await stat(filePath)
       const ext = extname(filePath).toLowerCase()
       const isAudio = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma'].includes(ext)
@@ -42,17 +48,23 @@ export function registerFileHandlers() {
         type: isAudio ? 'audio' as const : 'video' as const,
         lastModified: stats.mtimeMs,
       }
-      console.log('[fileHandlers] metadata:', metadata)
+      logger.info('FileHandlers', 'Metadata retrieved', metadata)
       return metadata
     } catch (err) {
-      console.error('[fileHandlers] getMetadata failed:', filePath, err)
+      logger.serviceError('FileHandlers', 'getMetadata', err)
       return null
     }
   })
 
   ipcMain.handle('file:extractAudio', async (_event, filePath: string) => {
+    logger.userAction('Extract audio started', { filePath })
     try {
       const result = await extractAudio(filePath)
+      logger.userAction('Extract audio completed', {
+        filePath,
+        duration: result.metadata.duration,
+        wavPath: result.wavPath,
+      })
       return {
         success: true,
         wavPath: result.wavPath,
@@ -60,6 +72,7 @@ export function registerFileHandlers() {
         duration: result.metadata.duration,
       }
     } catch (err) {
+      logger.serviceError('FileHandlers', 'extractAudio', err)
       return {
         success: false,
         error: err instanceof Error ? err.message : '音频提取失败',
@@ -68,14 +81,18 @@ export function registerFileHandlers() {
   })
 
   ipcMain.handle('file:cleanupTemp', async (_event, tempDir: string) => {
+    logger.debug('FileHandlers', 'Cleanup temp', { tempDir })
     await cleanupTemp(tempDir)
   })
 
   ipcMain.handle('file:probeAudio', async (_event, filePath: string) => {
+    logger.serviceCall('FileHandlers', 'probeAudio', { filePath })
     try {
       const metadata = await probeFile(filePath)
+      logger.info('FileHandlers', 'Probe audio success', metadata)
       return { success: true, metadata }
     } catch (err) {
+      logger.serviceError('FileHandlers', 'probeAudio', err)
       return {
         success: false,
         error: err instanceof Error ? err.message : '无法读取音频信息',

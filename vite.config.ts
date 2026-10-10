@@ -17,7 +17,18 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron/main',
             rollupOptions: {
-              external: ['fluent-ffmpeg', '@ffmpeg-installer/ffmpeg', '@xenova/transformers', 'onnxruntime-node', 'sharp'],
+              external: [
+                'fluent-ffmpeg',
+                '@ffmpeg-installer/ffmpeg',
+                '@ffmpeg-installer/darwin-arm64',
+                '@ffmpeg-installer/darwin-x64',
+                '@ffprobe-installer/ffprobe',
+                '@ffprobe-installer/darwin-arm64',
+                '@ffprobe-installer/darwin-x64',
+                '@xenova/transformers',
+                'onnxruntime-node',
+                'sharp',
+              ],
             },
           },
         },

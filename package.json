@@ -12,7 +12,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:asr": "cd python-asr && source venv/bin/activate && pyinstaller vv-asr-server.spec --clean --noconfirm",
-    "build:electron": "tsc -b && vite build && electron-builder",
+    "build:electron": "tsc -b && vite build && electron-builder --config electron-builder.cjs",
+    "build:electron:arm64": "tsc -b && vite build && BUILD_ARCH=arm64 npx electron-builder --mac --arm64 --config electron-builder.cjs",
+    "build:electron:x64": "tsc -b && vite build && BUILD_ARCH=x64 npx electron-builder --mac --x64 --config electron-builder.cjs",
     "build:all": "pnpm build:asr && pnpm build:electron",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -21,7 +23,12 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
+    "@ffmpeg-installer/darwin-arm64": "^4.1.5",
+    "@ffmpeg-installer/darwin-x64": "^4.1.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/darwin-arm64": "^5.0.1",
+    "@ffprobe-installer/darwin-x64": "^5.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "@tanstack/react-query": "^5.101.0",
     "@xenova/transformers": "^2.17.2",
     "antd": "^6.4.4",
@@ -59,48 +66,6 @@
     "vite-plugin-electron": "^1.1.2",
     "vite-plugin-electron-renderer": "^1.0.0"
   },
-  "build": {
-    "appId": "com.vv.transcribe",
-    "productName": "Vv Transcribe",
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "icon": "src/assets/mac/logo_1024.png",
-      "category": "public.app-category.productivity"
-    },
-    "win": {
-      "target": [
-        "nsis",
-        "zip"
-      ],
-      "icon": "src/assets/win/logo_256.ico"
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "icon": "src/assets/linux/logo_512.png"
-    },
-    "files": [
-      "dist/**/*",
-      "dist-electron/**/*",
-      "electron/resources/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "electron/resources",
-        "to": "resources"
-      },
-      {
-        "from": "python-asr/dist",
-        "to": "python-asr",
-        "filter": ["vv-asr-server*"]
-      }
-    ]
-  },
   "pnpm": {
     "onlyBuiltDependencies": [
       "@ffmpeg-installer/darwin-arm64",
@@ -109,6 +74,13 @@
       "@ffmpeg-installer/linux-x64",
       "@ffmpeg-installer/win32-ia32",
       "@ffmpeg-installer/win32-x64",
+      "@ffprobe-installer/darwin-arm64",
+      "@ffprobe-installer/darwin-x64",
+      "@ffprobe-installer/linux-arm",
+      "@ffprobe-installer/linux-ia32",
+      "@ffprobe-installer/linux-x64",
+      "@ffprobe-installer/win32-ia32",
+      "@ffprobe-installer/win32-x64",
       "electron"
     ]
   }

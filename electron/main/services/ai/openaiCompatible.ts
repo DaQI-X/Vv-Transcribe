@@ -9,7 +9,6 @@
  */
 import type { AIProvider } from './types'
 import { lookupMultipleWords } from '../dictionaryService'
-import { lookupMultipleWords } from '../dictionaryService'
 
 interface OpenAICompatibleConfig {
   apiKey: string
