@@ -1,0 +1,5 @@
+fastapi==0.115.0
+uvicorn==0.32.0
+faster-whisper>=1.2.0
+python-multipart==0.0.12
+pyinstaller>=6.0.0

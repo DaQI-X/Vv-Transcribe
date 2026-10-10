@@ -1,0 +1,79 @@
+/**
+ * Electron API 类型声明
+ * 定义 preload 暴露给渲染进程的所有接口类型
+ */
+export interface FileMetadata {
+  path: string
+  name: string
+  size: number
+  extension: string
+  type: 'audio' | 'video'
+  lastModified: number
+}
+
+export interface ExtractAudioResult {
+  success: boolean
+  wavPath?: string
+  tempDir?: string
+  duration?: number
+  error?: string
+}
+
+export interface ProbeAudioResult {
+  success: boolean
+  metadata?: {
+    duration: number
+    codec: string
+    channels: number
+    sampleRate: number
+  }
+  error?: string
+}
+
+export interface ElectronAPI {
+  getDroppedFilePath: (file: File) => string
+  selectFile: () => Promise<string | null>
+  getFileMetadata: (filePath: string) => Promise<FileMetadata | null>
+  extractAudio: (filePath: string) => Promise<ExtractAudioResult>
+  cleanupTemp: (tempDir: string) => Promise<void>
+  probeAudio: (filePath: string) => Promise<ProbeAudioResult>
+
+  startTranscription: (
+    filePath: string,
+    options: unknown,
+  ) => Promise<{ jobId: string; success: boolean; provider?: 'local' | 'cloud'; error?: string }>
+  cancelTranscription: (jobId: string) => Promise<void>
+
+  onTranscriptionProgress: (
+    callback: (data: {
+      jobId: string
+      progress: number
+      segment?: {
+        startTime: number
+        endTime: number
+        text: string
+        confidence?: number
+      }
+    }) => void,
+  ) => () => void
+
+  correctText: (
+    text: string,
+    options: unknown,
+  ) => Promise<{ corrected: string; changes: string[] }>
+
+  lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
+  lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>
+  checkDictionaryUpdate: () => Promise<{ hasUpdate: boolean; latestVersion?: string; currentVersion: string }>
+  downloadDictionaryUpdate: () => Promise<{ success: boolean; error?: string }>
+  getDictionaryVersion: () => Promise<string>
+
+  getSettings: () => Promise<Record<string, unknown>>
+  saveSettings: (settings: Record<string, unknown>) => Promise<void>
+}
+
+declare global {
+  interface Window {
+    electronAPI: ElectronAPI
+  }
+}
