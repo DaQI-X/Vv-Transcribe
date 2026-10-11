@@ -43,8 +43,9 @@ def load_model():
 def convert_to_16k_wav(input_path: str) -> str:
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
+    ffmpeg_bin = os.environ.get("FFMPEG_PATH", "ffmpeg")
     subprocess.run([
-        "ffmpeg", "-i", input_path,
+        ffmpeg_bin, "-i", input_path,
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
         "-y", tmp.name
     ], capture_output=True, check=True)

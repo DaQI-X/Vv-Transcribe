@@ -12,6 +12,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
+import { app } from 'electron'
 
 const ASR_PORT = 8000
 const ASR_URL = `http://localhost:${ASR_PORT}`
@@ -28,6 +29,32 @@ function getBinaryPath(): string {
     return join(import.meta.dirname, '../../python-asr/dist/vv-asr-server')
   }
   return join(process.resourcesPath, 'python-asr', 'vv-asr-server')
+}
+
+/** 获取 ffmpeg/ffprobe 二进制路径（与 audioProcessor 逻辑一致） */
+function getFfmpegBinaryPath(binaryName: string): string | null {
+  const isPackaged = process.env.NODE_ENV === 'production' || app.isPackaged
+  const platform = process.platform
+  const arch = process.arch
+  const binary = platform === 'win32' ? `${binaryName}.exe` : binaryName
+
+  if (isPackaged) {
+    const unpackedPath = join(
+      process.resourcesPath || '',
+      'app.asar.unpacked',
+      'node_modules',
+      `@${binaryName}-installer`,
+      `${platform}-${arch}`,
+      binary
+    )
+    if (existsSync(unpackedPath)) return unpackedPath
+  }
+
+  try {
+    return require.resolve(`@${binaryName}-installer/${platform}-${arch}/${binary}`)
+  } catch {
+    return null
+  }
 }
 
 /** 轮询 health 接口，等待 ASR 服务就绪 */
@@ -76,9 +103,18 @@ export async function startASRService(): Promise<boolean> {
 
   console.log('[ASR Service] Starting:', binaryPath)
 
+  const ffmpegPath = getFfmpegBinaryPath('ffmpeg')
+  const ffprobePath = getFfmpegBinaryPath('ffprobe')
+  console.log('[ASR Service] FFmpeg paths:', { ffmpegPath, ffprobePath })
+
   asrProcess = spawn(binaryPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com' },
+    env: {
+      ...process.env,
+      HF_ENDPOINT: 'https://hf-mirror.com',
+      ...(ffmpegPath ? { FFMPEG_PATH: ffmpegPath } : {}),
+      ...(ffprobePath ? { FFPROBE_PATH: ffprobePath } : {}),
+    },
     detached: false,
   })
 
