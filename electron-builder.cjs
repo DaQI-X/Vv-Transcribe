@@ -10,9 +10,12 @@ const config = {
   productName: 'Vv Transcribe',
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   mac: {
-    target: ['dmg', 'zip'],
+    target: ['dmg'],
     icon: 'src/assets/mac/logo_1024.png',
     category: 'public.app-category.productivity',
+  },
+  dmg: {
+    writeUpdateInfo: false,
   },
   win: {
     target: ['nsis', 'zip'],
@@ -30,7 +33,6 @@ const config = {
     '!dist/mac-arm64/**',
     '!dist/mac-x64/**',
     '!dist/*.dmg',
-    '!dist/*.zip',
     '!dist/*.blockmap',
     '!dist/builder-debug.yml',
     '!dist/latest-mac.yml',

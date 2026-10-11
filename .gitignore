@@ -22,6 +22,7 @@ python-asr/__pycache__/
 
 # Build output
 build-output/
+release/
 
 # Misc
 Vv-Transcribe/
