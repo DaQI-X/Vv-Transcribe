@@ -11,7 +11,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('venv/lib/python3.14/site-packages/faster_whisper/assets', 'faster_whisper/assets'),
+    ],
     hiddenimports=[
         'faster_whisper',
         'ctranslate2',
