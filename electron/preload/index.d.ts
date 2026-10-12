@@ -19,6 +19,14 @@ export interface ExtractAudioResult {
   error?: string
 }
 
+export interface DownloadFromUrlResult {
+  success: boolean
+  filePath?: string
+  tempDir?: string
+  title?: string
+  error?: string
+}
+
 export interface ProbeAudioResult {
   success: boolean
   metadata?: {
@@ -37,6 +45,9 @@ export interface ElectronAPI {
   extractAudio: (filePath: string) => Promise<ExtractAudioResult>
   cleanupTemp: (tempDir: string) => Promise<void>
   probeAudio: (filePath: string) => Promise<ProbeAudioResult>
+  downloadFromUrl: (url: string) => Promise<DownloadFromUrlResult>
+  selectTextFile: () => Promise<string | null>
+  readTextFile: (filePath: string) => Promise<string | null>
 
   startTranscription: (
     filePath: string,
@@ -61,6 +72,19 @@ export interface ElectronAPI {
     text: string,
     options: unknown,
   ) => Promise<{ corrected: string; changes: string[] }>
+  explainDifferences: (
+    differences: Array<{ original: string; corrected: string; context: string }>,
+  ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
+  analyzeReference: (
+    referenceText: string,
+  ) => Promise<Array<{
+    text: string
+    suggestion?: string
+    explanation: string
+    dictionaryHint?: string
+    refStart: number
+    refEnd: number
+  }>>
 
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
   lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>

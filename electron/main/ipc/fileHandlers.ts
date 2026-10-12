@@ -7,6 +7,8 @@ import { ipcMain, dialog } from 'electron'
 import { stat } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { extractAudio, cleanupTemp, probeFile } from '../services/audioProcessor'
+import { downloadFromUrl } from '../services/urlDownloader'
+import { extractTextFromFile } from '../services/referenceParser'
 import { logger } from '../services/logger'
 
 const ALLOWED_EXTENSIONS = [
@@ -97,6 +99,53 @@ export function registerFileHandlers() {
         success: false,
         error: err instanceof Error ? err.message : '无法读取音频信息',
       }
+    }
+  })
+
+  ipcMain.handle('file:downloadFromUrl', async (_event, url: string) => {
+    logger.userAction('Download from URL started', { url })
+    try {
+      const result = await downloadFromUrl(url)
+      if (result.success) {
+        logger.userAction('Download from URL completed', { filePath: result.filePath, title: result.title })
+      } else {
+        logger.serviceError('FileHandlers', 'downloadFromUrl', new Error(result.error))
+      }
+      return result
+    } catch (err) {
+      logger.serviceError('FileHandlers', 'downloadFromUrl', err)
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : '下载失败',
+      }
+    }
+  })
+
+  ipcMain.handle('dialog:selectTextFile', async () => {
+    logger.userAction('Select text file dialog opened')
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [
+        { name: '参考文稿', extensions: ['txt', 'md', 'srt', 'docx', 'pdf'] },
+      ],
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      logger.userAction('Text file selection cancelled')
+      return null
+    }
+    logger.userAction('Text file selected', { path: result.filePaths[0] })
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('file:readTextFile', async (_event, filePath: string) => {
+    logger.serviceCall('FileHandlers', 'readTextFile', { filePath })
+    try {
+      const content = await extractTextFromFile(filePath)
+      logger.info('FileHandlers', 'Text file read', { filePath, size: content?.length ?? 0 })
+      return content
+    } catch (err) {
+      logger.serviceError('FileHandlers', 'readTextFile', err)
+      return null
     }
   })
 }

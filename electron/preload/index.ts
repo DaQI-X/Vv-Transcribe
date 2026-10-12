@@ -16,6 +16,12 @@ const api = {
     ipcRenderer.invoke('file:cleanupTemp', tempDir),
   probeAudio: (filePath: string) =>
     ipcRenderer.invoke('file:probeAudio', filePath),
+  downloadFromUrl: (url: string) =>
+    ipcRenderer.invoke('file:downloadFromUrl', url),
+  selectTextFile: () =>
+    ipcRenderer.invoke('dialog:selectTextFile'),
+  readTextFile: (filePath: string) =>
+    ipcRenderer.invoke('file:readTextFile', filePath),
 
   startTranscription: (filePath: string, options: unknown) =>
     ipcRenderer.invoke('asr:start', filePath, options),
@@ -37,6 +43,10 @@ const api = {
 
   correctText: (text: string, options: unknown) =>
     ipcRenderer.invoke('ai:correct', text, options),
+  explainDifferences: (differences: unknown[]) =>
+    ipcRenderer.invoke('ai:explainDifferences', differences),
+  analyzeReference: (referenceText: string) =>
+    ipcRenderer.invoke('ai:analyzeReference', referenceText),
 
   lookupWord: (word: string) =>
     ipcRenderer.invoke('dictionary:lookup', word),

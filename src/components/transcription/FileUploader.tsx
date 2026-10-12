@@ -1,20 +1,26 @@
 /**
  * 文件上传组件
- * 支持点击选择和拖拽上传两种方式
- * 选择文件后自动触发转写流程：获取元数据 → 启动 ASR 转写 → 监听进度回调
+ * 支持两种输入方式：本地文件上传（点击/拖拽）和 视频链接转写
+ * Tab 切换两种模式，选择文件/输入链接后自动触发转写流程
  */
 import { useState, useCallback, useEffect } from 'react'
-import { UploadOutlined } from '@ant-design/icons'
+import { UploadOutlined, LinkOutlined, CopyOutlined, LoadingOutlined } from '@ant-design/icons'
+import { message } from 'antd'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { frontendLogger } from '@/utils/logger'
+
+type UploadMode = 'file' | 'url'
 
 export function FileUploader() {
   const { setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
+  const [mode, setMode] = useState<UploadMode>('file')
+  const [urlInput, setUrlInput] = useState('')
+  const [downloading, setDownloading] = useState(false)
+  const [downloadStatus, setDownloadStatus] = useState('')
 
-  // 初始化前端日志 API
   useEffect(() => {
     if (api) {
       frontendLogger.setAPI(api)
@@ -147,28 +153,122 @@ export function FileUploader() {
     await startTranscriptionProcess(metadata.path, metadata.name, metadata.size)
   }, [api, startTranscriptionProcess])
 
+  const handlePasteUrl = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      setUrlInput(text)
+    } catch {
+      frontendLogger.warn('FileUploader', 'Failed to read clipboard')
+    }
+  }, [])
+
+  const handleSubmitUrl = useCallback(async () => {
+    const url = urlInput.trim()
+    if (!url || !api) return
+    frontendLogger.userAction('URL transcription submitted', { url })
+
+    setDownloading(true)
+    setDownloadStatus('正在解析链接...')
+
+    try {
+      const result = await api.downloadFromUrl(url)
+      if (!result.success) {
+        frontendLogger.error('FileUploader', 'Download failed', result.error)
+        message.error(result.error || '链接解析失败，请重试')
+        setDownloading(false)
+        setDownloadStatus('')
+        return
+      }
+
+      setDownloadStatus('正在获取文件信息...')
+      const metadata = await api.getFileMetadata(result.filePath!)
+      if (!metadata) {
+        message.error('无法获取下载文件信息')
+        setDownloading(false)
+        setDownloadStatus('')
+        return
+      }
+
+      setDownloadStatus('')
+      setDownloading(false)
+      frontendLogger.info('FileUploader', 'Download completed', { title: result.title, path: result.filePath })
+
+      await startTranscriptionProcess(metadata.path, result.title || metadata.name, metadata.size)
+    } catch (err) {
+      frontendLogger.error('FileUploader', 'URL download error', err instanceof Error ? err.message : '下载失败')
+      message.error('链接解析失败，请重试')
+      setDownloading(false)
+      setDownloadStatus('')
+    }
+  }, [urlInput, api, startTranscriptionProcess])
+
   return (
     <div className="upload_zone">
-      <div
-        className={`upload-zone ${isDragging ? 'dragging' : ''}`}
-        onClick={handleSelectFile}
-        onDragEnter={handleDragEnter}
-        onDragLeave={handleDragLeave}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      >
-        <div className="upload-icon-circle">
+      <div className="upload-tabs">
+        <button
+          className={`upload-tab ${mode === 'file' ? 'active' : ''}`}
+          onClick={() => setMode('file')}
+        >
           <UploadOutlined />
-        </div>
-
-        <div className="upload-title">
-          {isDragging ? '释放以上传文件' : '点击或拖拽上传音视频文件'}
-        </div>
-
-        <div className="upload-subtitle">
-          支持 MP4, MP3, WAV, M4A 等常见格式
-        </div>
+          <span>本地文件</span>
+        </button>
+        <button
+          className={`upload-tab ${mode === 'url' ? 'active' : ''}`}
+          onClick={() => setMode('url')}
+        >
+          <LinkOutlined />
+          <span>视频链接</span>
+        </button>
       </div>
+
+      {mode === 'file' ? (
+        <div
+          className={`upload-zone ${isDragging ? 'dragging' : ''}`}
+          onClick={handleSelectFile}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
+          <div className="upload-icon-circle">
+            <UploadOutlined />
+          </div>
+          <div className="upload-title">
+            {isDragging ? '释放以上传文件' : '点击或拖拽上传音视频文件'}
+          </div>
+          <div className="upload-subtitle">
+            支持 MP4, MP3, WAV, M4A 等常见格式
+          </div>
+        </div>
+      ) : (
+        <div className="url-input-zone">
+          <div className="upload-icon-circle">
+            <LinkOutlined />
+          </div>
+          <div className="upload-title">粘贴视频/音频链接</div>
+          <div className="url-input-row">
+            <input
+              className="url-input"
+              type="text"
+              placeholder="支持 YouTube, Bilibili, 抖音等公开视频链接"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !downloading && handleSubmitUrl()}
+              disabled={downloading}
+            />
+            <button className="url-paste-btn" onClick={handlePasteUrl} title="粘贴" disabled={downloading}>
+              <CopyOutlined />
+            </button>
+          </div>
+          <button
+            className="url-submit-btn"
+            disabled={!urlInput.trim() || downloading}
+            onClick={handleSubmitUrl}
+          >
+            {downloading ? <><LoadingOutlined spin /> {downloadStatus || '下载中...'}</> : '开始转写'}
+          </button>
+        </div>
+      )}
 
       <div className="feature_highlights">
         <span className="feature_highlights_text">

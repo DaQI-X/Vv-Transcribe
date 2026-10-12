@@ -55,12 +55,16 @@ class Logger {
 
     // 同时输出到控制台和文件
     const prefix = `[${level}][${module}]`
-    if (level === 'ERROR') {
-      console.error(prefix, message, data || '')
-    } else if (level === 'WARN') {
-      console.warn(prefix, message, data || '')
-    } else {
-      console.log(prefix, message, data || '')
+    try {
+      if (level === 'ERROR') {
+        console.error(prefix, message, data || '')
+      } else if (level === 'WARN') {
+        console.warn(prefix, message, data || '')
+      } else {
+        console.log(prefix, message, data || '')
+      }
+    } catch {
+      // EPIPE: stdout pipe broken (e.g. dev server restarted)
     }
 
     try {

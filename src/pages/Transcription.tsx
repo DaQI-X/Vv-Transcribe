@@ -14,6 +14,7 @@ import { AudioPlayer } from '@/components/transcription/AudioPlayer'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
+import { useReferenceStore } from '@/stores/useReferenceStore'
 import logoImg from '@/assets/public/header_logo.png'
 
 const { Text } = Typography
@@ -36,7 +37,7 @@ export function Transcription() {
   return (
     <div>
       <header className="harder_top">
-        <div onClick={() => { reset(); usePlayerStore.getState().reset(); navigate('/') }} style={{ cursor: hasFile ? 'pointer' : 'default' }}>
+        <div onClick={() => { reset(); usePlayerStore.getState().reset(); useReferenceStore.getState().clearReference(); navigate('/') }} style={{ cursor: hasFile ? 'pointer' : 'default' }}>
           <img src={logoImg} alt="Vv Transcribe" className="header_logo" />
         </div>
         <div className="header_settings">
