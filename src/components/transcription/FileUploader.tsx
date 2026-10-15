@@ -217,7 +217,7 @@ export function FileUploader() {
           onClick={() => setMode('url')}
         >
           <LinkOutlined />
-          <span>视频链接</span>
+          <span>音视频链接</span>
         </button>
       </div>
 
@@ -245,7 +245,7 @@ export function FileUploader() {
           <div className="upload-icon-circle">
             <LinkOutlined />
           </div>
-          <div className="upload-title">粘贴视频/音频链接</div>
+          <div className="upload-title">粘贴音频/视频链接</div>
           <div className="url-input-row">
             <input
               className="url-input"
