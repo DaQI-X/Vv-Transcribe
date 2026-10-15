@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { app } from 'electron'
 import { logger } from './logger'
 import { fetchCookiesFromUrl, cleanupBrowserTemp } from './browserCookieFetcher'
 
@@ -19,6 +20,37 @@ export interface DownloadResult {
   tempDir?: string
   title?: string
   error?: string
+}
+
+/** 获取 ffmpeg 二进制路径（适配打包环境） */
+function getFfmpegPath(): string | null {
+  const isPackaged = process.env.NODE_ENV === 'production' || app.isPackaged
+  const platform = process.platform
+  const arch = process.arch
+
+  if (isPackaged) {
+    const unpackedPath = join(
+      process.resourcesPath || '',
+      'app.asar.unpacked',
+      'node_modules',
+      '@ffmpeg-installer',
+      `${platform}-${arch}`,
+      platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+    )
+    if (existsSync(unpackedPath)) {
+      logger.info('UrlDownloader', 'Found bundled ffmpeg', { path: unpackedPath })
+      return unpackedPath
+    }
+  }
+
+  try {
+    const resolved = require.resolve(`@ffmpeg-installer/${platform}-${arch}/${platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'}`)
+    logger.info('UrlDownloader', 'Resolved ffmpeg path', { path: resolved })
+    return resolved
+  } catch {
+    logger.warn('UrlDownloader', 'ffmpeg not found, yt-dlp postprocessing will fail')
+    return null
+  }
 }
 
 /** 查找 yt-dlp 可执行文件路径 */
@@ -58,6 +90,7 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
 
   const ytDlpPath = getYtDlpPath()
   const outputPath = join(tempDir, '%(title)s.%(ext)s')
+  const ffmpegPath = getFfmpegPath()
 
   const origin = new URL(url).origin
   const isDomestic = /\.(bilibili|douyin|tiktok|xinpianchang|youku|iqiyi|qq|kuaishou|weibo)\.com|b23\.tv/i.test(url)
@@ -68,6 +101,7 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
     '--referer', origin,
     '--retries', '3',
     ...(isDomestic ? ['--proxy', ''] : []),
+    ...(ffmpegPath ? ['--ffmpeg-location', ffmpegPath] : []),
     '-f', 'bestaudio[ext=m4a]/bestaudio/best',
     '--extract-audio',
     '--audio-format', 'mp3',
