@@ -148,4 +148,18 @@ export function registerFileHandlers() {
       return null
     }
   })
+
+  ipcMain.handle('app:openLogDirectory', async () => {
+    const { app, shell } = require('electron')
+    const { join } = require('path')
+    const logDir = join(app.getPath('userData'), 'logs')
+    logger.userAction('Opening log directory', { path: logDir })
+    try {
+      await shell.openPath(logDir)
+      return { success: true }
+    } catch (err) {
+      logger.serviceError('FileHandlers', 'openLogDirectory', err as Error)
+      return { success: false, error: (err as Error).message }
+    }
+  })
 }

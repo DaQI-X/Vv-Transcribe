@@ -97,6 +97,8 @@ export interface ElectronAPI {
 
   getServiceReady: () => Promise<{ ready: boolean; error: string | null }>
 
+  openLogDirectory: () => Promise<{ success: boolean; error?: string }>
+
   log: (entry: Record<string, unknown>) => Promise<void>
 }
 

@@ -66,6 +66,9 @@ const api = {
   getServiceReady: () =>
     ipcRenderer.invoke('app:getServiceReady'),
 
+  openLogDirectory: () =>
+    ipcRenderer.invoke('app:openLogDirectory'),
+
   log: (entry: unknown) =>
     ipcRenderer.invoke('app:log', entry),
 }
