@@ -3,16 +3,13 @@
  * 使用系统 Chrome/Edge 以无头模式访问目标 URL，通过 JS 验证后导出 cookies
  * 不读取用户浏览器数据，零隐私风险，无弹窗
  */
-import PuppeteerExtra from 'puppeteer-extra'
-import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+import puppeteer from 'puppeteer-core'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { logger } from './logger'
-
-PuppeteerExtra.use(StealthPlugin())
 
 const NAVIGATION_TIMEOUT = 20_000
 const POST_NAVIGATION_WAIT = 10_000
@@ -99,12 +96,12 @@ export async function fetchCookiesFromUrl(url: string): Promise<CookieFetchResul
   await mkdir(tempDir, { recursive: true })
   const cookiesPath = join(tempDir, 'cookies.txt')
 
-  let browser: Awaited<ReturnType<typeof PuppeteerExtra.launch>> | null = null
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null
 
   try {
-    browser = await PuppeteerExtra.launch({
+    browser = await puppeteer.launch({
       executablePath: browserPath,
-      headless: 'new',
+      headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
