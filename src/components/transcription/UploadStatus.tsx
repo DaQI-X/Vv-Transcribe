@@ -49,21 +49,30 @@ function ProcessingView({ fileName, progress }: { fileName: string | null; progr
         </div>
 
         <div className="processing-waveform">
-          {Array.from({ length: 40 }, (_, i) => {
-            const height = 20 + Math.sin(i * 0.5) * 15 + Math.random() * 10
-            const isTeal = i % 3 === 0
-            return (
-              <div
-                key={i}
-                className="waveform-bar"
-                style={{
-                  height: `${height}px`,
-                  backgroundColor: isTeal ? '#2EE6D6' : '#2F80ED',
-                  animationDelay: `${i * 0.05}s`,
-                }}
-              />
-            )
-          })}
+          <svg className="waveform-svg" viewBox="0 0 400 80" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="#2EE6D6" />
+                <stop offset="50%" stopColor="#2F80ED" />
+                <stop offset="100%" stopColor="#2EE6D6" />
+              </linearGradient>
+            </defs>
+            <path
+              className="waveform-path waveform-path--back"
+              d="M0,40 C50,20 100,60 150,40 C200,20 250,60 300,40 C350,20 400,60 400,40"
+              fill="none"
+              stroke="url(#waveGradient)"
+              strokeWidth="2"
+              opacity="0.3"
+            />
+            <path
+              className="waveform-path waveform-path--front"
+              d="M0,40 C50,60 100,20 150,40 C200,60 250,20 300,40 C350,60 400,20 400,40"
+              fill="none"
+              stroke="url(#waveGradient)"
+              strokeWidth="3"
+            />
+          </svg>
         </div>
 
         <div className="processing-text">
