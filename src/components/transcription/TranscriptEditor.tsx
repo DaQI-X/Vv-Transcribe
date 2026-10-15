@@ -19,6 +19,7 @@ import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
 import { compareWithReference } from '@/utils/referenceComparator'
 import { computeSegmentDiff } from '@/utils/segmentDiff'
 import { alignReferenceToSegments } from '@/utils/textAlignment'
+import { alignCorrectedToSegments } from '@/utils/correctedTextAlignment'
 import type { ExportFormat } from '@/types/transcription'
 import type { SegmentDiff, DiffExplanation, ReferenceIssue } from '@/types/reference'
 
@@ -154,7 +155,7 @@ export function TranscriptEditor() {
     const waitingTimer = setInterval(() => {
       message.info(waitingMessages[waitingIndex % waitingMessages.length], 1.5)
       waitingIndex++
-    }, 10000)
+    }, 15000)
 
     try {
       if (referenceText) {
@@ -192,17 +193,18 @@ export function TranscriptEditor() {
         }
       } else {
         setStatus('comparing')
-        const fullText = segments.map((s) => s.text).join('\n')
+        const fullText = segments.map((s) => s.text).join('')
         const result = await api.correctText(fullText, { language: 'zh' })
 
-        if (result.corrected === fullText) {
+        if (!result.corrected || result.corrected.trim() === fullText) {
           setStatus('idle')
           message.info('未发现需要纠正的内容')
           setLoading(false)
           return
         }
 
-        const correctedLines = result.corrected.split('\n')
+        // 使用文本对齐将纠错后的文本映射回各个段落
+        const correctedLines = alignCorrectedToSegments(segments, result.corrected)
         const diffs = new Map<string, SegmentDiff>()
 
         segments.forEach((seg, idx) => {
