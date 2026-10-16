@@ -1,70 +1,81 @@
 /**
  * 转写主页面
  * 根据文件状态切换三种视图：上传区 → 处理状态 → 结果展示（播放器 + 编辑器）
- * 顶部导航包含 Logo（点击重置）和设置下拉菜单（转写配置 / 纠错配置）
+ * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 纠错配置）
  */
-import { useState, useRef } from 'react'
-import { SettingOutlined } from '@ant-design/icons'
+import { useState, useRef, useCallback } from 'react'
+import { Settings, ArrowLeft } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Dropdown, message } from 'antd'
 import { FileUploader } from '@/components/transcription/FileUploader'
 import { UploadStatus } from '@/components/transcription/UploadStatus'
 import { TranscriptEditor } from '@/components/transcription/TranscriptEditor'
 import { AudioPlayer } from '@/components/transcription/AudioPlayer'
 import { SettingsModal } from '@/components/settings/SettingsModal'
+import { ToastContainer, toast } from '@/components/ui/Toast'
+import { Dropdown } from '@/components/ui/Dropdown'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
-import logoImg from '@/assets/public/header_logo.png'
-
-const { Text } = Typography
+import logoIcon from '@/assets/mac/logo_1024.png'
 
 const SETTINGS_MENU = [
   { key: 'asr', label: '转写配置' },
   { key: 'ai', label: '纠错配置' },
+  { key: 'theme', label: '主题' },
 ]
 
 export function Transcription() {
   const navigate = useNavigate()
   const [settingsTab, setSettingsTab] = useState<string | null>(null)
   const { fileName, status, reset } = useTranscriptionStore()
-  
-  // 调试后门：连续点击版本号 8 次打开日志目录
+
   const clickCountRef = useRef(0)
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  
+  const headerRef = useRef<HTMLElement>(null)
+
   const handleVersionClick = async () => {
     clickCountRef.current += 1
-    
-    // 清除之前的定时器
+
     if (clickTimerRef.current) {
       clearTimeout(clickTimerRef.current)
     }
-    
-    // 设置新的定时器，2 秒后重置计数
+
     clickTimerRef.current = setTimeout(() => {
       clickCountRef.current = 0
     }, 2000)
-    
-    // 达到 8 次点击，打开日志目录
+
     if (clickCountRef.current >= 8) {
       clickCountRef.current = 0
       if (clickTimerRef.current) {
         clearTimeout(clickTimerRef.current)
       }
-      
+
       const api = getElectronAPI()
       if (api) {
         const result = await api.openLogDirectory()
         if (result.success) {
-          message.success('已打开日志目录')
+          toast.success('已打开日志目录')
         } else {
-          message.error(`打开日志目录失败: ${result.error}`)
+          toast.error(`打开日志目录失败: ${result.error}`)
         }
       }
     }
   }
+
+  const handleHeaderDoubleClick = useCallback(() => {
+    const api = getElectronAPI()
+    if (api?.toggleWindowMaximize) {
+      api.toggleWindowMaximize()
+    }
+  }, [])
+
+  const handleGoHome = useCallback(() => {
+    reset()
+    usePlayerStore.getState().reset()
+    useReferenceStore.getState().clearReference()
+    navigate('/')
+  }, [navigate, reset])
 
   const hasFile = !!fileName
   const isCompleted = status === 'completed'
@@ -73,16 +84,23 @@ export function Transcription() {
 
   return (
     <div>
-      <header className="harder_top">
-        <div onClick={() => { reset(); usePlayerStore.getState().reset(); useReferenceStore.getState().clearReference(); navigate('/') }} style={{ cursor: hasFile ? 'pointer' : 'default' }}>
-          <img src={logoImg} alt="Vv Transcribe" className="header_logo" />
+      <header
+        ref={headerRef}
+        className="harder_top"
+        onDoubleClick={handleHeaderDoubleClick}
+      >
+        <div className="header_brand">
+          <img src={logoIcon} alt="Vv Transcribe" className="header_logo_icon" />
+          <span className="header_app_name">Vv Transcribe</span>
         </div>
-        <div className="header_settings">
-          <Dropdown menu={{ items: SETTINGS_MENU.map((item) => ({ key: item.key, label: item.label, onClick: () => setSettingsTab(item.key) })) }}>
-            <button>
-              <SettingOutlined />
-            </button>
-          </Dropdown>
+        <div className="header_actions">
+          <div className="header_settings">
+            <Dropdown items={SETTINGS_MENU.map((item) => ({ key: item.key, label: item.label, onClick: () => setSettingsTab(item.key) }))}>
+              <button>
+                <Settings size={16} />
+              </button>
+            </Dropdown>
+          </div>
         </div>
       </header>
 
@@ -97,23 +115,24 @@ export function Transcription() {
               <AudioPlayer />
             </div>
             <div className="result-layout__editor">
-              <TranscriptEditor />
+              <TranscriptEditor onGoHome={handleGoHome} />
             </div>
           </div>
         ) : null}
       </main>
 
       <div className="version_footer">
-        <Text 
-          className="version_footer_text" 
+        <span
+          className="version_footer_text"
           onClick={handleVersionClick}
           style={{ cursor: 'pointer', userSelect: 'none' }}
         >
           Vv Transcribe v1.0.0
-        </Text>
+        </span>
       </div>
 
       <SettingsModal tab={settingsTab} onClose={() => setSettingsTab(null)} />
+      <ToastContainer />
     </div>
   )
 }

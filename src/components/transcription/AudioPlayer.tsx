@@ -5,7 +5,7 @@
  * 通过 file:// 协议加载本地文件（依赖 webSecurity: false）
  */
 import { useRef, useEffect, useCallback } from 'react'
-import { PlayCircleFilled, PauseCircleFilled, SoundOutlined } from '@ant-design/icons'
+import { Play, Pause, Volume2 } from 'lucide-react'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 
@@ -23,10 +23,10 @@ function WaveformDisplay({ currentTime, duration }: { currentTime: number; durat
     return (
       <div
         key={i}
-        className="waveform-display__bar"
+        className={`waveform-display__bar ${isPlayed ? 'active' : ''}`}
         style={{
           height: `${height}px`,
-          backgroundColor: isPlayed ? '#2F80ED' : '#E4E8EE',
+          backgroundColor: isPlayed ? '#1b55f5' : '#E4E8EE',
         }}
       />
     )
@@ -186,7 +186,7 @@ export function AudioPlayer() {
 
       <div className="audio-player__header">
         <div className="audio-player__icon">
-          <SoundOutlined />
+          <Volume2 size={18} />
         </div>
         <div className="audio-player__file-info">
           <span className="audio-player__file-name">{fileName}</span>
@@ -218,7 +218,7 @@ export function AudioPlayer() {
 
       <div className="audio-controls">
         <button onClick={togglePlay} className="audio-controls__play">
-          {isPlaying ? <PauseCircleFilled /> : <PlayCircleFilled />}
+          {isPlaying ? <Pause size={30} /> : <Play size={30} />}
         </button>
       </div>
 

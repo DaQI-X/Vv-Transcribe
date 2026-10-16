@@ -5,9 +5,11 @@
  * - 纠错配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
  * 设置通过 IPC 持久化到 userData/settings.json
  */
-import { Modal, Form, Input, Select, message } from 'antd'
 import { useState, useEffect, useCallback } from 'react'
+import { X, Eye, EyeOff, Sun, Moon } from 'lucide-react'
+import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
+import { useThemeStore } from '@/stores/useThemeStore'
 
 interface SettingsValues {
   asrProvider: string; asrApiKey: string; asrApiBase: string; asrModel: string
@@ -22,6 +24,7 @@ const DEFAULT_VALUES: SettingsValues = {
 const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
   ai: '纠错配置',
+  theme: '主题',
 }
 
 interface SettingsModalProps {
@@ -29,14 +32,72 @@ interface SettingsModalProps {
   onClose: () => void
 }
 
+function PasswordInput({ value, onChange, placeholder, disabled }: {
+  value: string; onChange: (v: string) => void; placeholder?: string; disabled?: boolean
+}) {
+  const [visible, setVisible] = useState(false)
+
+  return (
+    <div className="settings-form-password-wrapper">
+      <input
+        className="settings-form-input"
+        type={visible ? 'text' : 'password'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+      />
+      <button
+        type="button"
+        className="settings-form-password-toggle"
+        onClick={() => setVisible(!visible)}
+        tabIndex={-1}
+      >
+        {visible ? <EyeOff size={14} /> : <Eye size={14} />}
+      </button>
+    </div>
+  )
+}
+
+function ThemeSettings({ theme, onChange }: { theme: string; onChange: (theme: string) => void }) {
+  return (
+    <>
+      <div className="settings-form-group">
+        <label className="settings-form-label">主题模式</label>
+        <div className="theme-selector">
+          <button
+            className={`theme-option ${theme === 'light' ? 'theme-option--active' : ''}`}
+            onClick={() => onChange('light')}
+          >
+            <Sun size={20} />
+            <span>亮色</span>
+          </button>
+          <button
+            className={`theme-option ${theme === 'dark' ? 'theme-option--active' : ''}`}
+            onClick={() => onChange('dark')}
+          >
+            <Moon size={20} />
+            <span>暗色</span>
+          </button>
+        </div>
+        <span className="settings-form-hint">选择应用的主题</span>
+      </div>
+    </>
+  )
+}
+
 export function SettingsModal({ tab, onClose }: SettingsModalProps) {
-  const [form] = Form.useForm<SettingsValues>()
+  const [values, setValues] = useState<SettingsValues>(DEFAULT_VALUES)
   const [saving, setSaving] = useState(false)
   const [dictVersion, setDictVersion] = useState('')
   const [dictUpdating, setDictUpdating] = useState(false)
+  const [themeValue, setThemeValue] = useState<string>('light')
   const api = getElectronAPI()
-  const asrProvider = Form.useWatch('asrProvider', form)
-  const isCloudASR = asrProvider === 'cloud'
+  const { setTheme } = useThemeStore()
+
+  const updateField = (field: keyof SettingsValues, value: string) => {
+    setValues((prev) => ({ ...prev, [field]: value }))
+  }
 
   const loadDictVersion = useCallback(async () => {
     if (!api) return
@@ -49,26 +110,33 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   useEffect(() => {
     if (!tab) return
     ;(async () => {
-      if (!api) { form.setFieldsValue(DEFAULT_VALUES); return }
+      if (!api) { setValues(DEFAULT_VALUES); return }
       try {
         const saved = await api.getSettings()
-        form.setFieldsValue((saved && Object.keys(saved).length > 0 ? saved : DEFAULT_VALUES) as SettingsValues)
+        setValues((saved && Object.keys(saved).length > 0 ? { ...DEFAULT_VALUES, ...saved } : DEFAULT_VALUES) as SettingsValues)
       } catch {
-        form.setFieldsValue(DEFAULT_VALUES)
+        setValues(DEFAULT_VALUES)
       }
       if (tab === 'ai') loadDictVersion()
+      if (tab === 'theme') {
+        const currentTheme = useThemeStore.getState().theme
+        setThemeValue(currentTheme)
+      }
     })()
-  }, [tab, form, api, loadDictVersion])
+  }, [tab, api, loadDictVersion])
 
   const handleSave = async () => {
     if (!api) return
     setSaving(true)
     try {
-      await api.saveSettings(form.getFieldsValue() as unknown as Record<string, unknown>)
-      message.success('设置已保存')
+      await api.saveSettings(values as unknown as Record<string, unknown>)
+      if (tab === 'theme') {
+        setTheme(themeValue as 'light' | 'dark')
+      }
+      toast.success('设置已保存')
       onClose()
     } catch {
-      message.error('保存失败')
+      toast.error('保存失败')
     } finally {
       setSaving(false)
     }
@@ -80,80 +148,129 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     try {
       const result = await api.checkDictionaryUpdate()
       if (!result.hasUpdate) {
-        message.info('词库已是最新版本')
+        toast.info('词库已是最新版本')
         return
       }
-      message.loading({ content: '正在下载词库更新...', key: 'dict-update', duration: 0 })
+      toast.loading('正在下载词库更新...')
       const download = await api.downloadDictionaryUpdate()
       if (download.success) {
-        message.success({ content: '词库更新成功', key: 'dict-update' })
+        toast.success('词库更新成功')
         await loadDictVersion()
       } else {
-        message.error({ content: `词库更新失败：${download.error}`, key: 'dict-update' })
+        toast.error(`词库更新失败：${download.error}`)
       }
     } catch {
-      message.error('检查词库更新失败')
+      toast.error('检查词库更新失败')
     } finally {
       setDictUpdating(false)
     }
   }
 
-  return (
-    <Modal
-      open={!!tab}
-      onCancel={onClose}
-      title={null}
-      footer={null}
-      width={480}
-      className="settings-modal"
-      centered
-    >
-      <div className="settings-modal__header">
-        <span className="settings-modal__title">{tab ? TAB_TITLES[tab] : ''}</span>
-      </div>
+  if (!tab) return null
 
-      <div className="settings-modal__body">
-        <Form form={form} layout="vertical" className="settings-modal__form">
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-modal__header">
+          <span className="settings-modal__title">{TAB_TITLES[tab]}</span>
+          <button className="settings-modal__close" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="settings-modal__body">
           {tab === 'asr' && (
             <>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>转写模式</span>} name="asrProvider">
-                <Select options={[
-                  { value: 'local', label: '本地转写（默认）' },
-                  { value: 'cloud', label: '云端优先（需配置 API Key）' },
-                ]} />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>API Base URL</span>} name="asrApiBase" extra={<span style={{ fontSize: 10, color: '#9AA5B8' }}>云端转写接口地址</span>}>
-                <Input placeholder="https://api.openai.com" disabled={!isCloudASR} />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>API Key</span>} name="asrApiKey" extra={<span style={{ fontSize: 10, color: '#9AA5B8' }}>云端转写的 API 密钥，留空则使用本地转写</span>}>
-                <Input.Password placeholder="sk-..." disabled={!isCloudASR} />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>模型</span>} name="asrModel">
-                <Input placeholder="whisper-1" disabled={!isCloudASR} />
-              </Form.Item>
+              <div className="settings-form-group">
+                <label className="settings-form-label">转写模式</label>
+                <select
+                  className="settings-form-select"
+                  value={values.asrProvider}
+                  onChange={(e) => updateField('asrProvider', e.target.value)}
+                >
+                  <option value="local">本地转写（默认）</option>
+                  <option value="cloud">云端优先（需配置 API Key）</option>
+                </select>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">API Base URL</label>
+                <input
+                  className="settings-form-input"
+                  value={values.asrApiBase}
+                  onChange={(e) => updateField('asrApiBase', e.target.value)}
+                  placeholder="https://api.openai.com"
+                  disabled={values.asrProvider !== 'cloud'}
+                />
+                <span className="settings-form-hint">云端转写接口地址</span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">API Key</label>
+                <PasswordInput
+                  value={values.asrApiKey}
+                  onChange={(v) => updateField('asrApiKey', v)}
+                  placeholder="sk-..."
+                  disabled={values.asrProvider !== 'cloud'}
+                />
+                <span className="settings-form-hint">云端转写的 API 密钥，留空则使用本地转写</span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">模型</label>
+                <input
+                  className="settings-form-input"
+                  value={values.asrModel}
+                  onChange={(e) => updateField('asrModel', e.target.value)}
+                  placeholder="whisper-1"
+                  disabled={values.asrProvider !== 'cloud'}
+                />
+              </div>
             </>
           )}
 
           {tab === 'ai' && (
             <>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>服务商</span>} name="aiProvider">
-                <Select options={[
-                  { value: 'openai', label: 'OpenAI' },
-                  { value: 'deepseek', label: 'DeepSeek' },
-                  { value: 'qwen', label: '通义千问' },
-                  { value: 'custom', label: '自定义兼容接口' },
-                ]} />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>API Base URL</span>} name="aiApiBase" extra={<span style={{ fontSize: 10, color: '#9AA5B8' }}>OpenAI / DeepSeek / 通义千问兼容地址</span>}>
-                <Input placeholder="https://api.openai.com" />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>API Key</span>} name="aiApiKey" extra={<span style={{ fontSize: 10, color: '#9AA5B8' }}>用于认证 AI 服务的密钥</span>}>
-                <Input.Password placeholder="sk-..." />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>模型</span>} name="aiModel">
-                <Input placeholder="gpt-4o-mini" />
-              </Form.Item>
-              <Form.Item label={<span style={{ fontSize: 12, color: '#5A6A85' }}>本地词典</span>}>
+              <div className="settings-form-group">
+                <label className="settings-form-label">服务商</label>
+                <select
+                  className="settings-form-select"
+                  value={values.aiProvider}
+                  onChange={(e) => updateField('aiProvider', e.target.value)}
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="qwen">通义千问</option>
+                  <option value="custom">自定义兼容接口</option>
+                </select>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">API Base URL</label>
+                <input
+                  className="settings-form-input"
+                  value={values.aiApiBase}
+                  onChange={(e) => updateField('aiApiBase', e.target.value)}
+                  placeholder="https://api.openai.com"
+                />
+                <span className="settings-form-hint">OpenAI / DeepSeek / 通义千问兼容地址</span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">API Key</label>
+                <PasswordInput
+                  value={values.aiApiKey}
+                  onChange={(v) => updateField('aiApiKey', v)}
+                  placeholder="sk-..."
+                />
+                <span className="settings-form-hint">用于认证 AI 服务的密钥</span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">模型</label>
+                <input
+                  className="settings-form-input"
+                  value={values.aiModel}
+                  onChange={(e) => updateField('aiModel', e.target.value)}
+                  placeholder="gpt-4o-mini"
+                />
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">本地词典</label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ fontSize: 11, color: '#9AA5B8' }}>
                     {dictVersion ? `v${dictVersion}` : '未加载'}
@@ -167,18 +284,22 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     {dictUpdating ? '检查中...' : '检查更新'}
                   </button>
                 </div>
-              </Form.Item>
+              </div>
             </>
           )}
-        </Form>
-      </div>
 
-      <div className="settings-modal__footer">
-        <button onClick={onClose} className="settings-modal__cancel-btn">取消</button>
-        <button onClick={handleSave} disabled={saving} className="settings-modal__save-btn">
-          {saving ? '保存中...' : '保存设置'}
-        </button>
+          {tab === 'theme' && (
+            <ThemeSettings theme={themeValue} onChange={setThemeValue} />
+          )}
+        </div>
+
+        <div className="settings-modal__footer">
+          <button onClick={onClose} className="settings-modal__cancel-btn">取消</button>
+          <button onClick={handleSave} disabled={saving} className="settings-modal__save-btn">
+            {saving ? '保存中...' : '保存设置'}
+          </button>
+        </div>
       </div>
-    </Modal>
+    </div>
   )
 }

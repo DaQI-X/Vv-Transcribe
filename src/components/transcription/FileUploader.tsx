@@ -4,8 +4,8 @@
  * Tab 切换两种模式，选择文件/输入链接后自动触发转写流程
  */
 import { useState, useCallback, useEffect } from 'react'
-import { UploadOutlined, LinkOutlined, CopyOutlined, LoadingOutlined } from '@ant-design/icons'
-import { message } from 'antd'
+import { Upload, Link2, Copy, Loader2 } from 'lucide-react'
+import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { frontendLogger } from '@/utils/logger'
@@ -77,7 +77,7 @@ export function FileUploader() {
 
       if (!result.success) {
         frontendLogger.error('FileUploader', 'Transcription failed', (result as any).error)
-        setError((result as any).error || '转写启动失败')
+        setError((result as any).error || '转写失败')
         unsubscribe()
         setUnsubscribeProgress(null)
         return
@@ -174,7 +174,7 @@ export function FileUploader() {
       const result = await api.downloadFromUrl(url)
       if (!result.success) {
         frontendLogger.error('FileUploader', 'Download failed', result.error)
-        message.error(result.error || '链接解析失败，请重试')
+        toast.error(result.error || '链接解析失败，请重试')
         setDownloading(false)
         setDownloadStatus('')
         return
@@ -183,7 +183,7 @@ export function FileUploader() {
       setDownloadStatus('正在获取文件信息...')
       const metadata = await api.getFileMetadata(result.filePath!)
       if (!metadata) {
-        message.error('无法获取下载文件信息')
+        toast.error('无法获取下载文件信息')
         setDownloading(false)
         setDownloadStatus('')
         return
@@ -196,7 +196,7 @@ export function FileUploader() {
       await startTranscriptionProcess(metadata.path, result.title || metadata.name, metadata.size)
     } catch (err) {
       frontendLogger.error('FileUploader', 'URL download error', err instanceof Error ? err.message : '下载失败')
-      message.error('链接解析失败，请重试')
+      toast.error('链接解析失败，请重试')
       setDownloading(false)
       setDownloadStatus('')
     }
@@ -209,14 +209,14 @@ export function FileUploader() {
           className={`upload-tab ${mode === 'file' ? 'active' : ''}`}
           onClick={() => setMode('file')}
         >
-          <UploadOutlined />
+          <Upload size={14} />
           <span>本地文件</span>
         </button>
         <button
           className={`upload-tab ${mode === 'url' ? 'active' : ''}`}
           onClick={() => setMode('url')}
         >
-          <LinkOutlined />
+          <Link2 size={14} />
           <span>音视频链接</span>
         </button>
       </div>
@@ -231,7 +231,7 @@ export function FileUploader() {
           onDrop={handleDrop}
         >
           <div className="upload-icon-circle">
-            <UploadOutlined />
+            <Upload />
           </div>
           <div className="upload-title">
             {isDragging ? '释放以上传文件' : '点击或拖拽上传音视频文件'}
@@ -243,7 +243,7 @@ export function FileUploader() {
       ) : (
         <div className="url-input-zone">
           <div className="upload-icon-circle">
-            <LinkOutlined />
+            <Link2 />
           </div>
           <div className="upload-title">粘贴音频/视频链接</div>
           <div className="url-input-row">
@@ -257,7 +257,7 @@ export function FileUploader() {
               disabled={downloading}
             />
             <button className="url-paste-btn" onClick={handlePasteUrl} title="粘贴" disabled={downloading}>
-              <CopyOutlined />
+              <Copy size={16} />
             </button>
           </div>
           <button
@@ -265,7 +265,7 @@ export function FileUploader() {
             disabled={!urlInput.trim() || downloading}
             onClick={handleSubmitUrl}
           >
-            {downloading ? <><LoadingOutlined spin /> {downloadStatus || '下载中...'}</> : '开始转写'}
+            {downloading ? <><Loader2 size={14} className="animate-spin" /> {downloadStatus || '下载中...'}</> : '开始转写'}
           </button>
         </div>
       )}

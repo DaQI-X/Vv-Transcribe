@@ -5,8 +5,8 @@
  * 支持"采纳修正"按钮一键应用参考稿/AI 建议的正确文本
  */
 import { useState } from 'react'
-import { Popover } from 'antd'
-import { InfoCircleOutlined, CheckOutlined, WarningOutlined } from '@ant-design/icons'
+import { Info, Check, AlertTriangle } from 'lucide-react'
+import { Popover } from '@/components/ui/Popover'
 import type { SegmentDiff } from '@/types/reference'
 
 interface DiffPanelProps {
@@ -32,7 +32,7 @@ export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelPr
         )}
         {issueCount > 0 && (
           <span className="diff-panel__issue-count">
-            <WarningOutlined /> {issueCount} 处参考稿疑问
+            <AlertTriangle size={12} /> {issueCount} 处参考稿疑问
           </span>
         )}
         <span className="diff-panel__label">{mode === 'ai' ? 'AI 纠错' : '参考稿对比'}</span>
@@ -41,7 +41,7 @@ export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelPr
             className="diff-panel__accept-all-btn"
             onClick={(e) => { e.stopPropagation(); onAcceptAll() }}
           >
-            <CheckOutlined /> 采纳修正
+            <Check size={12} /> 采纳修正
           </button>
         )}
       </div>
@@ -88,7 +88,7 @@ export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelPr
                 return (
                   <Popover
                     key={idx}
-                    content={<span className="diff-panel__no-explanation"><InfoCircleOutlined /> 暂无解释</span>}
+                    content={<span className="diff-panel__no-explanation"><Info size={12} /> 暂无解释</span>}
                     trigger="click"
                     placement="top"
                   >
@@ -102,7 +102,7 @@ export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelPr
           {issueCount > 0 && (
             <div className="diff-panel__reference-issues">
               <div className="diff-panel__issues-title">
-                <WarningOutlined /> 参考稿疑问
+                <AlertTriangle size={12} /> 参考稿疑问
               </div>
               {diff.referenceIssues.map((issue, idx) => (
                 <div key={idx} className="diff-panel__issue-item">

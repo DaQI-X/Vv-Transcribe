@@ -4,7 +4,6 @@
  * 点击时触发播放器跳转到对应时间点，播放时自动高亮当前段落
  * 支持参考稿比对差异展示和 AI 纠错行内 Popover
  */
-import { Input } from 'antd'
 import type { TranscriptionSegment } from '@/types/transcription'
 import type { SegmentDiff } from '@/types/reference'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
@@ -34,12 +33,22 @@ export function SegmentRow({ segment, isActive, onClick, diff, onAccept, diffMod
         <span className="segment-row__time-text">{formatTime(segment.startTime)}</span>
       </div>
       <div className="segment-row__content">
-        <Input.TextArea
+        <textarea
           className="segment-row__textarea"
           value={segment.text}
           onChange={(e) => updateSegment(segment.id, e.target.value)}
-          autoSize={{ minRows: 1, maxRows: 4 }}
           onClick={(e) => e.stopPropagation()}
+          rows={1}
+          style={{
+            width: '100%',
+            overflow: 'hidden',
+            resize: 'none',
+          }}
+          onInput={(e) => {
+            const target = e.target as HTMLTextAreaElement
+            target.style.height = 'auto'
+            target.style.height = target.scrollHeight + 'px'
+          }}
         />
         {diff && diff.hasDifference && (
           <DiffPanel diff={diff} onAcceptAll={onAccept} mode={diffMode} />

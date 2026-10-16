@@ -4,12 +4,13 @@
  * - 段落文本编辑（TextArea 行内编辑）
  * - 上传参考稿比对（字级 diff，点击 AI 纠错后分析差异 + 参考稿疑问）
  * - AI 纠错（有参考稿以参考稿为准，无参考稿调用 AI，行内 Popover 显示）
- * - 多格式导出（SRT / TXT / JSON / Markdown）
+ * - 多格式字幕导出（SRT / TXT / JSON / Markdown）
  * - 点击段落跳转到对应播放时间点
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { message, Dropdown } from 'antd'
-import { EditOutlined, ExportOutlined, FileTextOutlined, CloseOutlined } from '@ant-design/icons'
+import { Pencil, Download, FileText, X, ArrowLeft } from 'lucide-react'
+import { toast } from '@/components/ui/Toast'
+import { Dropdown } from '@/components/ui/Dropdown'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
@@ -68,16 +69,16 @@ function mapIssuesToSegments(
 function ReferenceBubble({ fileName, onClear, disabled }: { fileName: string; onClear: () => void; disabled?: boolean }) {
   return (
     <div className="reference-bubble">
-      <FileTextOutlined className="reference-bubble__icon" />
+      <FileText className="reference-bubble__icon" size={14} />
       <span className="reference-bubble__name" title={fileName}>{fileName}</span>
       <button className="reference-bubble__close" onClick={onClear} disabled={disabled} title="清除参考">
-        <CloseOutlined />
+        <X size={10} />
       </button>
     </div>
   )
 }
 
-export function TranscriptEditor() {
+export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
   const { segments, updateSegment, asrProvider, fileName } = useTranscriptionStore()
   const { activeSegmentId, seekToTime, setActiveSegment } = usePlayerStore()
   const {
@@ -153,7 +154,7 @@ export function TranscriptEditor() {
     const waitingMessages = ['再等等～', '再等等等～', '再等等等等～', '再等等等等等～', '马上就好～']
     let waitingIndex = 0
     const waitingTimer = setInterval(() => {
-      message.info(waitingMessages[waitingIndex % waitingMessages.length], 1.5)
+      toast.info(waitingMessages[waitingIndex % waitingMessages.length], 1500)
       waitingIndex++
     }, 15000)
 
@@ -184,12 +185,12 @@ export function TranscriptEditor() {
 
         const issueCount = rawIssues.length
         if (totalChanges === 0 && issueCount === 0) {
-          message.info('转写内容与参考稿一致，无需纠错')
+          toast.info('转写内容与参考稿一致，无需纠错')
         } else {
           const parts: string[] = []
           if (totalChanges > 0) parts.push(`${totalChanges} 处差异`)
           if (issueCount > 0) parts.push(`${issueCount} 处参考稿疑问`)
-          message.success(`AI 纠错完成（以参考稿为准），${parts.join('，')}`)
+          toast.success(`AI 纠错完成（以参考稿为准），${parts.join('，')}`)
         }
       } else {
         setStatus('comparing')
@@ -198,12 +199,11 @@ export function TranscriptEditor() {
 
         if (!result.corrected || result.corrected.trim() === fullText) {
           setStatus('idle')
-          message.info('未发现需要纠正的内容')
+          toast.info('未发现需要纠正的内容')
           setLoading(false)
           return
         }
 
-        // 使用文本对齐将纠错后的文本映射回各个段落
         const correctedLines = alignCorrectedToSegments(segments, result.corrected)
         const diffs = new Map<string, SegmentDiff>()
 
@@ -221,11 +221,11 @@ export function TranscriptEditor() {
         setStatus('completed')
 
         const totalChanges = Array.from(diffs.values()).reduce((sum, d) => sum + d.totalChanges, 0)
-        message.success(`AI 纠错完成，共 ${totalChanges} 处差异`)
+        toast.success(`AI 纠错完成，共 ${totalChanges} 处差异`)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'AI 纠错失败')
-      message.error('AI 纠错失败')
+      toast.error('AI 纠错失败')
     } finally {
       clearInterval(waitingTimer)
       setLoading(false)
@@ -237,7 +237,7 @@ export function TranscriptEditor() {
     if (!api || segments.length === 0) return
 
     if (referenceText) {
-      message.error('上传失败，已存在参考文件，请先清除后再上传')
+      toast.error('上传失败，已存在参考文件，请先清除后再上传')
       return
     }
 
@@ -247,7 +247,7 @@ export function TranscriptEditor() {
 
       const content = await api.readTextFile(filePath)
       if (!content || !content.trim()) {
-        message.error('参考文件为空或读取失败')
+        toast.error('参考文件为空或读取失败')
         return
       }
 
@@ -259,19 +259,19 @@ export function TranscriptEditor() {
 
       const totalChanges = Array.from(diffs.values()).reduce((sum, d) => sum + d.totalChanges, 0)
       if (totalChanges === 0) {
-        message.info('参考稿已上传，转写内容与参考稿一致')
+        toast.info('参考稿已上传，转写内容与参考稿一致')
       } else {
-        message.success(`参考稿已上传，共 ${totalChanges} 处差异，点击"AI 纠错"查看详细说明`)
+        toast.success(`参考稿已上传，共 ${totalChanges} 处差异，点击"AI 纠错"查看详细说明`)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '参考稿上传失败')
-      message.error('参考稿上传失败')
+      toast.error('参考稿上传失败')
     }
   }, [segments, setReference, setAllSegmentDiffs, setError])
 
   const handleClearReference = useCallback(() => {
     clearReference()
-    message.info('已清除参考稿')
+    toast.info('已清除参考稿')
   }, [clearReference])
 
   const handleAcceptCorrection = useCallback((segmentId: string) => {
@@ -287,7 +287,7 @@ export function TranscriptEditor() {
 
     if (correctedText) {
       updateSegment(segmentId, correctedText)
-      message.success('已采纳修正')
+      toast.success('已采纳修正')
     }
   }, [segmentDiffs, updateSegment])
 
@@ -303,6 +303,12 @@ export function TranscriptEditor() {
     <div className="transcript-editor">
       <div className="transcript-editor__header">
         <div className="transcript-editor__title-group">
+          {onGoHome && (
+            <button onClick={onGoHome} className="transcript-editor__back-btn" title="返回首页">
+              <ArrowLeft size={14} />
+              <span>返回首页</span>
+            </button>
+          )}
           <span className="transcript-editor__title">转写结果</span>
           <span className="transcript-editor__char-count">共 {totalChars.toLocaleString()} 字</span>
           {asrProvider && (
@@ -317,19 +323,19 @@ export function TranscriptEditor() {
             disabled={!!referenceText}
             className="transcript-editor__ref-btn"
           >
-            <FileTextOutlined /> 上传参考
+            <FileText size={14} /> 上传参考
           </button>
           <button
             onClick={handleAICorrection}
             disabled={loading}
             className="transcript-editor__correct-btn"
           >
-            <EditOutlined />
+            <Pencil size={14} />
             {loading ? '纠错中...' : 'AI 纠错'}
           </button>
-          <Dropdown menu={{ items: FORMAT_OPTIONS.map((opt) => ({ key: opt.key, label: opt.label, onClick: () => handleExport(opt.key) })) }}>
-            <button className="transcript-editor__correct-btn">
-              <ExportOutlined />导出
+          <Dropdown items={FORMAT_OPTIONS.map((opt) => ({ key: opt.key, label: opt.label, onClick: () => handleExport(opt.key) }))}>
+            <button className="transcript-editor__export-btn">
+              <Download size={14} />导出
             </button>
           </Dropdown>
         </div>

@@ -99,6 +99,10 @@ export interface ElectronAPI {
 
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
 
+  toggleWindowMaximize: () => Promise<boolean>
+  minimizeWindow: () => Promise<boolean>
+  closeWindow: () => Promise<boolean>
+
   log: (entry: Record<string, unknown>) => Promise<void>
 }
 

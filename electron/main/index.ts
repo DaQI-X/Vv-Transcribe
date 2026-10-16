@@ -3,12 +3,36 @@
  * 负责创建应用窗口、注册 IPC 处理器、设置应用图标和名称
  * 应用启动时自动拉起 Python ASR 服务，退出时优雅关闭
  */
-import { app, BrowserWindow, nativeImage, ipcMain } from 'electron'
+import { app, BrowserWindow, nativeImage, ipcMain, powerSaveBlocker } from 'electron'
 import { join } from 'node:path'
 import { registerAllHandlers } from './ipc'
 import { startASRService, stopASRService } from './services/asrServiceManager'
 import { initDictionary } from './services/dictionaryService'
 import { logger } from './services/logger'
+
+// 忽略 EPIPE 错误（stdout 管道断开，常见于开发服务器重启）
+process.on('SIGPIPE', () => {})
+process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') return
+  throw err
+})
+process.stderr.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') return
+  throw err
+})
+
+// 防止系统息屏（音频转写应用需要长时间运行）
+let powerSaveBlockerId: number | null = null
+const preventSleep = () => {
+  if (powerSaveBlockerId === null) {
+    try {
+      powerSaveBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+      logger.info('App', 'Display sleep prevention enabled', { id: powerSaveBlockerId })
+    } catch (err) {
+      logger.warn('App', 'Failed to enable sleep prevention', err)
+    }
+  }
+}
 
 const MAIN_DIR = import.meta.dirname
 
@@ -51,7 +75,8 @@ function createWindow() {
     height: 900,
     minWidth: 1000,
     minHeight: 700,
-    title: APP_NAME,
+    title: '',
+    titleBarStyle: 'hiddenInset',
     icon: nativeImage.createFromPath(ICON_PATH),
     // autoHideMenuBar: true,
     webPreferences: {
@@ -80,6 +105,9 @@ app.whenReady().then(async () => {
   const dockIcon = nativeImage.createFromPath(ICON_PATH)
   app.dock?.setIcon(dockIcon)
   app.setName(APP_NAME)
+  
+  // 启用防息屏
+  preventSleep()
 
   registerAllHandlers()
   createWindow()
@@ -117,6 +145,8 @@ app.on('before-quit', async (e) => {
   e.preventDefault()
   await stopASRService()
   logger.info('App', 'ASR service stopped')
+  // 渲染进程的 beforeunload 会设置 vv_need_splash 标志
+  await new Promise(resolve => setTimeout(resolve, 100))
   app.exit()
 })
 

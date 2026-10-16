@@ -1,6 +1,6 @@
 /**
  * 开屏加载页
- * 白色背景 + 居中 Logo 擦除揭示动画，等待词典/ASR 等前置服务就绪后淡出
+ * 白色背景 + 居中 Logo 擦除揭示动画，等待词典/ASR 等前置服务就绪后缩小淡出
  */
 import { useEffect, useState } from 'react'
 import logoImage from '@/assets/public/lottie/Vv Transcribe Open.png'
@@ -11,18 +11,21 @@ interface SplashScreenProps {
 
 export function SplashScreen({ visible }: SplashScreenProps) {
   const [mounted, setMounted] = useState(true)
+  const [exiting, setExiting] = useState(false)
 
   useEffect(() => {
-    if (!visible) {
+    if (!visible && mounted && !exiting) {
+      setExiting(true)
       const timer = setTimeout(() => setMounted(false), 600)
       return () => clearTimeout(timer)
     }
-  }, [visible])
+  }, [visible, mounted, exiting])
 
   if (!mounted) return null
 
   return (
     <div
+      className="splash-screen"
       style={{
         position: 'fixed',
         inset: 0,
@@ -30,13 +33,24 @@ export function SplashScreen({ visible }: SplashScreenProps) {
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
-        backgroundColor: '#fff',
+        backgroundColor: 'var(--bg-page)',
         transition: 'opacity 0.5s ease-out',
-        opacity: visible ? 1 : 0,
-        pointerEvents: visible ? 'auto' : 'none',
+        opacity: exiting ? 0 : 1,
+        pointerEvents: exiting ? 'none' : 'auto',
       }}
     >
-      <div style={{ width: 700, height: 700, position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+      <div
+        style={{
+          width: 700,
+          height: 700,
+          position: 'relative',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          transform: exiting ? 'scale(0.3)' : 'scale(1)',
+          transition: 'transform 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
+        }}
+      >
         <div style={{ position: 'relative', width: 620, height: 400 }}>
           <img
             src={logoImage}

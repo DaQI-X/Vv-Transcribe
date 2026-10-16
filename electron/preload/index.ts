@@ -69,6 +69,15 @@ const api = {
   openLogDirectory: () =>
     ipcRenderer.invoke('app:openLogDirectory'),
 
+  toggleWindowMaximize: () =>
+    ipcRenderer.invoke('window:toggleMaximize'),
+
+  minimizeWindow: () =>
+    ipcRenderer.invoke('window:minimize'),
+
+  closeWindow: () =>
+    ipcRenderer.invoke('window:close'),
+
   log: (entry: unknown) =>
     ipcRenderer.invoke('app:log', entry),
 }

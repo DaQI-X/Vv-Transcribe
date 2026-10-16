@@ -5,7 +5,7 @@
  * - ProcessingView: ASR 转写中（带波形动画和进度条）
  * - FailureView: 处理失败（显示错误信息和重试按钮）
  */
-import { CloseOutlined, SoundOutlined, LoadingOutlined } from '@ant-design/icons'
+import { X, Volume2, Loader2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 
 function formatFileSize(bytes: number): string {
@@ -21,14 +21,14 @@ function UploadingView({ fileName, fileSize }: { fileName: string | null; fileSi
     <div className="status-container">
       <div className="status-card status-card--uploading">
         <div className="uploading-spinner">
-          <LoadingOutlined className="uploading-spinner__icon" spin />
+          <Loader2 className="uploading-spinner__icon animate-spin" size={32} />
         </div>
 
         <div className="uploading-title">正在上传文件</div>
         <div className="uploading-desc">正在读取音频数据，准备转写环境...</div>
 
         <div className="uploading-file-info">
-          <SoundOutlined className="uploading-file-info__icon" />
+          <Volume2 className="uploading-file-info__icon" size={14} />
           <span className="uploading-file-info__name">{fileName || '未命名文件'}</span>
           {sizeText && <span className="uploading-file-info__size">{sizeText}</span>}
         </div>
@@ -52,9 +52,9 @@ function ProcessingView({ fileName, progress }: { fileName: string | null; progr
           <svg className="waveform-svg" viewBox="0 0 400 80" preserveAspectRatio="none">
             <defs>
               <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#2EE6D6" />
-                <stop offset="50%" stopColor="#2F80ED" />
-                <stop offset="100%" stopColor="#2EE6D6" />
+                <stop offset="0%" stopColor="#1b55f5" />
+                <stop offset="50%" stopColor="#3378ff" />
+                <stop offset="100%" stopColor="#1b55f5" />
               </linearGradient>
             </defs>
             <path
@@ -108,7 +108,7 @@ function FailureView({ title, message, fileName, onRetry, buttonLabel = '重新�
       <div className="status-card">
         <div className="failure-content">
           <div className="failure-icon">
-            <CloseOutlined />
+            <X size={28} />
           </div>
 
           <span className="failure-title">{title}</span>
