@@ -45,14 +45,12 @@ function readPEArch(binPath) {
 
 /** 校验打包后的 ASR 二进制存在且架构匹配，否则中断构建 */
 function verifyASRBinary(appOutDir, platformName) {
+  // darwin：appOutDir 是 .app 的父目录（如 dist/mac-arm64），需再进入 .app/Contents/Resources
+  // win32/linux：appOutDir 本身就是 win-unpacked / linux-unpacked，resources 直接在其下
   const resourcesBase =
     platformName === 'darwin'
       ? join(appOutDir, 'Vv Transcribe.app', 'Contents', 'Resources')
-      : join(
-          appOutDir,
-          platformName === 'win32' ? 'win-unpacked' : 'linux-unpacked',
-          'resources'
-        )
+      : join(appOutDir, 'resources')
   const asrBin = join(resourcesBase, 'python-asr', asrExeName)
 
   if (!existsSync(asrBin)) {
@@ -119,8 +117,12 @@ const config = {
     '**/node_modules/onnxruntime-node/bin/napi-v3/darwin/**',
     '**/node_modules/@ffmpeg-installer/darwin-arm64/**',
     '**/node_modules/@ffmpeg-installer/darwin-x64/**',
+    '**/node_modules/@ffmpeg-installer/win32-x64/**',
+    '**/node_modules/@ffmpeg-installer/linux-x64/**',
     '**/node_modules/@ffprobe-installer/darwin-arm64/**',
     '**/node_modules/@ffprobe-installer/darwin-x64/**',
+    '**/node_modules/@ffprobe-installer/win32-x64/**',
+    '**/node_modules/@ffprobe-installer/linux-x64/**',
   ],
   extraResources: [
     {
