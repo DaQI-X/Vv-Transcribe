@@ -78,7 +78,8 @@ function verifyASRBinary(appOutDir, platformName) {
 const config = {
   appId: 'com.vv.transcribe',
   productName: 'Vv Transcribe',
-  artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
+  // 不含版本号/空格：保证文件名跨版本稳定，网站可用 /releases/latest/download/<固定名> 永久直链
+  artifactName: 'Vv-Transcribe-${os}-${arch}.${ext}',
   mac: {
     target: ['dmg'],
     icon: 'src/assets/mac/logo_1024.png',

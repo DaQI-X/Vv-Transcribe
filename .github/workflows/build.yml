@@ -111,3 +111,42 @@ jobs:
           name: ${{ matrix.artifactName }}
           path: ${{ matrix.artifactPath }}
           if-no-files-found: error
+
+  # 仅当推送 v* tag 时触发：汇总三平台产物发布到 GitHub Release，产出面向用户的永久下载直链。
+  # main 守卫：tag 指向的 commit 必须是 main 的祖先，否则拒绝发布——保证只有 main 的稳定版本能对外。
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${{ github.sha }}" FETCH_HEAD; then
+            echo "::error::tag ${{ github.ref_name }} 不在 main 分支上，拒绝发布 Release（发布版本必须来自 main）"
+            exit 1
+          fi
+          echo "tag ${{ github.ref_name }} 已在 main 上，允许发布 Release"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
