@@ -27,9 +27,6 @@ export default defineConfig({
                 '@ffprobe-installer/ffprobe',
                 '@ffprobe-installer/darwin-arm64',
                 '@ffprobe-installer/darwin-x64',
-                '@xenova/transformers',
-                'onnxruntime-node',
-                'sharp',
                 'puppeteer-extra',
                 'puppeteer-extra-plugin-stealth',
                 'mammoth',
@@ -56,7 +53,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': '/src',
-      'sharp': '/electron/main/services/sharp-mock.js',
     },
   },
 })

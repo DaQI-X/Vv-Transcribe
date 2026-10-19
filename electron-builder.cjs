@@ -1,8 +1,7 @@
-const { rmSync, existsSync, openSync, readSync, closeSync } = require('fs')
+const { rmSync, existsSync, openSync, readSync, closeSync, readdirSync, statSync } = require('fs')
 const { join } = require('path')
 
 const targetArch = process.env.BUILD_ARCH || (process.arch === 'arm64' ? 'arm64' : 'x64')
-const excludedArch = targetArch === 'arm64' ? 'x64' : 'arm64'
 const asrExeName = process.platform === 'win32' ? 'vv-asr-server.exe' : 'vv-asr-server'
 
 /** 读取 Mach-O 64 位二进制架构（darwin）；非 Mach-O 返回 null */
@@ -110,11 +109,8 @@ const config = {
     '!dist/latest.yml',
     '!dist/.DS_Store',
     '!dist/.icon-icns/**',
-    '!**/node_modules/onnxruntime-node/bin/napi-v3/linux/**',
-    '!**/node_modules/onnxruntime-node/bin/napi-v3/win32/**',
   ],
   asarUnpack: [
-    '**/node_modules/onnxruntime-node/bin/napi-v3/darwin/**',
     '**/node_modules/@ffmpeg-installer/darwin-arm64/**',
     '**/node_modules/@ffmpeg-installer/darwin-x64/**',
     '**/node_modules/@ffmpeg-installer/win32-x64/**',
@@ -136,23 +132,38 @@ const config = {
     },
   ],
   afterPack(context) {
+    const platformName = context.electronPlatformName // 'darwin' | 'win32' | 'linux'
     const appDir = context.appOutDir
-    const unpackedBase = join(appDir, 'Vv Transcribe.app', 'Contents', 'Resources', 'app.asar.unpacked', 'node_modules')
 
     // 校验 ASR 二进制架构匹配（防止 error -86 / EBADARCH）
-    verifyASRBinary(appDir, context.electronPlatformName)
+    verifyASRBinary(appDir, platformName)
 
-    const targets = [
-      { dir: '@ffmpeg-installer', keep: `darwin-${targetArch}`, remove: `darwin-${excludedArch}` },
-      { dir: '@ffprobe-installer', keep: `darwin-${targetArch}`, remove: `darwin-${excludedArch}` },
-      { dir: 'onnxruntime-node/bin/napi-v3/darwin', keep: targetArch, remove: excludedArch },
-    ]
+    // darwin：appOutDir 是 .app 父目录；win32/linux：appOutDir 本身即 *-unpacked
+    const resourcesBase =
+      platformName === 'darwin'
+        ? join(appDir, 'Vv Transcribe.app', 'Contents', 'Resources')
+        : join(appDir, 'resources')
+    const unpackedModules = join(resourcesBase, 'app.asar.unpacked', 'node_modules')
 
-    for (const t of targets) {
-      const removePath = join(unpackedBase, t.dir, t.remove)
-      if (existsSync(removePath)) {
-        rmSync(removePath, { recursive: true, force: true })
-        console.log(`[afterPack] Removed: ${removePath}`)
+    // 目标平台需保留的 ffmpeg/ffprobe 子目录，其余平台目录全部删除。
+    // darwin-arm64/darwin-x64 是显式依赖，会被装进所有平台的包（Win/Linux 各多约 140MB 无用二进制）。
+    const keepDir = platformName === 'darwin' ? `darwin-${targetArch}` : `${platformName}-${targetArch}`
+    const platformDirRe = /^(darwin|win32|linux|freebsd)-/
+
+    for (const pkg of ['@ffmpeg-installer', '@ffprobe-installer']) {
+      const pkgDir = join(unpackedModules, pkg)
+      if (!existsSync(pkgDir)) continue
+      for (const entry of readdirSync(pkgDir)) {
+        if (entry === keepDir || !platformDirRe.test(entry)) continue
+        const removePath = join(pkgDir, entry)
+        if (statSync(removePath).isDirectory()) {
+          rmSync(removePath, { recursive: true, force: true })
+          console.log(`[afterPack] Removed: ${pkg}/${entry}`)
+        }
+      }
+      // 兜底：目标平台二进制必须还在，否则宁可让构建失败也不产出坏包
+      if (!existsSync(join(pkgDir, keepDir))) {
+        throw new Error(`[afterPack] 剪枝后缺少目标平台二进制: ${pkg}/${keepDir}`)
       }
     }
   },
