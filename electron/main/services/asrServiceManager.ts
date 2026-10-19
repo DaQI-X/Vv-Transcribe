@@ -3,8 +3,8 @@
  * 负责在 Electron 主进程启动时自动拉起 Python ASR 子进程，退出时优雅关闭
  * 
  * 二进制查找路径：
- * - 开发模式：python-asr/dist/vv-asr-server
- * - 打包模式：process.resourcesPath/python-asr/vv-asr-server
+ * - 开发模式：python-asr/dist-<arch>/vv-asr-server[.exe]
+ * - 打包模式：process.resourcesPath/python-asr/vv-asr-server[.exe]
  * 
  * 启动流程：spawn 子进程 → 轮询 /health 直到就绪 → 标记服务可用
  * 关闭流程：SIGTERM → 等待退出 → 超时 SIGKILL
@@ -23,12 +23,15 @@ const SHUTDOWN_TIMEOUT_MS = 5_000
 let asrProcess: ChildProcess | null = null
 let asrReady = false
 
-/** 获取 ASR 二进制文件路径（区分开发/打包环境） */
+/** 获取 ASR 二进制文件路径（区分开发/打包环境，适配架构与 Windows .exe） */
 function getBinaryPath(): string {
+  const exeName = process.platform === 'win32' ? 'vv-asr-server.exe' : 'vv-asr-server'
   if (process.env.VITE_DEV_SERVER_URL) {
-    return join(import.meta.dirname, '../../python-asr/dist/vv-asr-server')
+    // 开发模式：产物按架构分目录（dist-arm64 / dist-x64）
+    return join(import.meta.dirname, '../../python-asr', `dist-${process.arch}`, exeName)
   }
-  return join(process.resourcesPath, 'python-asr', 'vv-asr-server')
+  // 打包模式：extraResources 已将对应架构产物复制到 resources/python-asr/
+  return join(process.resourcesPath, 'python-asr', exeName)
 }
 
 /** 获取 ffmpeg/ffprobe 二进制路径（与 audioProcessor 逻辑一致） */

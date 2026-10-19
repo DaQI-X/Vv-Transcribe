@@ -1,0 +1,113 @@
+name: Build
+
+# 跨平台构建验证 CI
+# - Windows x64：唯一无法在 macOS 本地构建的平台，由 CI 免费提供（ASR .exe + NSIS 安装包）
+# - macOS arm64：原生回归验证
+# - macOS x64：在 arm64 runner 上经 Rosetta + universal2 Python 构建（GitHub 已退役 Intel runner）
+# afterPack 会校验 ASR 二进制架构，架构不匹配时构建直接失败（防止 error -86 / EBADARCH）。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # 统一用 bash，避免 Windows pwsh 对相对可执行路径（venv/Scripts/python.exe）的解析问题
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            arch: x64
+            electronArgs: --win --x64
+            needsRosetta: false
+            venvCreate: python -m venv python-asr/venv
+            py: python-asr/venv/Scripts/python.exe
+            artifactPath: dist/*.exe
+            artifactName: Vv-Transcribe-Windows-x64
+          - label: macOS arm64
+            os: macos-14
+            arch: arm64
+            electronArgs: --mac --arm64
+            needsRosetta: false
+            venvCreate: python -m venv python-asr/venv
+            py: python-asr/venv/bin/python
+            artifactPath: dist/*.dmg
+            artifactName: Vv-Transcribe-macOS-arm64
+          - label: macOS x64 (Rosetta)
+            os: macos-14
+            arch: x64
+            electronArgs: --mac --x64
+            needsRosetta: true
+            # universal2 Python 默认以 arm64 运行，所有 venv-x64 调用都必须经 arch -x86_64 强制 x64
+            venvCreate: arch -x86_64 python -m venv python-asr/venv-x64
+            py: arch -x86_64 python-asr/venv-x64/bin/python
+            artifactPath: dist/*.dmg
+            artifactName: Vv-Transcribe-macOS-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Python (universal2 on macOS)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Rosetta (macOS x64 only)
+        if: matrix.needsRosetta
+        run: softwareupdate --install-rosetta --agree-to-license
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create Python venv
+        run: ${{ matrix.venvCreate }}
+
+      - name: Install Python dependencies
+        run: |
+          ${{ matrix.py }} -m pip install --upgrade pip
+          ${{ matrix.py }} -m pip install -r python-asr/requirements.txt
+
+      - name: Build ASR binary (${{ matrix.arch }})
+        run: node scripts/build-asr.mjs --arch=${{ matrix.arch }}
+
+      - name: Build renderer + main
+        run: pnpm build
+
+      - name: Package Electron app
+        run: pnpm exec electron-builder ${{ matrix.electronArgs }} --config electron-builder.cjs --publish never
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifactName }}
+          path: ${{ matrix.artifactPath }}
+          if-no-files-found: error

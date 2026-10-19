@@ -214,32 +214,57 @@ pnpm dev
 
 ### 构建打包
 
+ASR 二进制按架构分目录产出（`dist-arm64` / `dist-x64`），electron-builder 根据 `BUILD_ARCH` 选择对应架构的二进制打入安装包。**PyInstaller 无法交叉编译**：产物架构 = 构建它的 Python 解释器架构，因此 x64 包必须用 x64 的 Python 环境构建。`afterPack` 会校验二进制架构，不匹配则中断构建（避免目标机出现 `error -86` / EBADARCH）。
+
 ```bash
-# 1. 编译 Python ASR 为独立二进制文件（首次需要，约 5-10 分钟）
+# 0. 首次：创建本机 Python 虚拟环境并安装依赖（含 PyInstaller）
+pnpm setup:asr
+
+# 1. 编译本机架构的 ASR 二进制（arm64 Mac → python-asr/dist-arm64/）
 pnpm build:asr
-# 产出：python-asr/dist/vv-asr-server
 
-# 2. 构建 Electron 安装包（自动将二进制打入 resources/）
-pnpm build:electron
+# 2. 构建 Electron 安装包
+pnpm build:electron:arm64     # 产出 release/Vv-Transcribe-arm64.dmg
 
-# 或一步完成全部构建
-pnpm build:all
+# 或一步完成（ASR + 安装包）
+pnpm build:mac:arm64
 ```
 
-打包后的应用会在启动时自动运行内置的 Python ASR 二进制文件，无需用户手动启动 Python 服务。
+#### 构建 x64（Intel）DMG —— 在 arm64 Mac 上经 Rosetta
+
+```bash
+# 首次：在 Rosetta 下创建 x64 venv（需本机有 x64 Python，可用 PYTHON_X64 指定解释器路径）
+pnpm setup:asr:x64
+
+# 构建 x64 ASR 二进制（dist-x64）+ x64 DMG
+pnpm build:mac:x64            # 产出 release/Vv-Transcribe-x64.dmg
+```
+
+#### 构建 Windows 安装包
+
+Windows 无法在 macOS 上交叉构建（PyInstaller 与 electron-builder 均需在 Windows 原生执行）。项目提供 GitHub Actions 工作流 [`.github/workflows/build.yml`](.github/workflows/build.yml)，在 `windows-latest` 上免费构建，产物见 Actions 运行结果的 Artifacts。也可在 Windows 本机执行：
+
+```bash
+python -m venv python-asr/venv
+python-asr/venv/Scripts/pip install -r python-asr/requirements.txt
+node scripts/build-asr.mjs --arch=x64   # 产出 dist-x64/vv-asr-server.exe
+pnpm install && pnpm build && pnpm build:electron:win
+```
 
 #### Python ASR 打包流程
 
 ```
 python-asr/main.py + dependencies
-  → PyInstaller (vv-asr-server.spec)
-    → python-asr/dist/vv-asr-server (单文件二进制)
-      → electron-builder extraResources
-        → Vv Transcribe.app/Contents/Resources/python-asr/vv-asr-server
+  → scripts/build-asr.mjs（按 --arch 选择 venv 与 dist 目录，macOS 跨架构经 Rosetta）
+    → PyInstaller (vv-asr-server.spec，site-packages 经 sysconfig 动态解析)
+      → python-asr/dist-<arch>/vv-asr-server[.exe]
+        → electron-builder extraResources（按 BUILD_ARCH 选择对应架构目录）
+          → Vv Transcribe.app/Contents/Resources/python-asr/vv-asr-server
 ```
 
-- 开发模式：直接读取 `python-asr/dist/vv-asr-server`
-- 打包模式：从 `process.resourcesPath/python-asr/vv-asr-server` 启动
+- 开发模式：读取 `python-asr/dist-<arch>/vv-asr-server[.exe]`（arch = `process.arch`）
+- 打包模式：从 `process.resourcesPath/python-asr/vv-asr-server[.exe]` 启动
+- `afterPack` 校验二进制架构（Mach-O / PE），与 `BUILD_ARCH` 不符则构建失败
 - 如果端口 8000 已被占用（用户手动启动了服务），则跳过自动启动
 - 应用退出时自动发送 SIGTERM 优雅关闭 ASR 子进程
 

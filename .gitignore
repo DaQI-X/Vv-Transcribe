@@ -15,8 +15,13 @@ dist-ssr
 
 # Python ASR
 python-asr/venv/
+python-asr/venv-x64/
 python-asr/dist/
+python-asr/dist-arm64/
+python-asr/dist-x64/
 python-asr/build/
+python-asr/build-arm64/
+python-asr/build-x64/
 python-asr/__pycache__/
 *.pyc
 

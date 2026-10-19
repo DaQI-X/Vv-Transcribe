@@ -4,7 +4,7 @@
  * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 纠错配置）
  */
 import { useState, useRef, useCallback } from 'react'
-import { Settings, ArrowLeft } from 'lucide-react'
+import { Settings } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { FileUploader } from '@/components/transcription/FileUploader'
 import { UploadStatus } from '@/components/transcription/UploadStatus'
