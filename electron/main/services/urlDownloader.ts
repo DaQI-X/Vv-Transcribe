@@ -66,6 +66,38 @@ function getYtDlpPath(): string {
   return 'yt-dlp'
 }
 
+// 缓存探测结果：yt-dlp 在单次会话内不会变化
+let impersonateSupported: boolean | null = null
+
+/**
+ * 探测 yt-dlp 是否支持 chrome 浏览器模拟（--impersonate）
+ * 该能力依赖 Python 的 curl_cffi 包；系统自带的 yt-dlp（如 Homebrew）通常未安装，
+ * 此时传入 --impersonate chrome 会直接报错 "Impersonate target chrome is not available"。
+ * 探测方式：运行 --list-impersonate-targets 并检查输出是否包含 chrome。
+ */
+function probeImpersonateSupport(ytDlpPath: string): Promise<boolean> {
+  if (impersonateSupported !== null) return Promise.resolve(impersonateSupported)
+
+  return new Promise((resolve) => {
+    let out = ''
+    const proc = spawn(ytDlpPath, ['--list-impersonate-targets'], { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    proc.stdout?.on('data', (d) => { out += d.toString() })
+    proc.stderr?.on('data', (d) => { out += d.toString() })
+    proc.on('error', () => {
+      impersonateSupported = false
+      logger.warn('UrlDownloader', 'yt-dlp impersonate probe failed to spawn', { ytDlpPath })
+      resolve(false)
+    })
+    proc.on('exit', (code) => {
+      const supported = code === 0 && /chrome/i.test(out)
+      impersonateSupported = supported
+      logger.info('UrlDownloader', 'Impersonate support probed', { supported, code })
+      resolve(supported)
+    })
+  })
+}
+
 /** 验证 URL 是否为合法的 http/https 链接 */
 function isValidMediaUrl(url: string): boolean {
   try {
@@ -91,13 +123,15 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
   const ytDlpPath = getYtDlpPath()
   const outputPath = join(tempDir, '%(title)s.%(ext)s')
   const ffmpegPath = getFfmpegPath()
+  // 仅当 yt-dlp 支持时才启用浏览器模拟，否则该 flag 会导致解析直接失败
+  const canImpersonate = await probeImpersonateSupport(ytDlpPath)
 
   const origin = new URL(url).origin
   const isDomestic = /\.(bilibili|douyin|tiktok|xinpianchang|youku|iqiyi|qq|kuaishou|weibo)\.com|b23\.tv/i.test(url)
 
   const baseArgs = [
     '--no-playlist',
-    '--impersonate', 'chrome',
+    ...(canImpersonate ? ['--impersonate', 'chrome'] : []),
     '--referer', origin,
     '--retries', '3',
     ...(isDomestic ? ['--proxy', ''] : []),

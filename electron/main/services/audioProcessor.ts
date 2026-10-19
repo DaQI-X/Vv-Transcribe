@@ -69,6 +69,7 @@ export interface AudioMetadata {
   codec: string
   channels: number
   sampleRate: number
+  hasAudio: boolean
 }
 
 export interface ExtractResult {
@@ -95,6 +96,7 @@ export function probeFile(filePath: string): Promise<AudioMetadata> {
         codec: audioStream?.codec_name ?? 'unknown',
         channels: audioStream?.channels ?? 1,
         sampleRate: audioStream?.sample_rate ?? 16000,
+        hasAudio: !!audioStream,
       })
     })
   })
@@ -110,6 +112,14 @@ export async function extractAudio(filePath: string): Promise<ExtractResult> {
 
   const metadata = await probeFile(filePath)
   logger.info('AudioProcessor', 'Audio metadata extracted', metadata)
+
+  // 无音轨的视频直接交给 ffmpeg 会报 "Output file #0 does not contain any stream"
+  // 提前拦截并给出用户可读的错误（经 IPC 冒泡为 toast）
+  if (!metadata.hasAudio) {
+    logger.warn('AudioProcessor', 'File has no audio stream', { filePath })
+    await cleanupTemp(tempDir)
+    throw new Error('该文件不包含音频轨道，无法转写')
+  }
 
   await new Promise<void>((resolve, reject) => {
     logger.debug('AudioProcessor', 'Starting audio extraction...')
