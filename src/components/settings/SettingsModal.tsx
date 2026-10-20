@@ -32,7 +32,6 @@ interface UpdateInfo {
   currentVersion: string
   latestVersion: string
   hasUpdate: boolean
-  releaseUrl: string
   downloadUrl: string
 }
 
@@ -362,7 +361,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     发现新版本 v{updateInfo.latestVersion}
                   </div>
                   <p className="settings-update-notice__text">
-                    当前版本为 v{updateInfo.currentVersion}。本应用不自动安装更新，请前往下载页获取最新安装包并覆盖安装。
+                    当前版本为 v{updateInfo.currentVersion}。本应用不自动安装更新，请前往发布页获取最新安装包并覆盖安装。
                   </p>
                   <div className="settings-update-notice__actions">
                     <button
@@ -370,14 +369,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       className="settings-modal__save-btn"
                       onClick={() => handleOpenExternal(updateInfo.downloadUrl)}
                     >
-                      前往下载页
-                    </button>
-                    <button
-                      type="button"
-                      className="settings-modal__cancel-btn"
-                      onClick={() => handleOpenExternal(updateInfo.releaseUrl)}
-                    >
-                      查看发布说明
+                      前往发布页下载
                     </button>
                   </div>
                 </div>

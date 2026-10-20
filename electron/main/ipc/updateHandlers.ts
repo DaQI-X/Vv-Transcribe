@@ -1,22 +1,20 @@
 /**
  * 应用更新检查 IPC 处理器
  * 查询 GitHub Release 最新版本并与当前应用版本比较。
- * 不做自动下载/安装（应用未签名，electron-updater 不可用），仅引导用户到官网下载页或 Release 页。
+ * 不做自动下载/安装（应用未签名，electron-updater 不可用），仅引导用户到 GitHub Release 页下载安装包。
  */
 import { app, ipcMain, shell } from 'electron'
 
 const RELEASE_API = 'https://api.github.com/repos/DaQI-X/Vv-Transcribe/releases/latest'
 const RELEASE_PAGE = 'https://github.com/DaQI-X/Vv-Transcribe/releases/latest'
-const DOWNLOAD_PAGE = 'https://vv-transcribe.com/#download'
 
 // 仅允许打开白名单域名，防止渲染进程传入任意 URL 造成开放跳转
-const ALLOWED_HOSTS = ['github.com', 'www.github.com', 'vv-transcribe.com', 'www.vv-transcribe.com']
+const ALLOWED_HOSTS = ['github.com', 'www.github.com']
 
 export interface UpdateInfo {
   currentVersion: string
   latestVersion: string
   hasUpdate: boolean
-  releaseUrl: string
   downloadUrl: string
 }
 
@@ -57,8 +55,7 @@ export function registerUpdateHandlers() {
         currentVersion,
         latestVersion,
         hasUpdate: isNewer(parseVersion(latestVersion), parseVersion(currentVersion)),
-        releaseUrl: data.html_url || RELEASE_PAGE,
-        downloadUrl: DOWNLOAD_PAGE,
+        downloadUrl: data.html_url || RELEASE_PAGE,
       }
     } finally {
       clearTimeout(timer)

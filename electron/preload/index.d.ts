@@ -102,7 +102,6 @@ export interface ElectronAPI {
     currentVersion: string
     latestVersion: string
     hasUpdate: boolean
-    releaseUrl: string
     downloadUrl: string
   }>
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
