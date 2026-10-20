@@ -66,6 +66,13 @@ const api = {
   getServiceReady: () =>
     ipcRenderer.invoke('app:getServiceReady'),
 
+  getAppVersion: () =>
+    ipcRenderer.invoke('app:getVersion'),
+  checkAppUpdate: () =>
+    ipcRenderer.invoke('app:checkUpdate'),
+  openExternal: (url: string) =>
+    ipcRenderer.invoke('app:openExternal', url),
+
   openLogDirectory: () =>
     ipcRenderer.invoke('app:openLogDirectory'),
 

@@ -23,6 +23,7 @@ const SETTINGS_MENU = [
   { key: 'asr', label: '转写配置' },
   { key: 'ai', label: '纠错配置' },
   { key: 'theme', label: '主题' },
+  { key: 'about', label: '关于与更新' },
 ]
 
 export function Transcription() {

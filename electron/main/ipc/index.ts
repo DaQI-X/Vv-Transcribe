@@ -8,8 +8,9 @@ import { registerAIHandlers } from './aiHandlers'
 import { registerSettingsHandlers } from './settingsHandlers'
 import { registerDictionaryHandlers } from './dictionaryHandlers'
 import { registerWindowHandlers } from './windowHandlers'
+import { registerUpdateHandlers } from './updateHandlers'
 
-/** 注册全部 IPC 处理器，包括文件、ASR、AI、设置、词典、窗口控制模块 */
+/** 注册全部 IPC 处理器，包括文件、ASR、AI、设置、词典、窗口控制、更新检查模块 */
 export function registerAllHandlers() {
   registerFileHandlers()
   registerASRHandlers()
@@ -17,4 +18,5 @@ export function registerAllHandlers() {
   registerSettingsHandlers()
   registerDictionaryHandlers()
   registerWindowHandlers()
+  registerUpdateHandlers()
 }

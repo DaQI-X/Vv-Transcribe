@@ -25,6 +25,15 @@ const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
   ai: '纠错配置',
   theme: '主题',
+  about: '关于与更新',
+}
+
+interface UpdateInfo {
+  currentVersion: string
+  latestVersion: string
+  hasUpdate: boolean
+  releaseUrl: string
+  downloadUrl: string
 }
 
 interface SettingsModalProps {
@@ -92,6 +101,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const [dictVersion, setDictVersion] = useState('')
   const [dictUpdating, setDictUpdating] = useState(false)
   const [themeValue, setThemeValue] = useState<string>('light')
+  const [appVersion, setAppVersion] = useState('')
+  const [checking, setChecking] = useState(false)
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const api = getElectronAPI()
   const { setTheme } = useThemeStore()
 
@@ -121,6 +133,12 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       if (tab === 'theme') {
         const currentTheme = useThemeStore.getState().theme
         setThemeValue(currentTheme)
+      }
+      if (tab === 'about') {
+        setUpdateInfo(null)
+        try {
+          setAppVersion(await api.getAppVersion())
+        } catch { /* ignore */ }
       }
     })()
   }, [tab, api, loadDictVersion])
@@ -163,6 +181,32 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       toast.error('检查词库更新失败')
     } finally {
       setDictUpdating(false)
+    }
+  }
+
+  const handleCheckUpdate = async () => {
+    if (!api || checking) return
+    setChecking(true)
+    try {
+      const info = await api.checkAppUpdate()
+      setUpdateInfo(info)
+      if (info.hasUpdate) {
+        toast.info(`发现新版本 v${info.latestVersion}`)
+      } else {
+        toast.info(`当前已是最新版本（v${info.currentVersion}）`)
+      }
+    } catch {
+      toast.error('检查更新失败，请检查网络后重试')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const handleOpenExternal = async (url: string) => {
+    if (!api) return
+    const result = await api.openExternal(url)
+    if (!result.success) {
+      toast.error(`打开链接失败：${result.error}`)
     }
   }
 
@@ -291,13 +335,66 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
           {tab === 'theme' && (
             <ThemeSettings theme={themeValue} onChange={setThemeValue} />
           )}
+
+          {tab === 'about' && (
+            <>
+              <div className="settings-form-group">
+                <label className="settings-form-label">当前版本</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, color: '#9AA5B8' }}>
+                    {appVersion ? `v${appVersion}` : '读取中...'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCheckUpdate}
+                    disabled={checking}
+                    className="settings-modal__dict-update-btn"
+                  >
+                    {checking ? '检查中...' : '检查更新'}
+                  </button>
+                </div>
+                <span className="settings-form-hint">查询 GitHub Release 是否有新版本</span>
+              </div>
+
+              {updateInfo?.hasUpdate && (
+                <div className="settings-update-notice">
+                  <div className="settings-update-notice__title">
+                    发现新版本 v{updateInfo.latestVersion}
+                  </div>
+                  <p className="settings-update-notice__text">
+                    当前版本为 v{updateInfo.currentVersion}。本应用不自动安装更新，请前往下载页获取最新安装包并覆盖安装。
+                  </p>
+                  <div className="settings-update-notice__actions">
+                    <button
+                      type="button"
+                      className="settings-modal__save-btn"
+                      onClick={() => handleOpenExternal(updateInfo.downloadUrl)}
+                    >
+                      前往下载页
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-modal__cancel-btn"
+                      onClick={() => handleOpenExternal(updateInfo.releaseUrl)}
+                    >
+                      查看发布说明
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div className="settings-modal__footer">
-          <button onClick={onClose} className="settings-modal__cancel-btn">取消</button>
-          <button onClick={handleSave} disabled={saving} className="settings-modal__save-btn">
-            {saving ? '保存中...' : '保存设置'}
+          <button onClick={onClose} className="settings-modal__cancel-btn">
+            {tab === 'about' ? '关闭' : '取消'}
           </button>
+          {tab !== 'about' && (
+            <button onClick={handleSave} disabled={saving} className="settings-modal__save-btn">
+              {saving ? '保存中...' : '保存设置'}
+            </button>
+          )}
         </div>
       </div>
     </div>

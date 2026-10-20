@@ -97,6 +97,16 @@ export interface ElectronAPI {
 
   getServiceReady: () => Promise<{ ready: boolean; error: string | null }>
 
+  getAppVersion: () => Promise<string>
+  checkAppUpdate: () => Promise<{
+    currentVersion: string
+    latestVersion: string
+    hasUpdate: boolean
+    releaseUrl: string
+    downloadUrl: string
+  }>
+  openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
+
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
 
   toggleWindowMaximize: () => Promise<boolean>
