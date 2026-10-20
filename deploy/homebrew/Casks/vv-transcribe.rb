@@ -12,7 +12,7 @@ cask "vv-transcribe" do
 
   name "Vv Transcribe"
   desc "Local AI subtitle transcription and proofreading tool for media professionals"
-  homepage "https://vv-transcribe.com/"
+  homepage "https://vvscribe.com/"
 
   app "Vv Transcribe.app"
 

@@ -9,7 +9,7 @@ const RELEASE_API = 'https://api.github.com/repos/DaQI-X/Vv-Transcribe/releases/
 const RELEASE_PAGE = 'https://github.com/DaQI-X/Vv-Transcribe/releases/latest'
 
 // 仅允许打开白名单域名，防止渲染进程传入任意 URL 造成开放跳转
-const ALLOWED_HOSTS = ['github.com', 'www.github.com']
+const ALLOWED_HOSTS = ['github.com', 'www.github.com', 'vvscribe.com', 'www.vvscribe.com']
 
 export interface UpdateInfo {
   currentVersion: string
