@@ -8,7 +8,7 @@
 import { app } from 'electron'
 import ffmpeg from 'fluent-ffmpeg'
 import { mkdir, rm, access } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -79,7 +79,7 @@ export interface ExtractResult {
 }
 
 export function probeFile(filePath: string): Promise<AudioMetadata> {
-  logger.serviceCall('AudioProcessor', 'probeFile', { filePath })
+  logger.serviceCall('AudioProcessor', 'probeFile', { name: basename(filePath) })
   ensureFfmpegPaths()
   return new Promise((resolve, reject) => {
     logger.debug('AudioProcessor', 'Calling ffmpeg.ffprobe...')
@@ -103,7 +103,7 @@ export function probeFile(filePath: string): Promise<AudioMetadata> {
 }
 
 export async function extractAudio(filePath: string): Promise<ExtractResult> {
-  logger.serviceCall('AudioProcessor', 'extractAudio', { filePath })
+  logger.serviceCall('AudioProcessor', 'extractAudio', { name: basename(filePath) })
   const tempDir = join(tmpdir(), `transcribe-${randomUUID()}`)
   await mkdir(tempDir, { recursive: true })
   logger.debug('AudioProcessor', 'Created temp directory', { tempDir })
@@ -116,7 +116,7 @@ export async function extractAudio(filePath: string): Promise<ExtractResult> {
   // 无音轨的视频直接交给 ffmpeg 会报 "Output file #0 does not contain any stream"
   // 提前拦截并给出用户可读的错误（经 IPC 冒泡为 toast）
   if (!metadata.hasAudio) {
-    logger.warn('AudioProcessor', 'File has no audio stream', { filePath })
+    logger.warn('AudioProcessor', 'File has no audio stream', { name: basename(filePath) })
     await cleanupTemp(tempDir)
     throw new Error('该文件不包含音频轨道，无法转写')
   }
@@ -129,7 +129,7 @@ export async function extractAudio(filePath: string): Promise<ExtractResult> {
       .audioCodec('pcm_s16le')
       .format('wav')
       .on('end', () => {
-        logger.info('AudioProcessor', 'Audio extraction completed', { wavPath })
+        logger.info('AudioProcessor', 'Audio extraction completed')
         resolve()
       })
       .on('error', (err: Error) => {

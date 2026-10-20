@@ -22,6 +22,8 @@ const api = {
     ipcRenderer.invoke('dialog:selectTextFile'),
   readTextFile: (filePath: string) =>
     ipcRenderer.invoke('file:readTextFile', filePath),
+  saveTextFile: (suggestedName: string, content: string) =>
+    ipcRenderer.invoke('file:saveText', { suggestedName, content }),
 
   startTranscription: (filePath: string, options: unknown) =>
     ipcRenderer.invoke('asr:start', filePath, options),

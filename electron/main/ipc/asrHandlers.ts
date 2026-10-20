@@ -5,6 +5,7 @@
  */
 import { ipcMain, BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { basename } from 'node:path'
 import { extractAudio, cleanupTemp } from '../services/audioProcessor'
 import { runTranscription } from '../services/asr/asrManager'
 import { getASRConfig } from '../services/settingsService'
@@ -37,11 +38,11 @@ export function registerASRHandlers() {
       }
 
       try {
-        console.log('[ASR] start job:', jobId, 'file:', filePath)
+        console.log('[ASR] start job:', jobId, 'file:', basename(filePath))
         sendProgress(0)
 
         const extractResult = await extractAudio(filePath)
-        console.log('[ASR] audio extracted:', extractResult.wavPath)
+        console.log('[ASR] audio extracted for job:', jobId)
         const state = activeJobs.get(jobId)
         if (state) state.tempDir = extractResult.tempDir
 
@@ -75,7 +76,9 @@ export function registerASRHandlers() {
         activeJobs.delete(jobId)
 
         const message = err instanceof Error ? err.message : '转写失败'
-        return { jobId, success: false, error: message }
+        // 用户主动取消时 signal.aborted 为真：回传 canceled 让渲染层退回初始态而不是弹「处理失败」
+        const canceled = signal.signal.aborted
+        return { jobId, success: false, canceled, error: canceled ? '转写已取消' : message }
       }
     },
   )

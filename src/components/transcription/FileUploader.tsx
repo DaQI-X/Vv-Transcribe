@@ -13,7 +13,7 @@ import { frontendLogger } from '@/utils/logger'
 type UploadMode = 'file' | 'url'
 
 export function FileUploader() {
-  const { setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress } = useTranscriptionStore()
+  const { setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
   const [mode, setMode] = useState<UploadMode>('file')
@@ -41,6 +41,8 @@ export function FileUploader() {
 
     try {
       const unsubscribe = api.onTranscriptionProgress((data) => {
+        // jobId 只在 asr:start 的返回值里会有，但那时转写已经结束；取消按钮需要在进行中就拿得到
+        setJobId(data.jobId)
         setProgress(data.progress)
 
         if (data.progress < 5) {
@@ -72,14 +74,19 @@ export function FileUploader() {
 
       setUnsubscribeProgress(unsubscribe)
 
-      frontendLogger.serviceCall('ASR', 'startTranscription', { filePath, language: 'zh' })
+      frontendLogger.serviceCall('ASR', 'startTranscription', { fileName, language: 'zh' })
       const result = await api.startTranscription(filePath, { language: 'zh' })
 
       if (!result.success) {
-        frontendLogger.error('FileUploader', 'Transcription failed', (result as any).error)
-        setError((result as any).error || '转写失败')
         unsubscribe()
         setUnsubscribeProgress(null)
+        if (result.canceled) {
+          frontendLogger.userAction('Transcription canceled', { fileName })
+          reset()
+          return
+        }
+        frontendLogger.error('FileUploader', 'Transcription failed', result.error)
+        setError(result.error || '转写失败')
         return
       }
 
@@ -92,7 +99,7 @@ export function FileUploader() {
       frontendLogger.error('FileUploader', 'Transcription error', err instanceof Error ? err.message : '转写失败')
       setError(err instanceof Error ? err.message : '转写失败')
     }
-  }, [api, setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress])
+  }, [api, setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress, reset])
 
   const handleSelectFile = useCallback(async () => {
     frontendLogger.userAction('File selection dialog opened')
@@ -102,7 +109,7 @@ export function FileUploader() {
       frontendLogger.userAction('File selection cancelled')
       return
     }
-    frontendLogger.userAction('File selected', { path: selectedPath })
+    frontendLogger.userAction('File selected', { name: selectedPath.split(/[\\/]/).pop() ?? selectedPath })
     const metadata = await api.getFileMetadata(selectedPath)
     if (!metadata) {
       toast.error('无法读取该文件的信息，请确认文件存在且为受支持的音视频格式')
@@ -201,7 +208,7 @@ export function FileUploader() {
 
       setDownloadStatus('')
       setDownloading(false)
-      frontendLogger.info('FileUploader', 'Download completed', { title: result.title, path: result.filePath })
+      frontendLogger.info('FileUploader', 'Download completed', { title: result.title })
 
       await startTranscriptionProcess(metadata.path, result.title || metadata.name, metadata.size)
     } catch (err) {

@@ -694,6 +694,32 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   white-space: nowrap;
 }
 
+.processing-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.processing-cancel-btn:hover:not(:disabled) {
+  border-color: var(--error-color);
+  color: var(--error-color);
+}
+
+.processing-cancel-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Failure view */
 .failure-content {
   display: flex;

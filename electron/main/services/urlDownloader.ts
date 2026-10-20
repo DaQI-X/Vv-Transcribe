@@ -207,7 +207,7 @@ function runYtDlp(ytDlpPath: string, args: string[], tempDir: string): Promise<D
         }
         const filePath = join(tempDir, mediaFile)
         const title = mediaFile.replace(/\.[^.]+$/, '')
-        logger.info('UrlDownloader', 'Download completed', { filePath, title })
+        logger.info('UrlDownloader', 'Download completed', { name: mediaFile, title })
         resolve({ success: true, filePath, tempDir, title })
       } catch (err) {
         resolve({ success: false, error: err instanceof Error ? err.message : '读取下载文件失败' })

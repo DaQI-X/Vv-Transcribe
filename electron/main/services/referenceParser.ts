@@ -3,7 +3,7 @@
  * 支持 .txt / .md / .srt / .docx / .pdf 格式的文本提取
  */
 import { readFile } from 'node:fs/promises'
-import { extname } from 'node:path'
+import { extname, basename } from 'node:path'
 import { logger } from './logger'
 
 /** 从 SRT 字幕文件中提取纯文本 */
@@ -51,7 +51,7 @@ function stripMarkdown(content: string): string {
 /** 根据文件扩展名提取纯文本 */
 export async function extractTextFromFile(filePath: string): Promise<string | null> {
   const ext = extname(filePath).toLowerCase()
-  logger.serviceCall('ReferenceParser', 'extractTextFromFile', { filePath, ext })
+  logger.serviceCall('ReferenceParser', 'extractTextFromFile', { name: basename(filePath), ext })
 
   try {
     switch (ext) {

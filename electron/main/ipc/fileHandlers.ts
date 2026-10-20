@@ -4,8 +4,8 @@
  * 支持格式：MP3/WAV/M4A/FLAC/OGG/WMA/MP4/MKV/AVI/MOV/WebM/FLV
  */
 import { ipcMain, dialog } from 'electron'
-import { stat } from 'node:fs/promises'
-import { extname } from 'node:path'
+import { stat, writeFile } from 'node:fs/promises'
+import { basename, extname } from 'node:path'
 import { extractAudio, cleanupTemp, probeFile } from '../services/audioProcessor'
 import { downloadFromUrl } from '../services/urlDownloader'
 import { extractTextFromFile } from '../services/referenceParser'
@@ -32,12 +32,12 @@ export function registerFileHandlers() {
       logger.userAction('File selection cancelled')
       return null
     }
-    logger.userAction('File selected', { path: result.filePaths[0] })
+    logger.userAction('File selected', { name: basename(result.filePaths[0]) })
     return result.filePaths[0]
   })
 
   ipcMain.handle('file:getMetadata', async (_event, filePath: string) => {
-    logger.serviceCall('FileHandlers', 'getMetadata', { filePath })
+    logger.serviceCall('FileHandlers', 'getMetadata', { name: basename(filePath) })
     try {
       const stats = await stat(filePath)
       const ext = extname(filePath).toLowerCase()
@@ -50,7 +50,11 @@ export function registerFileHandlers() {
         type: isAudio ? 'audio' as const : 'video' as const,
         lastModified: stats.mtimeMs,
       }
-      logger.info('FileHandlers', 'Metadata retrieved', metadata)
+      logger.info('FileHandlers', 'Metadata retrieved', {
+        name: metadata.name,
+        size: metadata.size,
+        type: metadata.type,
+      })
       return metadata
     } catch (err) {
       logger.serviceError('FileHandlers', 'getMetadata', err)
@@ -59,13 +63,12 @@ export function registerFileHandlers() {
   })
 
   ipcMain.handle('file:extractAudio', async (_event, filePath: string) => {
-    logger.userAction('Extract audio started', { filePath })
+    logger.userAction('Extract audio started', { name: basename(filePath) })
     try {
       const result = await extractAudio(filePath)
       logger.userAction('Extract audio completed', {
-        filePath,
+        name: basename(filePath),
         duration: result.metadata.duration,
-        wavPath: result.wavPath,
       })
       return {
         success: true,
@@ -88,7 +91,7 @@ export function registerFileHandlers() {
   })
 
   ipcMain.handle('file:probeAudio', async (_event, filePath: string) => {
-    logger.serviceCall('FileHandlers', 'probeAudio', { filePath })
+    logger.serviceCall('FileHandlers', 'probeAudio', { name: basename(filePath) })
     try {
       const metadata = await probeFile(filePath)
       logger.info('FileHandlers', 'Probe audio success', metadata)
@@ -107,7 +110,7 @@ export function registerFileHandlers() {
     try {
       const result = await downloadFromUrl(url)
       if (result.success) {
-        logger.userAction('Download from URL completed', { filePath: result.filePath, title: result.title })
+        logger.userAction('Download from URL completed', { name: basename(result.filePath ?? ''), title: result.title })
       } else {
         logger.serviceError('FileHandlers', 'downloadFromUrl', new Error(result.error))
       }
@@ -133,15 +136,50 @@ export function registerFileHandlers() {
       logger.userAction('Text file selection cancelled')
       return null
     }
-    logger.userAction('Text file selected', { path: result.filePaths[0] })
+    logger.userAction('Text file selected', { name: basename(result.filePaths[0]) })
     return result.filePaths[0]
   })
 
+  /**
+   * 导出文本：走系统「另存为」面板后由主进程写盘。
+   * 渲染进程的 blob + <a download> 拿不到取消/失败信号，URL.revokeObjectURL 还可能抢在写盘前把内容释放掉。
+   */
+  ipcMain.handle(
+    'file:saveText',
+    async (_event, payload: { suggestedName: string; content: string }) => {
+      const safeName = basename(payload.suggestedName || 'transcript')
+      const ext = extname(safeName).slice(1).toLowerCase()
+      const result = await dialog.showSaveDialog({
+        defaultPath: safeName,
+        filters: [{ name: '转写文本', extensions: [ext || 'txt'] }],
+      })
+      if (result.canceled || !result.filePath) {
+        logger.userAction('Export cancelled', { name: safeName })
+        return { success: false, canceled: true }
+      }
+
+      try {
+        await writeFile(result.filePath, payload.content, 'utf-8')
+        logger.info('FileHandlers', 'Export completed', {
+          name: basename(result.filePath),
+          size: payload.content.length,
+        })
+        return { success: true, name: basename(result.filePath) }
+      } catch (err) {
+        logger.serviceError('FileHandlers', 'saveText', err)
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : '写入文件失败',
+        }
+      }
+    },
+  )
+
   ipcMain.handle('file:readTextFile', async (_event, filePath: string) => {
-    logger.serviceCall('FileHandlers', 'readTextFile', { filePath })
+    logger.serviceCall('FileHandlers', 'readTextFile', { name: basename(filePath) })
     try {
       const content = await extractTextFromFile(filePath)
-      logger.info('FileHandlers', 'Text file read', { filePath, size: content?.length ?? 0 })
+      logger.info('FileHandlers', 'Text file read', { name: basename(filePath), size: content?.length ?? 0 })
       return content
     } catch (err) {
       logger.serviceError('FileHandlers', 'readTextFile', err)

@@ -2,10 +2,13 @@
  * 上传/处理状态展示组件
  * 根据转写状态切换三种视图：
  * - UploadingView: 文件读取中（提取音频阶段）
- * - ProcessingView: ASR 转写中（带波形动画和进度条）
+ * - ProcessingView: ASR 转写中（带波形动画、进度条和取消入口）
  * - FailureView: 处理失败（显示错误信息和重试按钮）
  */
-import { X, Volume2, Loader2 } from 'lucide-react'
+import { useState } from 'react'
+import { X, Volume2, Loader2, Ban } from 'lucide-react'
+import { toast } from '@/components/ui/Toast'
+import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 
 function formatFileSize(bytes: number): string {
@@ -37,7 +40,12 @@ function UploadingView({ fileName, fileSize }: { fileName: string | null; fileSi
   )
 }
 
-function ProcessingView({ fileName, progress }: { fileName: string | null; progress: number }) {
+function ProcessingView({ fileName, progress, onCancel, cancelling }: {
+  fileName: string | null
+  progress: number
+  onCancel: () => void
+  cancelling: boolean
+}) {
   return (
     <div className="status-container">
       <div className="status-card status-card--processing">
@@ -91,6 +99,11 @@ function ProcessingView({ fileName, progress }: { fileName: string | null; progr
         </div>
 
         <div className="processing-file-name">{fileName}</div>
+
+        <button className="processing-cancel-btn" onClick={onCancel} disabled={cancelling}>
+          <Ban size={14} />
+          {cancelling ? '取消中...' : '取消转写'}
+        </button>
       </div>
     </div>
   )
@@ -128,13 +141,30 @@ function FailureView({ title, message, fileName, onRetry, buttonLabel = '重新�
 }
 
 export function UploadStatus() {
-  const { fileName, fileSize, status, progress, error, reset } = useTranscriptionStore()
+  const { fileName, fileSize, status, progress, error, reset, jobId } = useTranscriptionStore()
+  const [cancelling, setCancelling] = useState(false)
 
   const isProcessing = status === 'transcribing'
   const isFailed = status === 'error' || !!error
 
   const handleRetry = () => {
     reset()
+  }
+
+  const handleCancel = async () => {
+    const api = getElectronAPI()
+    if (!api || !jobId) {
+      reset()
+      return
+    }
+    setCancelling(true)
+    try {
+      await api.cancelTranscription(jobId)
+    } catch (err) {
+      setCancelling(false)
+      toast.error(err instanceof Error ? err.message : '取消转写失败')
+    }
+    // 不在这里 reset：等 asr:start 以 canceled 结束，由 FileUploader 统一回到初始态
   }
 
   if (isFailed) {
@@ -150,7 +180,14 @@ export function UploadStatus() {
   }
 
   if (isProcessing) {
-    return <ProcessingView fileName={fileName} progress={progress} />
+    return (
+      <ProcessingView
+        fileName={fileName}
+        progress={progress}
+        onCancel={handleCancel}
+        cancelling={cancelling}
+      />
+    )
   }
 
   return <UploadingView fileName={fileName} fileSize={fileSize} />

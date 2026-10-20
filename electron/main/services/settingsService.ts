@@ -69,3 +69,16 @@ export async function getASRConfig(): Promise<Record<string, unknown>> {
     model: settings.asrModel,
   }
 }
+
+/**
+ * AI 纠错配置。apiBase 留空时回落到 OpenAI 端点，
+ * 否则请求会拼成 `/v1/chat/completions` 这种非法相对地址，报错信息对用户毫无意义。
+ */
+export async function getAIConfig(): Promise<{ apiKey: string; apiBase: string; model: string }> {
+  const settings = await loadSettings()
+  return {
+    apiKey: settings.aiApiKey,
+    apiBase: settings.aiApiBase || 'https://api.openai.com',
+    model: settings.aiModel || 'gpt-4o-mini',
+  }
+}

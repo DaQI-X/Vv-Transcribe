@@ -48,11 +48,21 @@ export interface ElectronAPI {
   downloadFromUrl: (url: string) => Promise<DownloadFromUrlResult>
   selectTextFile: () => Promise<string | null>
   readTextFile: (filePath: string) => Promise<string | null>
+  saveTextFile: (
+    suggestedName: string,
+    content: string,
+  ) => Promise<{ success: boolean; name?: string; canceled?: boolean; error?: string }>
 
   startTranscription: (
     filePath: string,
     options: unknown,
-  ) => Promise<{ jobId: string; success: boolean; provider?: 'local' | 'cloud'; error?: string }>
+  ) => Promise<{
+    jobId: string
+    success: boolean
+    provider?: 'local' | 'cloud'
+    canceled?: boolean
+    error?: string
+  }>
   cancelTranscription: (jobId: string) => Promise<void>
 
   onTranscriptionProgress: (
@@ -77,18 +87,21 @@ export interface ElectronAPI {
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
   analyzeReference: (
     referenceText: string,
-  ) => Promise<Array<{
-    text: string
-    suggestion?: string
-    explanation: string
-    dictionaryHint?: string
-    refStart: number
-    refEnd: number
-  }>>
+  ) => Promise<{
+    issues: Array<{
+      text: string
+      suggestion?: string
+      explanation: string
+      dictionaryHint?: string
+      refStart: number
+      refEnd: number
+    }>
+    error: string | null
+  }>
 
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
   lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>
-  checkDictionaryUpdate: () => Promise<{ hasUpdate: boolean; latestVersion?: string; currentVersion: string }>
+  checkDictionaryUpdate: () => Promise<{ hasUpdate: boolean; latestCommit?: string; currentVersion: string; error: string | null }>
   downloadDictionaryUpdate: () => Promise<{ success: boolean; error?: string }>
   getDictionaryVersion: () => Promise<string>
 

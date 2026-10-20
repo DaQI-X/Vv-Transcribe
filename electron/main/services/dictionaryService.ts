@@ -176,32 +176,29 @@ async function getLatestCommitHash(): Promise<string | null> {
   }
 }
 
-export async function checkForUpdate(): Promise<{ hasUpdate: boolean; latestCommit?: string; currentVersion: string }> {
-  try {
-    const latestCommit = await getLatestCommitHash()
-    if (!latestCommit) {
-      return { hasUpdate: false, currentVersion }
-    }
+export async function checkForUpdate(): Promise<{ hasUpdate: boolean; latestCommit?: string; currentVersion: string; error: string | null }> {
+  const latestCommit = await getLatestCommitHash()
+  if (!latestCommit) {
+    // 取不到远端 commit 不等于「已是最新」，必须把失败如实回传给界面
+    return { hasUpdate: false, currentVersion, error: '无法连接词库源（GitHub），请检查网络后重试' }
+  }
 
-    const builtinPath = getBuiltinDictionaryPath()
-    const builtinVersion = await loadVersionInfo(builtinPath)
-    const updatePath = getUpdateDictionaryPath()
-    const updateVersion = await loadVersionInfo(updatePath)
+  const builtinPath = getBuiltinDictionaryPath()
+  const builtinVersion = await loadVersionInfo(builtinPath)
+  const updatePath = getUpdateDictionaryPath()
+  const updateVersion = await loadVersionInfo(updatePath)
 
-    const currentCommit = updateVersion?.commitHash || builtinVersion?.commitHash || ''
+  const currentCommit = updateVersion?.commitHash || builtinVersion?.commitHash || ''
 
-    if (currentCommit === latestCommit) {
-      return { hasUpdate: false, currentVersion }
-    }
+  if (currentCommit === latestCommit) {
+    return { hasUpdate: false, currentVersion, error: null }
+  }
 
-    return {
-      hasUpdate: true,
-      latestCommit: latestCommit.slice(0, 7),
-      currentVersion,
-    }
-  } catch (error) {
-    console.error('[Dictionary] Failed to check for update:', error)
-    return { hasUpdate: false, currentVersion }
+  return {
+    hasUpdate: true,
+    latestCommit: latestCommit.slice(0, 7),
+    currentVersion,
+    error: null,
   }
 }
 
@@ -230,7 +227,8 @@ export async function downloadUpdate(): Promise<{ success: boolean; error?: stri
     }
 
     const versionInfo: VersionInfo = {
-      version: '2.0.0',
+      // 用源仓库 commit 短哈希作为版本号：自增的固定值（曾经的 2.0.0）在第二次更新后就和实际数据脱节了
+      version: latestCommit.slice(0, 7),
       commitHash: latestCommit,
       updatedAt: new Date().toISOString(),
     }

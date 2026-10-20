@@ -3,6 +3,7 @@
  * 通过 HTTP 调用本地 Python ASR 服务（faster-whisper + FastAPI，运行在 localhost:8000）
  * 支持进度回调和任务取消
  */
+import { basename } from 'node:path'
 import type { ASRProvider, ASRSegment, ASRProgress } from './types'
 
 const PYTHON_ASR_URL = 'http://localhost:8000'
@@ -43,7 +44,7 @@ export class LocalASRProvider implements ASRProvider {
 
     options.onProgress?.({ percent: 10 })
 
-    console.log('[LocalASR] Calling Python ASR service:', { audioFilePath, language: options.language })
+    console.log('[LocalASR] Calling Python ASR service:', { name: basename(audioFilePath), language: options.language })
 
     try {
       const response = await fetch(`${PYTHON_ASR_URL}/transcribe`, {

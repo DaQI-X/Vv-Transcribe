@@ -169,6 +169,7 @@ AI 纠错流程：
 | `file:extractAudio` | 渲染 → 主 | 提取音频为 WAV |
 | `file:cleanupTemp` | 渲染 → 主 | 清理临时文件 |
 | `file:probeAudio` | 渲染 → 主 | 探测音频信息 |
+| `file:saveText` | 渲染 → 主 | 系统「另存为」面板导出转写文本 |
 | `asr:start` | 渲染 → 主 | 启动转写任务 |
 | `asr:cancel` | 渲染 → 主 | 取消转写任务 |
 | `asr:progress` | 主 → 渲染 | 推送转写进度和段落 |

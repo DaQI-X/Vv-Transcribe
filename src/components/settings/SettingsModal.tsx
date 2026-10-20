@@ -21,6 +21,13 @@ const DEFAULT_VALUES: SettingsValues = {
   aiProvider: 'openai', aiApiKey: '', aiApiBase: '', aiModel: '',
 }
 
+/** 纠错服务商用到的端点与默认模型；主进程会在 apiBase 拼 /v1/chat/completions */
+const AI_PROVIDER_PRESETS: Record<string, { apiBase: string; model: string }> = {
+  openai: { apiBase: 'https://api.openai.com', model: 'gpt-4o-mini' },
+  deepseek: { apiBase: 'https://api.deepseek.com', model: 'deepseek-chat' },
+  qwen: { apiBase: 'https://dashscope.aliyuncs.com/compatible-mode', model: 'qwen-plus' },
+}
+
 const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
   ai: '纠错配置',
@@ -110,6 +117,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     setValues((prev) => ({ ...prev, [field]: value }))
   }
 
+  /** 切换服务商时顺带填入端点与默认模型；自定义接口保留用户已填内容，两者都要点保存才生效 */
+  const handleAiProviderChange = (provider: string) => {
+    const preset = AI_PROVIDER_PRESETS[provider]
+    setValues((prev) => ({
+      ...prev,
+      aiProvider: provider,
+      ...(preset ? { aiApiBase: preset.apiBase, aiModel: preset.model } : {}),
+    }))
+  }
+
   const loadDictVersion = useCallback(async () => {
     if (!api) return
     try {
@@ -164,6 +181,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     setDictUpdating(true)
     try {
       const result = await api.checkDictionaryUpdate()
+      if (result.error) {
+        toast.error(`检查词库更新失败：${result.error}`)
+        return
+      }
       if (!result.hasUpdate) {
         toast.info('词库已是最新版本')
         return
@@ -174,7 +195,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         toast.success('词库更新成功')
         await loadDictVersion()
       } else {
-        toast.error(`词库更新失败：${download.error}`)
+        toast.error(`词库更新失败：${download.error || '未知错误'}`)
       }
     } catch {
       toast.error('检查词库更新失败')
@@ -276,13 +297,14 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 <select
                   className="settings-form-select"
                   value={values.aiProvider}
-                  onChange={(e) => updateField('aiProvider', e.target.value)}
+                  onChange={(e) => handleAiProviderChange(e.target.value)}
                 >
                   <option value="openai">OpenAI</option>
                   <option value="deepseek">DeepSeek</option>
                   <option value="qwen">通义千问</option>
                   <option value="custom">自定义兼容接口</option>
                 </select>
+                <span className="settings-form-hint">切换服务商会自动填入下方接口地址和模型，可自行修改，保存后生效</span>
               </div>
               <div className="settings-form-group">
                 <label className="settings-form-label">API Base URL</label>

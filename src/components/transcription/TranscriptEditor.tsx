@@ -95,15 +95,25 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
 
   const totalChars = segments.reduce((sum, seg) => sum + seg.text.length, 0)
 
-  const handleExport = (format: ExportFormat) => {
-    if (segments.length === 0) return
+  const handleExport = async (format: ExportFormat) => {
+    const api = getElectronAPI()
+    if (!api || segments.length === 0) return
+
     const content = exportTranscript(segments, format)
     const ext = getExportExtension(format)
     const baseName = fileName?.replace(/\.[^.]+$/, '') ?? 'transcript'
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a'); a.href = url; a.download = `${baseName}.${ext}`; a.click()
-    URL.revokeObjectURL(url)
+
+    try {
+      const result = await api.saveTextFile(`${baseName}.${ext}`, content)
+      if (result.canceled) return
+      if (result.success) {
+        toast.success(`已导出 ${result.name}`)
+      } else {
+        toast.error(result.error || '导出失败')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '导出失败')
+    }
   }
 
   const fetchExplanations = useCallback(async (
@@ -174,10 +184,11 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
 
         setStatus('explaining')
 
-        const [explainedDiffs, rawIssues] = await Promise.all([
+        const [explainedDiffs, referenceAnalysis] = await Promise.all([
           fetchExplanations(diffs),
           api.analyzeReference(referenceText),
         ])
+        const rawIssues = referenceAnalysis.issues
 
         const issuesBySegment = mapIssuesToSegments(rawIssues, alignment)
         for (const [segId, issues] of issuesBySegment) {
@@ -191,7 +202,10 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         setStatus('completed')
 
         const issueCount = rawIssues.length
-        if (totalChanges === 0 && issueCount === 0) {
+        if (referenceAnalysis.error) {
+          // 字符级差异是本地算出来的，AI 分析失败时照样有效，只把 AI 那部分的失败如实说出
+          toast.error(`${referenceAnalysis.error}（下方差异为逐字比对结果，不含 AI 判断）`)
+        } else if (totalChanges === 0 && issueCount === 0) {
           toast.info('转写内容与参考稿一致，无需纠错')
         } else {
           const parts: string[] = []

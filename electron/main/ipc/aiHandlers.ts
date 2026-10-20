@@ -5,7 +5,7 @@
  */
 import { ipcMain } from 'electron'
 import { OpenAICompatibleProvider } from '../services/ai/openaiCompatible'
-import { loadSettings } from '../services/settingsService'
+import { getAIConfig } from '../services/settingsService'
 import type { DifferenceItem } from '../services/ai/types'
 
 export function registerAIHandlers() {
@@ -16,12 +16,7 @@ export function registerAIHandlers() {
       text: string,
       options?: { language?: string; promptTemplate?: string },
     ) => {
-      const settings = await loadSettings()
-      const config = {
-        apiKey: settings.aiApiKey,
-        apiBase: settings.aiApiBase,
-        model: settings.aiModel,
-      }
+      const config = await getAIConfig()
 
       if (!config.apiKey) {
         return {
@@ -44,12 +39,7 @@ export function registerAIHandlers() {
   ipcMain.handle(
     'ai:explainDifferences',
     async (_event, differences: DifferenceItem[]) => {
-      const settings = await loadSettings()
-      const config = {
-        apiKey: settings.aiApiKey,
-        apiBase: settings.aiApiBase,
-        model: settings.aiModel,
-      }
+      const config = await getAIConfig()
 
       if (!config.apiKey) {
         return differences.map(() => ({
@@ -79,23 +69,22 @@ export function registerAIHandlers() {
   ipcMain.handle(
     'ai:analyzeReference',
     async (_event, referenceText: string) => {
-      const settings = await loadSettings()
-      const config = {
-        apiKey: settings.aiApiKey,
-        apiBase: settings.aiApiBase,
-        model: settings.aiModel,
-      }
+      const config = await getAIConfig()
 
       if (!config.apiKey) {
-        return []
+        return {
+          issues: [],
+          error: '未配置 AI 纠错 API Key，请在「设置 → 纠错配置」中填写',
+        }
       }
 
       try {
         const provider = new OpenAICompatibleProvider(config)
-        return await provider.analyzeReference(referenceText)
+        return { issues: await provider.analyzeReference(referenceText), error: null }
       } catch (err) {
+        const message = err instanceof Error ? err.message : '参考稿 AI 分析失败'
         console.error('AI 参考文本分析失败:', err)
-        return []
+        return { issues: [], error: `参考稿 AI 分析失败: ${message}` }
       }
     },
   )

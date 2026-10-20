@@ -6,6 +6,7 @@
  */
 import { useRef, useEffect, useCallback } from 'react'
 import { Play, Pause, Volume2 } from 'lucide-react'
+import { toast } from '@/components/ui/Toast'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 
@@ -84,17 +85,24 @@ export function AudioPlayer() {
     const onEnded = () => {
       if (!aborted) setIsPlaying(false)
     }
+    const onError = () => {
+      if (aborted) return
+      // 解码失败时 duration 永远是 0、进度条一片空白，不给提示用户只会以为程序卡住
+      toast.error('音视频加载失败，可能是编码不受支持或文件已被移动；转写结果仍可正常编辑和导出')
+    }
 
     media.src = `file://${filePath}`
     media.addEventListener('loadedmetadata', onLoadedMetadata)
     media.addEventListener('timeupdate', onTimeUpdate)
     media.addEventListener('ended', onEnded)
+    media.addEventListener('error', onError)
 
     return () => {
       aborted = true
       media.removeEventListener('loadedmetadata', onLoadedMetadata)
       media.removeEventListener('timeupdate', onTimeUpdate)
       media.removeEventListener('ended', onEnded)
+      media.removeEventListener('error', onError)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filePath, isVideo])
@@ -125,10 +133,12 @@ export function AudioPlayer() {
     } else {
       const playPromise = media.play()
       if (playPromise !== undefined) {
-        playPromise.catch(error => {
+        playPromise.catch((error: Error) => {
           if (error.name === 'AbortError') return
-          console.warn('[AudioPlayer] Play failed:', error)
           setIsPlaying(false)
+          toast.error(error.name === 'NotAllowedError'
+            ? '播放被系统拦截，请再次点击播放按钮'
+            : '播放失败，可能是编码不受支持；转写结果不受影响')
         })
       }
       setIsPlaying(true)
