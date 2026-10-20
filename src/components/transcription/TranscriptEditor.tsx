@@ -149,6 +149,13 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
   const handleAICorrection = useCallback(async () => {
     const api = getElectronAPI()
     if (!api || segments.length === 0) return
+
+    const settings = await api.getSettings()
+    if (!settings.aiApiKey) {
+      toast.error('请先在「设置 → 纠错配置」中填写 AI API Key')
+      return
+    }
+
     setLoading(true)
 
     const waitingMessages = ['再等等～', '再等等等～', '再等等等等～', '再等等等等等～', '马上就好～']
@@ -196,6 +203,12 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         setStatus('comparing')
         const fullText = segments.map((s) => s.text).join('')
         const result = await api.correctText(fullText, { language: 'zh' })
+
+        if (result.error) {
+          setStatus('idle')
+          toast.error(result.error)
+          return
+        }
 
         if (!result.corrected || result.corrected.trim() === fullText) {
           setStatus('idle')

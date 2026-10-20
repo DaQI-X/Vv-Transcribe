@@ -71,7 +71,7 @@ export interface ElectronAPI {
   correctText: (
     text: string,
     options: unknown,
-  ) => Promise<{ corrected: string; changes: string[] }>
+  ) => Promise<{ corrected: string; changes: string[]; error?: string }>
   explainDifferences: (
     differences: Array<{ original: string; corrected: string; context: string }>,
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>

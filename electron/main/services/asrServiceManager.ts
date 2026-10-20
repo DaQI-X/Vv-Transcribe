@@ -22,6 +22,8 @@ const SHUTDOWN_TIMEOUT_MS = 5_000
 
 let asrProcess: ChildProcess | null = null
 let asrReady = false
+/** 未就绪时的用户可读原因，随转写失败一起展示，避免只留一句 fetch failed */
+let asrError: string | null = null
 
 /** 获取 ASR 二进制文件路径（区分开发/打包环境，适配架构与 Windows .exe） */
 function getBinaryPath(): string {
@@ -83,6 +85,7 @@ export async function startASRService(): Promise<boolean> {
   const binaryPath = getBinaryPath()
 
   if (!existsSync(binaryPath)) {
+    asrError = '本地转写引擎文件缺失，请重新安装 Vv Transcribe 后再试'
     console.warn(`[ASR Service] Binary not found at ${binaryPath}, local ASR unavailable`)
     return false
   }
@@ -142,6 +145,7 @@ export async function startASRService(): Promise<boolean> {
   })
 
   asrReady = await waitForReady()
+  asrError = asrReady ? null : '本地转写引擎启动超时（首次运行需下载模型，可能耗时较久），请重新启动应用'
 
   if (!asrReady) {
     console.error('[ASR Service] Failed to become ready within timeout')
@@ -181,7 +185,10 @@ export function stopASRService(): Promise<void> {
   })
 }
 
-/** 获取 ASR 服务状态 */
-export function isASRServiceReady(): boolean {
-  return asrReady
+/** 获取 ASR 服务状态；未就绪时 error 为可直接展示给用户的原因 */
+export function getASRServiceStatus(): { ready: boolean; error: string | null } {
+  return {
+    ready: asrReady,
+    error: asrReady ? null : (asrError || '本地转写引擎未运行，请重新启动应用'),
+  }
 }

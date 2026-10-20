@@ -279,6 +279,19 @@ python-asr/main.py + dependencies
 | API Key | 云端 ASR 密钥 | 空 |
 | 模型 | ASR 模型名称 | 空（默认 whisper-1） |
 
+- **只有「转写模式 = 云端优先」且填了云端 API Key，音频才会发出本机。** 默认的本地模式不发起任何网络转写请求；AI 纠错的 Key 只处理文本，不会上传音视频。
+- 本地转写依赖内置的 Python ASR 服务（打包后自动拉起，开发模式需手动启动，见「快速开始」）。引擎未能启动时，转写会直接给出原因而不是 `fetch failed`。
+
+### 链接转写
+
+链接解析依赖外部命令行工具 **yt-dlp**（体积与更新原因未随包内置，需使用者自行安装）：
+
+- macOS：`brew install yt-dlp`
+- Windows：`winget install yt-dlp.yt-dlp`（或 `pip install -U yt-dlp`）
+
+应用依次探测 `/opt/homebrew/bin/yt-dlp`、`/usr/local/bin/yt-dlp`、`/usr/bin/yt-dlp`，都找不到时回退到 PATH 上的 `yt-dlp`；两者都没有时，链接转写会提示上面的安装命令。
+部分带风控的站点需要浏览器 cookies 才能解析，应用会先用无头浏览器取 cookies 再重试；`--impersonate` 依赖 Python 的 `curl_cffi`，Homebrew 装的 yt-dlp 通常没有它，此时自动降级为不带浏览器模拟的请求。
+
 ### AI 纠错配置
 
 | 配置项 | 说明 | 默认值 |
@@ -300,6 +313,6 @@ python-asr/main.py + dependencies
 - 开发模式下需手动启动 Python ASR 服务（`python-asr/main.py`），打包后的应用会自动启动内置的 ASR 二进制文件
 - 首次运行 Python ASR 服务时会自动下载 Whisper 模型（约 150MB），使用 hf-mirror.com 镜像
 - 视频文件播放依赖 `webSecurity: false` 配置，通过 `file://` 协议加载本地文件
-- AI 纠错需要配置有效的 API Key，否则返回原文
+- AI 纠错需要配置有效的 API Key；未配置时点击纠错会直接弹出提示，不会静默返回原文
 - 编译 Python ASR 二进制需要先安装 PyInstaller（`pip install pyinstaller`），并在激活的虚拟环境中执行
 # Vv-Transcribe

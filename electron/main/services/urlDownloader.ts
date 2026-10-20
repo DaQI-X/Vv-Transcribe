@@ -216,7 +216,10 @@ function runYtDlp(ytDlpPath: string, args: string[], tempDir: string): Promise<D
 
     proc.on('error', (err) => {
       logger.serviceError('UrlDownloader', 'runYtDlp', err)
-      resolve({ success: false, error: `无法启动 yt-dlp: ${err.message}` })
+      const hint = (err as NodeJS.ErrnoException).code === 'ENOENT'
+        ? '未检测到 yt-dlp，链接转写需要先安装：macOS 执行 brew install yt-dlp，Windows 执行 winget install yt-dlp.yt-dlp，安装后重启应用'
+        : `无法启动 yt-dlp: ${err.message}`
+      resolve({ success: false, error: hint })
     })
   })
 }

@@ -104,7 +104,10 @@ export function FileUploader() {
     }
     frontendLogger.userAction('File selected', { path: selectedPath })
     const metadata = await api.getFileMetadata(selectedPath)
-    if (!metadata) return
+    if (!metadata) {
+      toast.error('无法读取该文件的信息，请确认文件存在且为受支持的音视频格式')
+      return
+    }
 
     await startTranscriptionProcess(metadata.path, metadata.name, metadata.size)
   }, [api, startTranscriptionProcess])
@@ -140,15 +143,22 @@ export function FileUploader() {
     const ext = '.' + file.name.split('.').pop()?.toLowerCase()
     if (!validExts.includes(ext)) {
       frontendLogger.warn('FileUploader', 'Invalid file format', { fileName: file.name, ext })
+      toast.error(`不支持的文件格式「${file.name}」，请上传音视频文件`)
       return
     }
 
     frontendLogger.userAction('File dropped', { fileName: file.name })
     const filePath = api.getDroppedFilePath(file)
-    if (!filePath) return
+    if (!filePath) {
+      toast.error('无法读取拖入文件的路径，请改用点击上传')
+      return
+    }
 
     const metadata = await api.getFileMetadata(filePath)
-    if (!metadata) return
+    if (!metadata) {
+      toast.error('无法读取该文件的信息，请确认文件存在且为受支持的音视频格式')
+      return
+    }
 
     await startTranscriptionProcess(metadata.path, metadata.name, metadata.size)
   }, [api, startTranscriptionProcess])
