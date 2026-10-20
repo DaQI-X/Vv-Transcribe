@@ -71,14 +71,17 @@ export async function getASRConfig(): Promise<Record<string, unknown>> {
 }
 
 /**
- * AI 纠错配置。apiBase 留空时回落到 OpenAI 端点，
- * 否则请求会拼成 `/v1/chat/completions` 这种非法相对地址，报错信息对用户毫无意义。
+ * AI 纠错配置。
+ * 请求地址由主进程拼成 `${apiBase}/v1/chat/completions`，而各家文档常直接给
+ * `https://api.openai.com/v1` 这种带后缀的形式，所以这里容忍末尾斜杠和多余的 /v1，
+ * 并在留空时回落到 OpenAI 端点，否则拼出来的是非法相对地址，报错对用户毫无意义。
  */
 export async function getAIConfig(): Promise<{ apiKey: string; apiBase: string; model: string }> {
   const settings = await loadSettings()
+  const apiBase = settings.aiApiBase.replace(/\/+$/, '').replace(/\/v1$/, '')
   return {
     apiKey: settings.aiApiKey,
-    apiBase: settings.aiApiBase || 'https://api.openai.com',
+    apiBase: apiBase || 'https://api.openai.com',
     model: settings.aiModel || 'gpt-4o-mini',
   }
 }
