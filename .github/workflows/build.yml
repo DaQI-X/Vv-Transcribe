@@ -141,12 +141,28 @@ jobs:
         with:
           path: artifacts
 
+      # tag 注解正文（首行标题之后的部分）就是给人读的发布说明。
+      # 轻量标签没有注解对象，此时导出空文件，发布说明只剩自动生成的 changelog。
+      - name: Export tag annotation as release notes
+        run: |
+          git fetch --force --no-tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = tag ]; then
+            git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
+          else
+            : > release-notes.md
+            echo "::notice::${GITHUB_REF_NAME} 是轻量标签，没有 tag 注解可用，发布说明只用自动生成的 changelog"
+          fi
+          echo "release-notes.md $(wc -c < release-notes.md) bytes:"
+          cat release-notes.md
+
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.exe
+          body_path: release-notes.md
+          # 与 body_path 并存时，action 会把自动生成的 changelog 追加在正文之后
           generate_release_notes: true
           fail_on_unmatched_files: true
 
