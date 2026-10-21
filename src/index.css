@@ -468,7 +468,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 .status-card {
   width: 620px;
-  height: 320px;
+  height: 360px;
   border-radius: 16px;
   border: 1px solid var(--border-color);
   background: var(--bg-card);
@@ -708,6 +708,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   cursor: pointer;
   font-family: var(--font-sans);
   transition: color 0.2s ease, border-color 0.2s ease;
+  margin-top: 10px;
 }
 
 .processing-cancel-btn:hover:not(:disabled) {
