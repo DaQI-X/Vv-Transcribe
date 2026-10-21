@@ -9,9 +9,13 @@ export interface ASRSegment {
   confidence?: number
 }
 
+/** 本地引擎的阶段性状态：目前只有首次加载/下载模型 */
+export type ASRStage = 'loading_model'
+
 export interface ASRProgress {
   percent: number
   segment?: ASRSegment
+  stage?: ASRStage
 }
 
 export interface ASROptions {

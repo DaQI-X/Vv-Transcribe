@@ -13,7 +13,7 @@ import { frontendLogger } from '@/utils/logger'
 type UploadMode = 'file' | 'url'
 
 export function FileUploader() {
-  const { setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
+  const { setFile, setStatus, setProgress, setStage, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
   const [mode, setMode] = useState<UploadMode>('file')
@@ -44,6 +44,7 @@ export function FileUploader() {
         // jobId 只在 asr:start 的返回值里会有，但那时转写已经结束；取消按钮需要在进行中就拿得到
         setJobId(data.jobId)
         setProgress(data.progress)
+        setStage(data.stage ?? null)
 
         if (data.progress < 5) {
           setStatus('extracting_audio')

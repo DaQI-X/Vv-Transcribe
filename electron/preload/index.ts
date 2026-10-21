@@ -31,11 +31,16 @@ const api = {
     ipcRenderer.invoke('asr:cancel', jobId),
 
   onTranscriptionProgress: (
-    callback: (data: { jobId: string; progress: number; segment?: unknown }) => void,
+    callback: (data: {
+      jobId: string
+      progress: number
+      segment?: unknown
+      stage?: string
+    }) => void,
   ) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      data: { jobId: string; progress: number; segment?: unknown },
+      data: { jobId: string; progress: number; segment?: unknown; stage?: string },
     ) => callback(data)
     ipcRenderer.on('asr:progress', listener)
     return () => {

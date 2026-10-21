@@ -40,12 +40,15 @@ function UploadingView({ fileName, fileSize }: { fileName: string | null; fileSi
   )
 }
 
-function ProcessingView({ fileName, progress, onCancel, cancelling }: {
+function ProcessingView({ fileName, progress, stage, onCancel, cancelling }: {
   fileName: string | null
   progress: number
+  stage: string | null
   onCancel: () => void
   cancelling: boolean
 }) {
+  const loadingModel = stage === 'loading_model'
+
   return (
     <div className="status-container">
       <div className="status-card status-card--processing">
@@ -84,8 +87,14 @@ function ProcessingView({ fileName, progress, onCancel, cancelling }: {
         </div>
 
         <div className="processing-text">
-          <span className="processing-text__title">ASR 识别转写处理中</span>
-          <span className="processing-text__desc">AI 正在分析音频内容，自动识别语音并生成文字</span>
+          <span className="processing-text__title">
+            {loadingModel ? '正在加载语音模型' : 'ASR 识别转写处理中'}
+          </span>
+          <span className="processing-text__desc">
+            {loadingModel
+              ? '首次使用需下载模型（约 150MB），完成后不再需要'
+              : 'AI 正在分析音频内容，自动识别语音并生成文字'}
+          </span>
         </div>
 
         <div className="processing-progress">
@@ -141,7 +150,7 @@ function FailureView({ title, message, fileName, onRetry, buttonLabel = '重新�
 }
 
 export function UploadStatus() {
-  const { fileName, fileSize, status, progress, error, reset, jobId } = useTranscriptionStore()
+  const { fileName, fileSize, status, progress, stage, error, reset, jobId } = useTranscriptionStore()
   const [cancelling, setCancelling] = useState(false)
 
   const isProcessing = status === 'transcribing'
@@ -184,6 +193,7 @@ export function UploadStatus() {
       <ProcessingView
         fileName={fileName}
         progress={progress}
+        stage={stage}
         onCancel={handleCancel}
         cancelling={cancelling}
       />

@@ -1,15 +1,18 @@
 /**
  * 开屏加载页
  * 白色背景 + 居中 Logo 擦除揭示动画，等待词典/ASR 等前置服务就绪后缩小淡出
+ * 底部一行阶段文案如实反映主进程进度，不编造百分比
  */
 import { useEffect, useState } from 'react'
 import logoImage from '@/assets/public/lottie/Vv Transcribe Open.png'
 
 interface SplashScreenProps {
   visible: boolean
+  /** 就绪前主进程反馈的初始化阶段，如「正在启动转写引擎」 */
+  phase?: string
 }
 
-export function SplashScreen({ visible }: SplashScreenProps) {
+export function SplashScreen({ visible, phase }: SplashScreenProps) {
   const [mounted, setMounted] = useState(true)
   const [exiting, setExiting] = useState(false)
 
@@ -45,8 +48,10 @@ export function SplashScreen({ visible }: SplashScreenProps) {
           height: 700,
           position: 'relative',
           display: 'flex',
+          flexDirection: 'column',
           justifyContent: 'center',
           alignItems: 'center',
+          gap: 4,
           transform: exiting ? 'scale(0.3)' : 'scale(1)',
           transition: 'transform 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
@@ -63,6 +68,19 @@ export function SplashScreen({ visible }: SplashScreenProps) {
               animation: 'wipeReveal 2s cubic-bezier(0.25, 0.46, 0.45, 0.94) 0.3s forwards',
             }}
           />
+        </div>
+        <div
+          style={{
+            fontSize: 13,
+            lineHeight: '20px',
+            color: 'var(--text-muted)',
+            // Logo PNG 渲染成 400px 高后，标志下方还有约 110px 透明留白，不抵消文案会离标志太远
+            marginTop: -90,
+            opacity: exiting ? 0 : 1,
+            transition: 'opacity 0.3s ease-out',
+          }}
+        >
+          {phase ?? '正在启动'}
         </div>
       </div>
       <style>{`

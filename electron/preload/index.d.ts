@@ -75,6 +75,8 @@ export interface ElectronAPI {
         text: string
         confidence?: number
       }
+      /** 引擎阶段性状态，目前只有本地首次转写的 'loading_model' */
+      stage?: string
     }) => void,
   ) => () => void
 
@@ -108,7 +110,12 @@ export interface ElectronAPI {
   getSettings: () => Promise<Record<string, unknown>>
   saveSettings: (settings: Record<string, unknown>) => Promise<void>
 
-  getServiceReady: () => Promise<{ ready: boolean; error: string | null }>
+  getServiceReady: () => Promise<{
+    ready: boolean
+    error: string | null
+    asrDone: boolean
+    dictionaryDone: boolean
+  }>
 
   getAppVersion: () => Promise<string>
   checkAppUpdate: () => Promise<{

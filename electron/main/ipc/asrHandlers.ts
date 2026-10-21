@@ -9,7 +9,7 @@ import { basename } from 'node:path'
 import { extractAudio, cleanupTemp } from '../services/audioProcessor'
 import { runTranscription } from '../services/asr/asrManager'
 import { getASRConfig } from '../services/settingsService'
-import type { ASRSegment } from '../services/asr/types'
+import type { ASRSegment, ASRStage } from '../services/asr/types'
 
 /** 活跃的转写任务映射表，jobId → 任务状态 */
 interface TranscriptionState {
@@ -31,9 +31,9 @@ export function registerASRHandlers() {
 
       const win = BrowserWindow.fromWebContents(event.sender)
 
-      const sendProgress = (progress: number, segment?: ASRSegment) => {
+      const sendProgress = (progress: number, segment?: ASRSegment, stage?: ASRStage) => {
         if (win && !win.isDestroyed()) {
-          win.webContents.send('asr:progress', { jobId, progress, segment })
+          win.webContents.send('asr:progress', { jobId, progress, segment, stage })
         }
       }
 
@@ -55,7 +55,7 @@ export function registerASRHandlers() {
           language: options?.language ?? 'zh',
           onProgress: (p) => {
             const totalProgress = 5 + p.percent * 0.95
-            sendProgress(totalProgress, p.segment)
+            sendProgress(totalProgress, p.segment, p.stage)
           },
           signal: signal.signal,
         })

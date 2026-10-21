@@ -41,15 +41,22 @@ const APP_NAME = 'Vv Transcribe'
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
+/** 本进程是否已建过窗口。macOS 关窗不退出应用，从 Dock 重开窗口不是冷启动，不该重放开屏动画 */
+let hasLaunchedWindow = false
 
 /** 服务初始化状态 */
 let serviceReady = false
 let serviceError: string | null = null
+/** 两项前置服务各自完成的时间差很远（ASR 要等子进程就绪，词典要读大文件），分开上报才能给开屏页写阶段文案 */
+let asrTaskDone = false
+let dictionaryTaskDone = false
 
 /** 查询服务就绪状态 */
 ipcMain.handle('app:getServiceReady', () => ({
   ready: serviceReady,
   error: serviceError,
+  asrDone: asrTaskDone,
+  dictionaryDone: dictionaryTaskDone,
 }))
 
 /** 接收前端日志并写入日志文件 */
@@ -70,6 +77,11 @@ ipcMain.handle('app:log', (_event, entry: any) => {
 
 /** 创建主窗口，配置 preload 和安全策略 */
 function createWindow() {
+  // 冷启动只能由主进程判定：渲染层的 beforeunload 在「关窗但没退出应用」时也会触发
+  const coldStart = !hasLaunchedWindow
+  hasLaunchedWindow = true
+  logger.info('App', 'Window launch', { coldStart })
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -89,10 +101,14 @@ function createWindow() {
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+    const devUrl = new URL(process.env.VITE_DEV_SERVER_URL)
+    devUrl.searchParams.set('cold', coldStart ? '1' : '0')
+    mainWindow.loadURL(devUrl.toString())
     mainWindow.webContents.openDevTools()
   } else {
-    mainWindow.loadFile(join(MAIN_DIR, '../../dist/index.html'))
+    mainWindow.loadFile(join(MAIN_DIR, '../../dist/index.html'), {
+      query: { cold: coldStart ? '1' : '0' },
+    })
   }
 
   mainWindow.on('closed', () => {
@@ -115,13 +131,18 @@ app.whenReady().then(async () => {
 
   // 异步初始化前置服务（词典 + ASR），完成后标记就绪
   logger.info('App', 'Initializing services...')
-  Promise.all([
-    startASRService().catch((e) => {
+  const asrTask = startASRService()
+    .catch((e) => {
       logger.error('App', 'ASR service failed', e?.message)
       return null
-    }),
-    initDictionary(),
-  ])
+    })
+    .finally(() => {
+      asrTaskDone = true
+    })
+  const dictionaryTask = initDictionary().finally(() => {
+    dictionaryTaskDone = true
+  })
+  Promise.all([asrTask, dictionaryTask])
     .then(() => {
       serviceReady = true
       logger.info('App', 'Services initialization completed', { ready: serviceReady })
@@ -145,8 +166,6 @@ app.on('before-quit', async (e) => {
   e.preventDefault()
   await stopASRService()
   logger.info('App', 'ASR service stopped')
-  // 渲染进程的 beforeunload 会设置 vv_need_splash 标志
-  await new Promise(resolve => setTimeout(resolve, 100))
   app.exit()
 })
 
