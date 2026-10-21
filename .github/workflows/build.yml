@@ -145,12 +145,12 @@ jobs:
       # 轻量标签没有注解对象，此时导出空文件，发布说明只剩自动生成的 changelog。
       - name: Export tag annotation as release notes
         run: |
-          git fetch --force --no-tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
-          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = tag ]; then
+          git fetch --force --no-tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" || true
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}" 2>/dev/null)" = tag ]; then
             git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
           else
             : > release-notes.md
-            echo "::notice::${GITHUB_REF_NAME} 是轻量标签，没有 tag 注解可用，发布说明只用自动生成的 changelog"
+            echo "::warning::取不到 ${GITHUB_REF_NAME} 的 tag 注解（轻量标签或拉取失败），发布说明只用自动生成的 changelog"
           fi
           echo "release-notes.md $(wc -c < release-notes.md) bytes:"
           cat release-notes.md
