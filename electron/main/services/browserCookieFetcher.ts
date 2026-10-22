@@ -1,7 +1,9 @@
 /**
  * 无头浏览器 Cookie 获取服务
  * 使用系统 Chrome/Edge 以无头模式访问目标 URL，通过 JS 验证后导出 cookies
- * 不读取用户浏览器数据，零隐私风险，无弹窗
+ * 用临时空白配置目录启动，不读取用户浏览器数据
+ * 注意：macOS 首次调用会弹「App 管理」授权（"X"想修改Mac上的App），
+ * 因为要启动 /Applications 下的浏览器；点允许后系统会重启本应用
  */
 import puppeteer from 'puppeteer-core'
 import { join } from 'node:path'

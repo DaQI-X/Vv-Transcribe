@@ -151,6 +151,8 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
     if (result1.success) return result1
     logger.warn('UrlDownloader', 'First attempt with browser cookies failed, retrying without', result1.error)
   } else {
+    // 失败分支同样要清：浏览器临时目录里可能已经写过 cookies.txt
+    await cleanupBrowserTemp(cookieResult.tempDir)
     logger.warn('UrlDownloader', 'Browser cookie fetch failed', cookieResult.error)
   }
 
