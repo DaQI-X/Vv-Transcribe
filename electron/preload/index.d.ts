@@ -120,6 +120,17 @@ export interface ElectronAPI {
     error: string | null
   }>
 
+  proofreadLocal: (
+    segments: Array<{ id: string; text: string }>,
+  ) => Promise<Array<{
+    segmentId: string
+    corrected: string
+    changes: Array<{ before: string; after: string; reason: string; dictionaryHint?: string }>
+  }>>
+  proofreadExplain: (
+    differences: Array<{ original: string; corrected: string; context: string }>,
+  ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
+
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
   lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>
   checkDictionaryUpdate: () => Promise<{ hasUpdate: boolean; latestCommit?: string; currentVersion: string; error: string | null }>

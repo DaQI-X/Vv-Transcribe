@@ -55,6 +55,11 @@ const api = {
   analyzeReference: (referenceText: string) =>
     ipcRenderer.invoke('ai:analyzeReference', referenceText),
 
+  proofreadLocal: (segments: unknown[]) =>
+    ipcRenderer.invoke('proofread:local', segments),
+  proofreadExplain: (differences: unknown[]) =>
+    ipcRenderer.invoke('proofread:explain', differences),
+
   lookupWord: (word: string) =>
     ipcRenderer.invoke('dictionary:lookup', word),
   lookupMultipleWords: (words: string[]) =>
