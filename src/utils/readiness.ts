@@ -56,6 +56,14 @@ export async function checkCorrectionReady(): Promise<ReadinessBlock | null> {
   return null
 }
 
+/** 有没有配校对模型：决定「校对」按钮是弹方式选择，还是直接跑本地校对 */
+export async function hasCorrectionModel(): Promise<boolean> {
+  const api = getElectronAPI()
+  if (!api) return false
+  const settings = await api.getSettings().catch(() => null)
+  return str(settings?.aiApiKey).length > 0
+}
+
 /** 拦住之后：说清原因，并直接打开要改的那个设置页 */
 export function raiseReadinessBlock(block: ReadinessBlock) {
   toast.error(block.message)

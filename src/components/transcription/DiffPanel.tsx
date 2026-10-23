@@ -1,6 +1,6 @@
 /**
  * 段落差异对比面板
- * 展示单个段落的字级 diff，高亮差异并提供 AI 解释 Popover
+ * 展示单个段落的字级 diff，高亮差异并提供逐处解释 Popover
  * 同时展示参考稿本身的问题（AI 分析得出）供用户决断
  * 支持"采纳修正"按钮一键应用参考稿/AI 建议的正确文本
  */
@@ -12,7 +12,8 @@ import type { SegmentDiff } from '@/types/reference'
 interface DiffPanelProps {
   diff: SegmentDiff
   onAcceptAll?: () => void
-  mode?: 'reference' | 'ai'
+  /** 差异来源：有参考稿时按参考稿比对，否则按校对结果 */
+  mode?: 'reference' | 'proofread'
 }
 
 export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelProps) {
@@ -35,7 +36,7 @@ export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelPr
             <AlertTriangle size={12} /> {issueCount} 处参考稿疑问
           </span>
         )}
-        <span className="diff-panel__label">{mode === 'ai' ? 'AI 校对' : '参考稿对比'}</span>
+        <span className="diff-panel__label">{mode === 'proofread' ? '校对结果' : '参考稿对比'}</span>
         {onAcceptAll && hasDiff && (
           <button
             className="diff-panel__accept-all-btn"

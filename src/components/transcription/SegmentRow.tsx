@@ -2,7 +2,7 @@
  * 段落行组件
  * 显示单个转写段落的时间戳和可编辑文本
  * 点击时触发播放器跳转到对应时间点，播放时自动高亮当前段落
- * 支持参考稿比对差异展示和 AI 校对行内 Popover
+ * 支持参考稿比对差异展示和校对结果行内 Popover
  */
 import type { TranscriptionSegment } from '@/types/transcription'
 import type { SegmentDiff } from '@/types/reference'
@@ -21,7 +21,7 @@ interface SegmentRowProps {
   onClick?: () => void
   diff?: SegmentDiff | null
   onAccept?: () => void
-  diffMode?: 'reference' | 'ai'
+  diffMode?: 'reference' | 'proofread'
 }
 
 export function SegmentRow({ segment, isActive, onClick, diff, onAccept, diffMode }: SegmentRowProps) {

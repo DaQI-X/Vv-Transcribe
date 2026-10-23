@@ -1093,7 +1093,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   gap: 8px;
 }
 
-/* 表头按钮（返回首页/上传参考/AI 校对/导出）文字不折行，宁可整组换行也不压字 */
+/* 表头按钮（返回首页/上传参考/校对/导出）文字不折行，宁可整组换行也不压字 */
 .transcript-editor__header button {
   white-space: nowrap;
 }
@@ -1284,7 +1284,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 /* ============================================
- * Diff 视图 (AI 校对弹窗)
+ * Diff 视图（校对差异）
  * ============================================ */
 .diff-view {
   display: flex;
@@ -1625,6 +1625,85 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .settings-modal__dirty-tip {
   margin-right: auto;
   font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* 校对方式选择：沿用 settings-modal 的壳，只加选项行 */
+.proofread-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-page);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  /* 不写 transition: all，这条会连盒一起动 */
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.proofread-option:last-child {
+  margin-bottom: 0;
+}
+
+.proofread-option:hover {
+  border-color: var(--brand-blue);
+  box-shadow: 0 4px 12px rgba(27, 85, 245, 0.12);
+}
+
+.proofread-option__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: rgba(27, 85, 245, 0.08);
+  color: var(--brand-blue);
+}
+
+.proofread-option__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.proofread-option__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.proofread-option__tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.proofread-option__desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.proofread-dialog__footer {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.proofread-dialog__tip {
+  font-size: 12px;
   color: var(--text-secondary);
 }
 

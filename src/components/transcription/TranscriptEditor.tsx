@@ -2,8 +2,8 @@
  * 转写结果编辑器组件
  * 展示转写段落列表，支持：
  * - 段落文本编辑（TextArea 行内编辑）
- * - 上传参考稿比对（字级 diff，点击 AI 校对后分析差异 + 参考稿疑问）
- * - AI 校对（有参考稿以参考稿为准，无参考稿调用 AI，行内 Popover 显示）
+ * - 上传参考稿比对（字级 diff，点击校对后分析差异 + 参考稿疑问）
+ * - 校对（本地/ AI 两种方式；有参考稿以参考稿为准，行内 Popover 显示说明）
  * - 多格式字幕导出（SRT / TXT / JSON / Markdown）
  * - 点击段落跳转到对应播放时间点
  */
@@ -15,9 +15,10 @@ import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
 import { SegmentRow } from './SegmentRow'
+import { ProofreadModeDialog, type ProofreadMode } from './ProofreadModeDialog'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
-import { checkCorrectionReady, raiseReadinessBlock } from '@/utils/readiness'
+import { checkCorrectionReady, hasCorrectionModel, raiseReadinessBlock } from '@/utils/readiness'
 import { compareWithReference } from '@/utils/referenceComparator'
 import { computeSegmentDiff } from '@/utils/segmentDiff'
 import { alignReferenceToSegments } from '@/utils/textAlignment'
@@ -89,6 +90,8 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
 
   const activeRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
+  const [proofreadMode, setProofreadMode] = useState<ProofreadMode>('local')
+  const [modeDialogOpen, setModeDialogOpen] = useState(false)
 
   useEffect(() => {
     if (activeRef.current) activeRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -119,6 +122,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
 
   const fetchExplanations = useCallback(async (
     diffs: Map<string, SegmentDiff>,
+    mode: ProofreadMode,
   ): Promise<Map<string, SegmentDiff>> => {
     const api = getElectronAPI()
     if (!api) return diffs
@@ -143,7 +147,9 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
 
     if (allDiffs.length === 0) return diffs
 
-    const explanations = await api.explainDifferences(allDiffs)
+    const explanations = mode === 'local'
+      ? await api.proofreadExplain(allDiffs)
+      : await api.explainDifferences(allDiffs)
     const updatedDiffs = new Map(diffs)
 
     for (let i = 0; i < diffIndexMap.length; i++) {
@@ -157,17 +163,21 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
     return updatedDiffs
   }, [segments])
 
-  const handleAICorrection = useCallback(async () => {
+  const runProofread = useCallback(async (mode: ProofreadMode) => {
     const api = getElectronAPI()
     if (!api || segments.length === 0) return
 
-    // 缺 Key 时除了说明原因，直接把校对配置页打开，省掉让用户自己找入口的一步
-    const blocked = await checkCorrectionReady()
-    if (blocked) {
-      raiseReadinessBlock(blocked)
-      return
+    // 本地校对这条路径不看 Key；只有走大模型才需要前置校验
+    if (mode === 'ai') {
+      const blocked = await checkCorrectionReady()
+      if (blocked) {
+        raiseReadinessBlock(blocked)
+        return
+      }
     }
 
+    const modeLabel = mode === 'local' ? '本地校对' : 'AI 校对'
+    setProofreadMode(mode)
     setLoading(true)
 
     const waitingMessages = ['再等等～', '再等等等～', '再等等等等～', '再等等等等等～', '马上就好～']
@@ -186,25 +196,27 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
 
         setStatus('explaining')
 
+        // 参考稿本身的疑问只有大模型能判，本地模式跳过；逐字差异是本地算的，照样有效
         const [explainedDiffs, referenceAnalysis] = await Promise.all([
-          fetchExplanations(diffs),
-          api.analyzeReference(referenceText),
+          fetchExplanations(diffs, mode),
+          mode === 'local' ? Promise.resolve(null) : api.analyzeReference(referenceText),
         ])
-        const rawIssues = referenceAnalysis.issues
 
-        const issuesBySegment = mapIssuesToSegments(rawIssues, alignment)
-        for (const [segId, issues] of issuesBySegment) {
-          const segDiff = explainedDiffs.get(segId)
-          if (segDiff) {
-            segDiff.referenceIssues = issues
+        if (referenceAnalysis) {
+          const issuesBySegment = mapIssuesToSegments(referenceAnalysis.issues, alignment)
+          for (const [segId, issues] of issuesBySegment) {
+            const segDiff = explainedDiffs.get(segId)
+            if (segDiff) {
+              segDiff.referenceIssues = issues
+            }
           }
         }
 
         setAllSegmentDiffs(explainedDiffs)
         setStatus('completed')
 
-        const issueCount = rawIssues.length
-        if (referenceAnalysis.error) {
+        const issueCount = referenceAnalysis?.issues.length ?? 0
+        if (referenceAnalysis?.error) {
           // 字符级差异是本地算出来的，AI 分析失败时照样有效，只把 AI 那部分的失败如实说出
           toast.error(`${referenceAnalysis.error}（下方差异为逐字比对结果，不含 AI 判断）`)
         } else if (totalChanges === 0 && issueCount === 0) {
@@ -213,10 +225,22 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
           const parts: string[] = []
           if (totalChanges > 0) parts.push(`${totalChanges} 处差异`)
           if (issueCount > 0) parts.push(`${issueCount} 处参考稿疑问`)
-          toast.success(`AI 校对完成（以参考稿为准），${parts.join('，')}`)
+          toast.success(`${modeLabel}完成（以参考稿为准），${parts.join('，')}`)
+        }
+        return
+      }
+
+      setStatus('comparing')
+      const diffs = new Map<string, SegmentDiff>()
+
+      if (mode === 'local') {
+        const results = await api.proofreadLocal(segments.map((s) => ({ id: s.id, text: s.text })))
+        for (const result of results) {
+          const seg = segments.find((s) => s.id === result.segmentId)
+          if (!seg || result.corrected === seg.text) continue
+          diffs.set(result.segmentId, computeSegmentDiff(seg.text, result.corrected, seg.id))
         }
       } else {
-        setStatus('comparing')
         const fullText = segments.map((s) => s.text).join('')
         const result = await api.correctText(fullText, { language: 'zh' })
 
@@ -229,37 +253,54 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         if (!result.corrected || result.corrected.trim() === fullText) {
           setStatus('idle')
           toast.info('未发现需要纠正的内容')
-          setLoading(false)
           return
         }
 
         const correctedLines = alignCorrectedToSegments(segments, result.corrected)
-        const diffs = new Map<string, SegmentDiff>()
-
         segments.forEach((seg, idx) => {
           const correctedText = correctedLines[idx] ?? seg.text
           if (correctedText !== seg.text) {
-            const diff = computeSegmentDiff(seg.text, correctedText, seg.id)
-            diffs.set(seg.id, diff)
+            diffs.set(seg.id, computeSegmentDiff(seg.text, correctedText, seg.id))
           }
         })
-
-        setStatus('explaining')
-        const explainedDiffs = await fetchExplanations(diffs)
-        setAllSegmentDiffs(explainedDiffs)
-        setStatus('completed')
-
-        const totalChanges = Array.from(diffs.values()).reduce((sum, d) => sum + d.totalChanges, 0)
-        toast.success(`AI 校对完成，共 ${totalChanges} 处差异`)
       }
+
+      if (diffs.size === 0) {
+        setStatus('idle')
+        toast.info('未发现需要纠正的内容')
+        return
+      }
+
+      setStatus('explaining')
+      const explainedDiffs = await fetchExplanations(diffs, mode)
+      setAllSegmentDiffs(explainedDiffs)
+      setStatus('completed')
+
+      const totalChanges = Array.from(diffs.values()).reduce((sum, d) => sum + d.totalChanges, 0)
+      toast.success(`${modeLabel}完成，共 ${totalChanges} 处差异`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'AI 校对失败')
-      toast.error('AI 校对失败')
+      setError(err instanceof Error ? err.message : '校对失败')
+      toast.error(`${modeLabel}失败`)
     } finally {
       clearInterval(waitingTimer)
       setLoading(false)
     }
   }, [segments, referenceText, setAllSegmentDiffs, setStatus, setError, fetchExplanations])
+
+  /** 没配模型就不弹选择框——直接本地跑完，并把「为什么只有本地结果」说清楚 */
+  const handleProofreadClick = useCallback(async () => {
+    if (!(await hasCorrectionModel())) {
+      toast.info('未配置校对模型，已用本地校对。想要结合上下文的结果，可在「设置 → 校对配置」里填写 API Key', 5000)
+      void runProofread('local')
+      return
+    }
+    setModeDialogOpen(true)
+  }, [runProofread])
+
+  const handlePickMode = useCallback((mode: ProofreadMode) => {
+    setModeDialogOpen(false)
+    void runProofread(mode)
+  }, [runProofread])
 
   const handleUploadReference = useCallback(async () => {
     const api = getElectronAPI()
@@ -290,7 +331,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
       if (totalChanges === 0) {
         toast.info('参考稿已上传，转写内容与参考稿一致')
       } else {
-        toast.success(`参考稿已上传，共 ${totalChanges} 处差异，点击"AI 校对"查看详细说明`)
+        toast.success(`参考稿已上传，共 ${totalChanges} 处差异，点击「校对」查看详细说明`)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '参考稿上传失败')
@@ -355,12 +396,12 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             <FileText size={14} /> 上传参考
           </button>
           <button
-            onClick={handleAICorrection}
+            onClick={handleProofreadClick}
             disabled={loading}
             className="transcript-editor__correct-btn"
           >
             <Pencil size={14} />
-            {loading ? '校对中...' : 'AI 校对'}
+            {loading ? (proofreadMode === 'local' ? '本地校对中…' : 'AI 校对中…') : '校对'}
           </button>
           <Dropdown items={FORMAT_OPTIONS.map((opt) => ({ key: opt.key, label: opt.label, onClick: () => handleExport(opt.key) }))}>
             <button className="transcript-editor__export-btn">
@@ -379,7 +420,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
                 isActive={segment.id === activeSegmentId}
                 diff={segmentDiffs.get(segment.id) ?? null}
                 onAccept={() => handleAcceptCorrection(segment.id)}
-                diffMode={referenceText ? 'reference' : 'ai'}
+                diffMode={referenceText ? 'reference' : 'proofread'}
                 onClick={() => {
                   setActiveSegment(segment.id)
                   seekToTime(segment.startTime)
@@ -393,6 +434,8 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
       {referenceFileName && (
         <ReferenceBubble fileName={referenceFileName} onClear={handleClearReference} disabled={loading} />
       )}
+
+      {modeDialogOpen && <ProofreadModeDialog onPick={handlePickMode} onClose={() => setModeDialogOpen(false)} />}
     </div>
   )
 }
