@@ -175,7 +175,7 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
   // 第一轮：无头浏览器获取 cookies → yt-dlp with --cookies
   const cookieResult = await fetchCookiesFromUrl(url)
   if (cookieResult.success && cookieResult.cookiesPath) {
-    const result1 = await runYtDlp(ytDlpPath, [...baseArgs, '--cookies', cookieResult.cookiesPath, url], tempDir)
+    const result1 = await runYtDlp(ytDlpPath, [...baseArgs, '--cookies', cookieResult.cookiesPath, url], tempDir, !isDomestic)
     await cleanupBrowserTemp(cookieResult.tempDir)
     if (result1.success) return result1
     logger.warn('UrlDownloader', 'First attempt with browser cookies failed, retrying without', result1.error)
@@ -186,7 +186,7 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
   }
 
   // 第二轮：不带 cookies
-  const result2 = await runYtDlp(ytDlpPath, [...baseArgs, url], tempDir)
+  const result2 = await runYtDlp(ytDlpPath, [...baseArgs, url], tempDir, !isDomestic)
   return result2
 }
 
@@ -220,23 +220,33 @@ export function explainYtDlpFailure(stderr: string, signal: string | null): stri
   return '链接解析失败，请重试；也可以下载好文件后用「本地文件」上传转写'
 }
 
-function runYtDlp(ytDlpPath: string, args: string[], tempDir: string): Promise<DownloadResult> {
+function runYtDlp(
+  ytDlpPath: string,
+  args: string[],
+  tempDir: string,
+  preserveProxy: boolean,
+): Promise<DownloadResult> {
   logger.info('UrlDownloader', 'Spawning yt-dlp', { args: args.filter((a) => !a.startsWith('http')) })
 
-  const cleanEnv = { ...process.env }
-  delete cleanEnv.HTTP_PROXY
-  delete cleanEnv.HTTPS_PROXY
-  delete cleanEnv.http_proxy
-  delete cleanEnv.https_proxy
-  delete cleanEnv.ALL_PROXY
-  delete cleanEnv.all_proxy
-  delete cleanEnv.NO_PROXY
-  delete cleanEnv.no_proxy
+  const env = { ...process.env }
+  // 站点决定代理：国内站点挂代理会被王叔 CDN 直接 403，命令行 --proxy '' 只压得住
+  // yt-dlp 自己那层，环境里的 *_PROXY 仍会被底层 urllib 读走，所以必须连 env 一起清；
+  // 境外站点（YouTube 等）恰恰相反，用户挂的代理就是要让它生效，一个都不能动。
+  if (!preserveProxy) {
+    delete env.HTTP_PROXY
+    delete env.HTTPS_PROXY
+    delete env.http_proxy
+    delete env.https_proxy
+    delete env.ALL_PROXY
+    delete env.all_proxy
+    delete env.NO_PROXY
+    delete env.no_proxy
+  }
 
   return new Promise((resolve) => {
     const proc = spawn(ytDlpPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: cleanEnv,
+      env,
       windowsHide: true,
     })
 
