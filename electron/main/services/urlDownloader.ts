@@ -190,6 +190,36 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
   return result2
 }
 
+/**
+ * 把 yt-dlp 的英文报错翻成「下一步该做什么」。
+ * 只说「链接解析失败，请重试」等于把诊断成本全推给用户：站点风控、视频私有、
+ * 需要代理网络、链接本身不支持，用户能做的完全不一样。
+ */
+export function explainYtDlpFailure(stderr: string, signal: string | null): string {
+  if (signal) {
+    return '链接解析进程被系统中断，可能是包内 yt-dlp 未获授权执行。请到「系统设置 → 隐私与安全性」允许 Vv Transcribe，或完全退出应用后重试'
+  }
+  if (/unsupported url|no formats? (were )?found|is not a valid/i.test(stderr)) {
+    return '这个链接的站点暂不支持，或页面里取不到音视频。可以先下载好，再用「本地文件」上传转写'
+  }
+  if (/private video|video unavailable|not available to|requested video/i.test(stderr)) {
+    return '这个视频看不了：私密、已删除，或需要登录才能访问'
+  }
+  if (/age[ _-]?restrict|confirm your age/i.test(stderr)) {
+    return '这个视频有年龄限制，需要在浏览器登录后才能取到音频'
+  }
+  if (/412|precondition failed|captcha|unusual traffic|are you a bot|not a bot|verify you.?re human|风控|滑块/i.test(stderr)) {
+    return '站点做了人机校验，应用带着登录 cookies 也没通过。请稍后重试，或下载好文件再走「本地文件」上传'
+  }
+  if (/(401|403)\b|log ?in|sign in|authentication|premium|membership/i.test(stderr)) {
+    return '这个链接需要登录（或会员）才能取到音频。请先在本机浏览器登录该站点后重试'
+  }
+  if (/getaddrinfo|network is unreachable|timed out|unable to download|connection (reset|closed)|ssl|certificate/i.test(stderr)) {
+    return '连不上这个站点。境外站点（YouTube 等）需要代理网络，请确认代理已开启；国内站点建议关掉代理再试'
+  }
+  return '链接解析失败，请重试；也可以下载好文件后用「本地文件」上传转写'
+}
+
 function runYtDlp(ytDlpPath: string, args: string[], tempDir: string): Promise<DownloadResult> {
   logger.info('UrlDownloader', 'Spawning yt-dlp', { args: args.filter((a) => !a.startsWith('http')) })
 
@@ -223,16 +253,18 @@ function runYtDlp(ytDlpPath: string, args: string[], tempDir: string): Promise<D
       logger.debug('UrlDownloader', 'yt-dlp stderr', line)
     })
 
-    proc.on('exit', async (code) => {
+    proc.on('exit', async (code, signal) => {
       if (code !== 0) {
-        logger.error('UrlDownloader', 'yt-dlp failed', { code, stderr: stderr.slice(-200) })
-        resolve({ success: false, error: '链接解析失败，请重试' })
+        logger.error('UrlDownloader', 'yt-dlp failed', { code, signal, stderr: stderr.slice(-400) })
+        resolve({ success: false, error: explainYtDlpFailure(stderr, signal) })
         return
       }
 
       try {
         const files = await readdir(tempDir)
-        const mediaFile = files.find((f) => /\.(mp3|m4a|wav|ogg|mp4|webm)$/i.test(f))
+        // 认「不是 yt-dlp 的中间产物/字幕/封面」的第一个文件，而不是认固定后缀：
+        // 站点给的音频容器不止这 6 种（opus/aac/m4b…），漏一种就是「下载完成但找不到媒体文件」
+        const mediaFile = files.find((f) => !/\.(part|ytdl|json|txt|srt|vtt|ass|lrc|jpg|jpeg|png|webp|gif)$/i.test(f))
         if (!mediaFile) {
           resolve({ success: false, error: '下载完成但未找到媒体文件' })
           return
