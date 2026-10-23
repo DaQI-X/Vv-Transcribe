@@ -53,17 +53,40 @@ function getFfmpegPath(): string | null {
   }
 }
 
-/** 查找 yt-dlp 可执行文件路径 */
-function getYtDlpPath(): string {
-  const candidates = [
-    '/opt/homebrew/bin/yt-dlp',
-    '/usr/local/bin/yt-dlp',
-    '/usr/bin/yt-dlp',
-  ]
-  for (const path of candidates) {
-    if (existsSync(path)) return path
+/** 内置二进制的落盘位置：打包后在 Resources/yt-dlp/，开发时在仓库 vendor/yt-dlp/<平台目录>/ */
+function getBundledYtDlpPath(binary: string): string {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const dir = process.platform === 'darwin' ? 'darwin-universal' : `${process.platform}-${process.arch}`
+    return join(import.meta.dirname, '../../vendor/yt-dlp', dir, binary)
   }
-  return 'yt-dlp'
+  return join(process.resourcesPath, 'yt-dlp', binary)
+}
+
+export type YtDlpSource = 'updated' | 'bundled' | 'system' | 'path'
+
+/**
+ * yt-dlp 可执行文件路径，按「用户更新过 > 安装包内置 > 本机安装 > PATH 兜底」取第一个存在的。
+ * 内置档排在系统档前面：包里的版本至少保证「能跑起来」，而 Homebrew 装的那台机器可能根本没装、
+ * 也可能被别的软件改过。用户手装的版本仍走最后一档，不算丢功能。
+ */
+export function resolveYtDlp(): { path: string; source: YtDlpSource } {
+  const binary = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
+  const candidates: Array<{ path: string; source: YtDlpSource }> = [
+    // 应用内更新的副本（#134）落在 userData/bin，升级不需要重装整包
+    { path: join(app.getPath('userData'), 'bin', binary), source: 'updated' },
+    { path: getBundledYtDlpPath(binary), source: 'bundled' },
+    ...(process.platform === 'darwin'
+      ? [
+          { path: '/opt/homebrew/bin/yt-dlp', source: 'system' as const },
+          { path: '/usr/local/bin/yt-dlp', source: 'system' as const },
+          { path: '/usr/bin/yt-dlp', source: 'system' as const },
+        ]
+      : []),
+  ]
+
+  const found = candidates.find((candidate) => existsSync(candidate.path))
+  // 全都没有就交给 PATH：Windows 上 winget/scoop 装的位置千差万别，spawn 起不来会再提示安装
+  return found ?? { path: binary, source: 'path' }
 }
 
 // 缓存探测结果：yt-dlp 在单次会话内不会变化
@@ -80,7 +103,11 @@ function probeImpersonateSupport(ytDlpPath: string): Promise<boolean> {
 
   return new Promise((resolve) => {
     let out = ''
-    const proc = spawn(ytDlpPath, ['--list-impersonate-targets'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn(ytDlpPath, ['--list-impersonate-targets'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // 内置 yt-dlp 之后 Windows 上每次探测都会闪一个黑框，跟用户没关系
+      windowsHide: true,
+    })
 
     proc.stdout?.on('data', (d) => { out += d.toString() })
     proc.stderr?.on('data', (d) => { out += d.toString() })
@@ -120,9 +147,11 @@ export async function downloadFromUrl(url: string): Promise<DownloadResult> {
   const tempDir = join(tmpdir(), `transcribe-url-${randomUUID()}`)
   await mkdir(tempDir, { recursive: true })
 
-  const ytDlpPath = getYtDlpPath()
+  const ytDlp = resolveYtDlp()
+  const ytDlpPath = ytDlp.path
   const outputPath = join(tempDir, '%(title)s.%(ext)s')
   const ffmpegPath = getFfmpegPath()
+  logger.info('UrlDownloader', 'Resolved yt-dlp', { source: ytDlp.source, path: ytDlpPath })
   // 仅当 yt-dlp 支持时才启用浏览器模拟，否则该 flag 会导致解析直接失败
   const canImpersonate = await probeImpersonateSupport(ytDlpPath)
 
@@ -178,6 +207,7 @@ function runYtDlp(ytDlpPath: string, args: string[], tempDir: string): Promise<D
     const proc = spawn(ytDlpPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanEnv,
+      windowsHide: true,
     })
 
     let stderr = ''

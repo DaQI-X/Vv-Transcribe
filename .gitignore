@@ -29,6 +29,9 @@ python-asr/__pycache__/
 build-output/
 release/
 
+# 构建期下载的第三方独立二进制（scripts/fetch-yt-dlp.mjs）
+vendor/
+
 # Misc
 Vv-Transcribe/
 pnpm-workspace.yaml

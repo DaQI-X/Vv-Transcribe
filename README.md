@@ -231,6 +231,8 @@ pnpm build:electron:arm64     # 产出 release/Vv-Transcribe-arm64.dmg
 pnpm build:mac:arm64
 ```
 
+`build:electron*` 第一步会执行 `scripts/fetch-yt-dlp.mjs`：按平台拉官方独立二进制并校验 SHA2-256，落在 `vendor/yt-dlp/`（已 gitignore，同版本重复构建会跳过下载）。GitHub 慢就换前缀：`YTDLP_MIRROR=https://<加速域名> pnpm build:mac:arm64`。`afterPack` 同样校验它是否进了包，缺了就红。
+
 #### 构建 x64（Intel）DMG —— 在 arm64 Mac 上经 Rosetta
 
 ```bash
@@ -285,13 +287,15 @@ python-asr/main.py + dependencies
 
 ### 链接转写
 
-链接解析依赖外部命令行工具 **yt-dlp**（体积与更新原因未随包内置，需使用者自行安装）：
+链接解析用的 **yt-dlp** 已随安装包内置（构建时由 `scripts/fetch-yt-dlp.mjs` 拉官方独立二进制并校验 SHA2-256），使用者不需要再自行安装。应用按下面的顺序取第一个存在的路径：
 
-- macOS：`brew install yt-dlp`
-- Windows：`winget install yt-dlp.yt-dlp`（或 `pip install -U yt-dlp`）
+1. `<userData>/bin/yt-dlp[.exe]` —— 应用内更新写下的副本
+2. 安装包内置：`Contents/Resources/yt-dlp/yt-dlp`（Windows 为 `resources/yt-dlp/yt-dlp.exe`）；开发模式取仓库里的 `vendor/yt-dlp/<平台目录>/`
+3. 本机安装的 `/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`（仅 macOS）
+4. PATH 上的 `yt-dlp`；全都找不到时，链接转写会提示上面的安装命令
 
-应用依次探测 `/opt/homebrew/bin/yt-dlp`、`/usr/local/bin/yt-dlp`、`/usr/bin/yt-dlp`，都找不到时回退到 PATH 上的 `yt-dlp`；两者都没有时，链接转写会提示上面的安装命令。
-部分带风控的站点需要浏览器 cookies 才能解析，应用会先用无头浏览器取 cookies 再重试；`--impersonate` 依赖 Python 的 `curl_cffi`，Homebrew 装的 yt-dlp 通常没有它，此时自动降级为不带浏览器模拟的请求。
+内置包是官方 standalone 构建，自带 `curl_cffi`，所以 `--impersonate chrome`（TLS 指纹模拟）默认可用；第 3/4 档命中的 Homebrew 版本通常没有它，应用会探测后自动降级为不带浏览器模拟的请求。
+部分带风控的站点还需要浏览器 cookies 才能解析，应用会先用无头浏览器取 cookies 再重试。
 
 ### AI 纠错配置
 

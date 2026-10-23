@@ -99,6 +99,11 @@ jobs:
       - name: Build renderer + main
         run: pnpm build
 
+      # 链接转写用的 yt-dlp 独立二进制：不进仓库，构建时按平台拉官方包并校验 SHA2-256。
+      # afterPack 会检查它是否真的进了包，缺了就红。
+      - name: Fetch bundled yt-dlp
+        run: node scripts/fetch-yt-dlp.mjs --arch=${{ matrix.arch }}
+
       - name: Package Electron app
         run: pnpm exec electron-builder ${{ matrix.electronArgs }} --config electron-builder.cjs --publish never
         env:
