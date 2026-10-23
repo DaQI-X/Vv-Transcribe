@@ -12,7 +12,8 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { existsSync, readdirSync } from 'node:fs'
 import { app } from 'electron'
 
 const ASR_PORT = 8000
@@ -72,6 +73,29 @@ function getBinaryPath(): string {
   }
   // 打包模式：extraResources 已将对应架构产物复制到 resources/python-asr/
   return join(process.resourcesPath, 'python-asr', exeName)
+}
+
+/**
+ * faster-whisper("base") 的权重默认落在 HuggingFace 缓存里，repo 名由档位写死成
+ * Systran/faster-whisper-base。命中缓存时给引擎下发 HF_HUB_OFFLINE=1：
+ * huggingface_hub 平时每次加载都会向 hf-mirror 发一次「有没有新版本」的在线请求，
+ * 弱网/挂代理时这一步能卡十几秒——模型明明已在本地，却被它拖成「首次加载慢了很多」。
+ * 没命中缓存必须保持在线，否则用户第一次下载会直接失败，所以只在权重真的在场时才离线。
+ */
+function isModelCached(): boolean {
+  const hubCache = process.env.HF_HUB_CACHE
+    || process.env.HUGGINGFACE_HUB_CACHE
+    || (process.env.HF_HOME ? join(process.env.HF_HOME, 'hub') : undefined)
+    || join(homedir(), '.cache', 'huggingface', 'hub')
+
+  const snapshots = join(hubCache, 'models--Systran--faster-whisper-base', 'snapshots')
+  if (!existsSync(snapshots)) return false
+  try {
+    // 快照目录里的 model.bin 是指向 blobs/ 的软链，只有权重完整下载过才存在
+    return readdirSync(snapshots).some((rev) => existsSync(join(snapshots, rev, 'model.bin')))
+  } catch {
+    return false
+  }
 }
 
 /** 获取 ffmpeg/ffprobe 二进制路径（与 audioProcessor 逻辑一致） */
@@ -250,12 +274,16 @@ export async function startASRService(): Promise<boolean> {
   const ffprobePath = getFfmpegBinaryPath('ffprobe')
   console.log('[ASR Service] FFmpeg paths:', { ffmpegPath, ffprobePath })
 
+  const modelCached = isModelCached()
+  console.log('[ASR Service] Whisper model cached:', modelCached ? 'online check skipped' : 'first run will download')
+
   asrProcess = spawn(binaryPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       ASR_BOOT_ID: bootId,
       HF_ENDPOINT: 'https://hf-mirror.com',
+      ...(modelCached ? { HF_HUB_OFFLINE: '1' } : {}),
       ...(ffmpegPath ? { FFMPEG_PATH: ffmpegPath } : {}),
       ...(ffprobePath ? { FFPROBE_PATH: ffprobePath } : {}),
     },
