@@ -1732,6 +1732,25 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 .toast__text { line-height: 1.4; }
 
+.toast__action {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--brand-blue);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toast__action:hover { background: color-mix(in srgb, var(--brand-blue) 12%, transparent); }
+.toast__action:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 1px; }
+
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(-10px); }
   to { opacity: 1; transform: translateY(0); }

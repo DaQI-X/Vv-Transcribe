@@ -199,7 +199,15 @@ export function FileUploader() {
       const result = await api.downloadFromUrl(url)
       if (!result.success) {
         frontendLogger.error('FileUploader', 'Download failed', result.error)
-        toast.error(result.error || '链接解析失败，请重试')
+        if (result.systemSettingsHint) {
+          // 包内二进制被系统拦下执行（macOS 未授权）：给一键直达隐私设置的入口，别只让用户读文字
+          toast.error(result.error || '链接解析失败', 8000, {
+            label: '打开隐私设置',
+            onClick: () => { void api.openSystemSettings() },
+          })
+        } else {
+          toast.error(result.error || '链接解析失败，请重试')
+        }
         setDownloading(false)
         setDownloadStatus('')
         return

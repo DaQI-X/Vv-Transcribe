@@ -81,6 +81,8 @@ const api = {
     ipcRenderer.invoke('app:checkUpdate'),
   openExternal: (url: string) =>
     ipcRenderer.invoke('app:openExternal', url),
+  openSystemSettings: () =>
+    ipcRenderer.invoke('app:openSystemSettings'),
 
   openLogDirectory: () =>
     ipcRenderer.invoke('app:openLogDirectory'),

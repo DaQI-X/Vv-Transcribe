@@ -75,4 +75,21 @@ export function registerUpdateHandlers() {
     await shell.openExternal(parsed.toString())
     return { success: true }
   })
+
+  /**
+   * 直达系统「隐私与安全性」面板，用于包内二进制被拦下执行（macOS「App 管理」/Gatekeeper）时一键跳转。
+   * URL 写死、不接任何入参，故不存在被渲染进程注入任意 scheme 的风险。
+   * 「App 管理」子页 Apple 没有稳定的深链 scheme，开总面板让用户点进去最可靠；非 macOS 交回界面按文案处理。
+   */
+  ipcMain.handle('app:openSystemSettings', async () => {
+    if (process.platform !== 'darwin') {
+      return { success: false, error: '请手动打开系统设置里的隐私与安全选项' }
+    }
+    try {
+      await shell.openExternal('x-apple.systempreferences:com.apple.preference.security')
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : '无法打开系统设置' }
+    }
+  })
 }

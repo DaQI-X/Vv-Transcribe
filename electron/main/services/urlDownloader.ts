@@ -20,6 +20,8 @@ export interface DownloadResult {
   tempDir?: string
   title?: string
   error?: string
+  /** 失败原因是「系统层面拦住了包内二进制执行」时置真：界面据此给「打开隐私设置」按钮 */
+  systemSettingsHint?: boolean
 }
 
 /** 获取 ffmpeg 二进制路径（适配打包环境） */
@@ -266,7 +268,8 @@ function runYtDlp(
     proc.on('exit', async (code, signal) => {
       if (code !== 0) {
         logger.error('UrlDownloader', 'yt-dlp failed', { code, signal, stderr: stderr.slice(-400) })
-        resolve({ success: false, error: explainYtDlpFailure(stderr, signal) })
+        // signal（非 0 退出码、被系统杀掉）是「包内二进制被拦下执行」的典型特征，给直达隐私设置的入口
+        resolve({ success: false, error: explainYtDlpFailure(stderr, signal), systemSettingsHint: signal !== null })
         return
       }
 
@@ -290,10 +293,22 @@ function runYtDlp(
 
     proc.on('error', (err) => {
       logger.serviceError('UrlDownloader', 'runYtDlp', err)
-      const hint = (err as NodeJS.ErrnoException).code === 'ENOENT'
-        ? '未检测到 yt-dlp，链接转写需要先安装：macOS 执行 brew install yt-dlp，Windows 执行 winget install yt-dlp.yt-dlp，安装后重启应用'
-        : `无法启动 yt-dlp: ${err.message}`
-      resolve({ success: false, error: hint })
+      const code = (err as NodeJS.ErrnoException).code
+      // yt-dlp 已随包内置，ENOENT 不再是「用户没装」，而是包内产物缺失/路径异常——让用户重启或重装，别再教 brew
+      if (code === 'ENOENT') {
+        resolve({ success: false, error: '内置的转写组件没能启动，请完全退出 Vv Transcribe 后重新打开；仍然不行请重新安装（无需自行安装 yt-dlp）' })
+        return
+      }
+      // EACCES/EPERM：二进制在但系统不让执行（macOS 未授权 / 文件权限），这是唯一值得给「打开隐私设置」按钮的情形
+      if (code === 'EACCES' || code === 'EPERM') {
+        resolve({
+          success: false,
+          error: '包内 yt-dlp 没有执行权限。macOS 请到「系统设置 → 隐私与安全性」允许 Vv Transcribe 后重试',
+          systemSettingsHint: true,
+        })
+        return
+      }
+      resolve({ success: false, error: `无法启动 yt-dlp: ${err.message}` })
     })
   })
 }

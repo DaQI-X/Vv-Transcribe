@@ -27,6 +27,7 @@ export interface DownloadFromUrlResult {
   tempDir?: string
   title?: string
   error?: string
+  systemSettingsHint?: boolean
 }
 
 export interface ProbeAudioResult {
@@ -147,6 +148,7 @@ export interface ElectronAPI {
     downloadUrl: string
   }>
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
+  openSystemSettings: () => Promise<{ success: boolean; error?: string }>
 
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
 
