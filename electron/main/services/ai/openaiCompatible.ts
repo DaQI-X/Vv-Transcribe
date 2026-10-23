@@ -8,56 +8,16 @@
  * 3. Prompt 强化：强调语音识别同音字错误，附带已修正线索
  */
 import type { AIProvider, DifferenceItem, ExplanationResult, ReferenceIssue } from './types'
-import { lookupMultipleWords } from '../dictionaryService'
-import { ASR_ERROR_MAP, ASR_USAGE_DISTINCTIONS, type ASRErrorEntry } from '../asrErrorMap'
+import {
+  applyASRErrorCorrections,
+  buildDictionaryContext,
+  buildDistinctionContext,
+} from '../ruleProofread'
 
 interface OpenAICompatibleConfig {
   apiKey: string
   apiBase: string
   model: string
-}
-
-function applyASRErrorCorrections(text: string): { corrected: string; applied: ASRErrorEntry[] } {
-  const applied: ASRErrorEntry[] = []
-  let result = text
-
-  for (const entry of ASR_ERROR_MAP) {
-    if (result.includes(entry.wrong)) {
-      result = result.split(entry.wrong).join(entry.correct)
-      applied.push(entry)
-    }
-  }
-
-  return { corrected: result, applied }
-}
-
-/** 互逆词对不能盲替换，只能把辨析规则交给模型，按语义判断 */
-function buildDistinctionContext(): string {
-  const lines = ASR_USAGE_DISTINCTIONS.map((e) => `「${e.wrong}」/「${e.correct}」：${e.note ?? ''}`)
-  return `\n\n同音近义词辨析（两个词都成立，按语义判断，不确定就保留原文）：\n${lines.join('\n')}`
-}
-
-function extractChineseWords(text: string): string[] {
-  const matches = text.match(/[\u4e00-\u9fa5]{2,4}/g)
-  if (!matches) return []
-  return [...new Set(matches)]
-}
-
-async function buildDictionaryContext(text: string): Promise<string> {
-  const words = extractChineseWords(text)
-  if (words.length === 0) return ''
-  
-  const definitions = await lookupMultipleWords(words.slice(0, 50))
-  const entries = Object.entries(definitions)
-  
-  if (entries.length === 0) return ''
-  
-  const dictLines = entries
-    .slice(0, 20)
-    .map(([word, explanation]) => `【${word}】${explanation.split('\n')[0]}`)
-    .join('\n')
-  
-  return `\n\n参考词典释义：\n${dictLines}`
 }
 
 /** 校对用的基础 prompt。「测试连接」要复用同一个契约，否则测的就不是干活时发的那份请求 */
