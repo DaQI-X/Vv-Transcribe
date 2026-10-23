@@ -303,7 +303,20 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         toast.info(`当前已是最新版本（v${info.currentVersion}）`)
       }
     } catch {
-      toast.error('检查更新失败，请检查网络后重试')
+      // 检查更新失败几乎都是「国内直连 GitHub 慢/被拦」，不该只甩一句「请检查网络」——
+      // 用户手里没有第二个入口。给可复制的发布页直链，让他开加速或换官网下载。
+      const releasePage = 'https://github.com/DaQI-X/Vv-Transcribe/releases/latest'
+      toast.error('连不上发布服务器（多为国内直连 GitHub 过慢所致）。可复制发布页地址，开网络加速后用浏览器下载，或访问官网 vvscribe.com', 9000, {
+        label: '复制发布页',
+        onClick: async () => {
+          try {
+            await navigator.clipboard.writeText(releasePage)
+            toast.success('发布页地址已复制，可在浏览器粘贴打开')
+          } catch {
+            void handleOpenExternal(releasePage)
+          }
+        },
+      })
     } finally {
       setChecking(false)
     }
