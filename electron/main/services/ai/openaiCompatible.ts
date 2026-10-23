@@ -9,8 +9,7 @@
  */
 import type { AIProvider, DifferenceItem, ExplanationResult, ReferenceIssue } from './types'
 import { lookupMultipleWords } from '../dictionaryService'
-import { readFileSync } from 'fs'
-import { join } from 'path'
+import { ASR_ERROR_MAP, ASR_USAGE_DISTINCTIONS, type ASRErrorEntry } from '../asrErrorMap'
 
 interface OpenAICompatibleConfig {
   apiKey: string
@@ -18,51 +17,24 @@ interface OpenAICompatibleConfig {
   model: string
 }
 
-interface ASRErrorEntry {
-  wrong: string
-  correct: string
-  category: string
-  note?: string
-}
-
-interface ASRErrorMap {
-  version: string
-  errors: ASRErrorEntry[]
-}
-
-let asrErrorMapCache: ASRErrorEntry[] | null = null
-
-function loadASRErrorMap(): ASRErrorEntry[] {
-  if (asrErrorMapCache) return asrErrorMapCache
-  try {
-    const mapPath = join(import.meta.dirname, '..', 'asrErrorMap.json')
-    console.log('[ASR Error Map] Loading from:', mapPath)
-    const content = readFileSync(mapPath, 'utf-8')
-    const map: ASRErrorMap = JSON.parse(content)
-    asrErrorMapCache = map.errors
-    console.log('[ASR Error Map] Loaded successfully:', asrErrorMapCache.length, 'entries')
-    return asrErrorMapCache
-  } catch (err) {
-    console.warn('[ASR Error Map] Failed to load:', err)
-    return []
-  }
-}
-
 function applyASRErrorCorrections(text: string): { corrected: string; applied: ASRErrorEntry[] } {
-  const errors = loadASRErrorMap()
   const applied: ASRErrorEntry[] = []
   let result = text
 
-  for (const entry of errors) {
-    if (entry.wrong === entry.correct) continue
-    const regex = new RegExp(entry.wrong, 'g')
-    if (regex.test(result)) {
-      result = result.replace(regex, entry.correct)
+  for (const entry of ASR_ERROR_MAP) {
+    if (result.includes(entry.wrong)) {
+      result = result.split(entry.wrong).join(entry.correct)
       applied.push(entry)
     }
   }
 
   return { corrected: result, applied }
+}
+
+/** 互逆词对不能盲替换，只能把辨析规则交给模型，按语义判断 */
+function buildDistinctionContext(): string {
+  const lines = ASR_USAGE_DISTINCTIONS.map((e) => `「${e.wrong}」/「${e.correct}」：${e.note ?? ''}`)
+  return `\n\n同音近义词辨析（两个词都成立，按语义判断，不确定就保留原文）：\n${lines.join('\n')}`
 }
 
 function extractChineseWords(text: string): string[] {
@@ -134,7 +106,8 @@ export class OpenAICompatibleProvider implements AIProvider {
     }
     
     const basePrompt = options?.promptTemplate || DEFAULT_PROMPT
-    const prompt = basePrompt + preCorrected + correctionHint + dictContext
+    const prompt =
+      basePrompt + preCorrected + correctionHint + buildDistinctionContext() + dictContext
 
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 60000)
