@@ -1,7 +1,6 @@
 /**
  * 文件处理 IPC 处理器
  * 提供文件选择对话框、文件元数据读取、音频提取（FFmpeg）、临时文件清理等功能
- * 支持格式：MP3/WAV/M4A/FLAC/OGG/WMA/MP4/MKV/AVI/MOV/WebM/FLV
  */
 import { ipcMain, dialog } from 'electron'
 import { stat, writeFile } from 'node:fs/promises'
@@ -11,10 +10,20 @@ import { downloadFromUrl } from '../services/urlDownloader'
 import { extractTextFromFile } from '../services/referenceParser'
 import { logger } from '../services/logger'
 
-const ALLOWED_EXTENSIONS = [
-  '.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma',
-  '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv',
+/**
+ * 白名单按「FFmpeg 能解 + 媒体行业日常会递过来的文件」两条线取，不是随便列的：
+ * AIFF/MP2/AC3 是广电播出与老磁带采集的常见容器，M4V/WMV/TS/M2TS 是网络与摄像机产物，
+ * MXF 是摄录卡的标准封装。真正能不能解由 ffprobe 说了算，这里只决定「要不要让用户选到它」。
+ */
+const AUDIO_EXTENSIONS = [
+  '.mp3', '.wav', '.m4a', '.flac', '.ogg', '.oga', '.opus', '.wma',
+  '.aac', '.ac3', '.mp2', '.aif', '.aiff', '.amr',
 ]
+const VIDEO_EXTENSIONS = [
+  '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv',
+  '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts', '.mts', '.mxf', '.vob', '.ogv',
+]
+const ALLOWED_EXTENSIONS = [...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS]
 
 export function registerFileHandlers() {
   ipcMain.handle('dialog:selectFile', async () => {
@@ -41,19 +50,22 @@ export function registerFileHandlers() {
     try {
       const stats = await stat(filePath)
       const ext = extname(filePath).toLowerCase()
-      const isAudio = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma'].includes(ext)
       const metadata = {
         path: filePath,
         name: filePath.split('/').pop() ?? filePath,
         size: stats.size,
         extension: ext,
-        type: isAudio ? 'audio' as const : 'video' as const,
+        type: AUDIO_EXTENSIONS.includes(ext) ? ('audio' as const) : ('video' as const),
+        // 拖拽进来的文件绕过了选择框的 filters，白名单由主进程说了算：
+        // 渲染层再抄一份扩展名清单，早晚和这里对不上
+        supported: ALLOWED_EXTENSIONS.includes(ext),
         lastModified: stats.mtimeMs,
       }
       logger.info('FileHandlers', 'Metadata retrieved', {
         name: metadata.name,
         size: metadata.size,
         type: metadata.type,
+        supported: metadata.supported,
       })
       return metadata
     } catch (err) {

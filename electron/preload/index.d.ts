@@ -8,6 +8,8 @@ export interface FileMetadata {
   size: number
   extension: string
   type: 'audio' | 'video'
+  /** 扩展名是否在支持的清单里（拖拽进来的文件没经过选择框，得由主进程判） */
+  supported: boolean
   lastModified: number
 }
 

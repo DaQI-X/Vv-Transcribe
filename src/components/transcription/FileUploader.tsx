@@ -156,14 +156,6 @@ export function FileUploader() {
     const file: any = e.dataTransfer.files[0]
     if (!file) return
 
-    const validExts = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma', '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv']
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-    if (!validExts.includes(ext)) {
-      frontendLogger.warn('FileUploader', 'Invalid file format', { fileName: file.name, ext })
-      toast.error(`不支持的文件格式「${file.name}」，请上传音视频文件`)
-      return
-    }
-
     frontendLogger.userAction('File dropped', { fileName: file.name })
     const filePath = api.getDroppedFilePath(file)
     if (!filePath) {
@@ -174,6 +166,12 @@ export function FileUploader() {
     const metadata = await api.getFileMetadata(filePath)
     if (!metadata) {
       toast.error('无法读取该文件的信息，请确认文件存在且为受支持的音视频格式')
+      return
+    }
+    // 拖拽绕过了选择框的 filters，支持与否以主进程返回的 supported 为准
+    if (!metadata.supported) {
+      frontendLogger.warn('FileUploader', 'Invalid file format', { fileName: file.name, ext: metadata.extension })
+      toast.error(`不支持的文件格式「${file.name}」，请换成 MP4 / MOV / MKV / MP3 / WAV / M4A 等常见音视频`)
       return
     }
 
