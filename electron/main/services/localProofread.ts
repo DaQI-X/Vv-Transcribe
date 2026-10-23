@@ -74,20 +74,17 @@ export async function proofreadSegmentsLocally(
 
 /**
  * 参考稿差异的规则解释。
- * diff 是字级的，一个词常被拆成 delete + insert 两个片段，所以除了整词相等，
- * 还接受「两侧各是表里某个词对的一部分，且误听形态确实出现在这一段里」。
+ * diff 是字级的，一次替换会拆成 delete（只有转写原文）和 insert（只有参考稿）两条，
+ * 所以除了整词相等，还要接受「只给了一侧」的情况——但必须这一段里确实出现了表里的误听形态。
+ * 单侧至少两个字，否则「性」这种半截片段会匹到不相干的词对上。
  */
 function matchEntry(item: DifferenceItem, entry: ASRErrorEntry): boolean {
   const { original, corrected, context } = item
   if (entry.wrong === original && entry.correct === corrected) return true
   if (entry.wrong === corrected && entry.correct === original) return true
-  return (
-    original.length > 0 &&
-    corrected.length > 0 &&
-    context.includes(entry.wrong) &&
-    entry.wrong.includes(original) &&
-    entry.correct.includes(corrected)
-  )
+  if (!context.includes(entry.wrong)) return false
+  if (original.length >= 2 && entry.wrong.includes(original)) return true
+  return corrected.length >= 2 && entry.correct.includes(corrected)
 }
 
 export async function explainDifferencesLocally(
