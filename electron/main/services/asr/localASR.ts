@@ -8,6 +8,21 @@ import type { ASRProvider, ASRSegment, ASRProgress, ASRStage } from './types'
 
 const PYTHON_ASR_URL = 'http://localhost:8000'
 
+/**
+ * 首次转写要在 loading_model 阶段从 hf-mirror 拉约 150MB 权重，弱网/离线时 Python 抛回来的是
+ * huggingface_hub 的英文报错原文，用户看到的是「一段看不懂的英文 + 只能重新上传」。
+ * 阶段号已经由引擎随流下发，所以这里能确定是哪一步挂的，只补「怎么办」，原文进日志。
+ */
+function explainLocalFailure(detail: string, stage: ASRStage | null): string {
+  if (stage !== 'loading_model') return detail || '本地转写失败'
+  console.error('[LocalASR] Whisper model load failed:', detail)
+  return (
+    '首次使用需要下载语音模型（约 150MB），这一步没有完成。' +
+    '请确认网络可访问 hf-mirror.com（国内直连即可，不需要代理）后重试；' +
+    '模型只需成功下载一次，之后本机离线可用。'
+  )
+}
+
 export class LocalASRProvider implements ASRProvider {
   readonly name = 'local'
   readonly type = 'local' as const
@@ -68,6 +83,7 @@ export class LocalASRProvider implements ASRProvider {
     const segments: ASRSegment[] = []
     let audioDuration = 0
     let completed = false
+    let lastStage: ASRStage | null = null
 
     const consume = (line: string) => {
       if (!line) return
@@ -85,6 +101,7 @@ export class LocalASRProvider implements ASRProvider {
         audioDuration = event.duration ?? 0
       } else if (event.type === 'status') {
         // 加载/下载模型期间一条片段也不会有，只能把阶段透给宿主
+        lastStage = event.stage ?? lastStage
         options.onProgress?.({ percent: 10, stage: event.stage })
       } else if (event.type === 'segment') {
         const segment: ASRSegment = {
@@ -99,7 +116,7 @@ export class LocalASRProvider implements ASRProvider {
       } else if (event.type === 'done') {
         completed = true
       } else if (event.type === 'error') {
-        throw new Error(event.detail || '本地转写失败')
+        throw new Error(explainLocalFailure(event.detail || '', lastStage))
       }
     }
 

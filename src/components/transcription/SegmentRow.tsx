@@ -26,9 +26,11 @@ interface SegmentRowProps {
 
 export function SegmentRow({ segment, isActive, onClick, diff, onAccept, diffMode }: SegmentRowProps) {
   const { updateSegment } = useTranscriptionStore()
+  // 只有「参考稿疑问」、字面没差异的段落也要亮出来，否则用户看不到 AI 提的那条疑问
+  const showPanel = !!diff && (diff.hasDifference || diff.referenceIssues.length > 0)
 
   return (
-    <div className={`segment-row ${isActive ? 'active' : ''} ${diff?.hasDifference ? 'segment-row--has-diff' : ''}`} onClick={onClick}>
+    <div className={`segment-row ${isActive ? 'active' : ''} ${showPanel ? 'segment-row--has-diff' : ''}`} onClick={onClick}>
       <div className="segment-row__time">
         <span className="segment-row__time-text">{formatTime(segment.startTime)}</span>
       </div>
@@ -50,7 +52,7 @@ export function SegmentRow({ segment, isActive, onClick, diff, onAccept, diffMod
             target.style.height = target.scrollHeight + 'px'
           }}
         />
-        {diff && diff.hasDifference && (
+        {diff && showPanel && (
           <DiffPanel diff={diff} onAcceptAll={onAccept} mode={diffMode} />
         )}
       </div>

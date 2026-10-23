@@ -43,6 +43,18 @@ interface RawReferenceIssue {
   refEnd: number
 }
 
+/** 只有参考稿疑问、没有字面差异的段落占位：DiffPanel 按 referenceIssues 渲染 */
+function emptySegmentDiff(segmentId: string): SegmentDiff {
+  return {
+    segmentId,
+    chunks: [],
+    explanations: [],
+    referenceIssues: [],
+    hasDifference: false,
+    totalChanges: 0,
+  }
+}
+
 function mapIssuesToSegments(
   issues: RawReferenceIssue[],
   alignment: Array<{ segmentId: string; referenceStart: number; referenceEnd: number }>,
@@ -206,10 +218,11 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         if (referenceAnalysis) {
           const issuesBySegment = mapIssuesToSegments(referenceAnalysis.issues, alignment)
           for (const [segId, issues] of issuesBySegment) {
-            const segDiff = explainedDiffs.get(segId)
-            if (segDiff) {
-              segDiff.referenceIssues = issues
-            }
+            // 没被对齐上的段落不会出现在 diffs 里，可它的「参考稿疑问」照样得显示：
+            // 补一个空差异占位，否则这段疑问会被整段丢弃、用户看不到任何提示
+            const segDiff = explainedDiffs.get(segId) ?? emptySegmentDiff(segId)
+            segDiff.referenceIssues = issues
+            explainedDiffs.set(segId, segDiff)
           }
         }
 
