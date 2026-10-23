@@ -1093,7 +1093,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   gap: 8px;
 }
 
-/* 表头按钮（返回首页/上传参考/AI 纠错/导出）文字不折行，宁可整组换行也不压字 */
+/* 表头按钮（返回首页/上传参考/AI 校对/导出）文字不折行，宁可整组换行也不压字 */
 .transcript-editor__header button {
   white-space: nowrap;
 }
@@ -1284,7 +1284,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 /* ============================================
- * Diff 视图 (AI 纠错弹窗)
+ * Diff 视图 (AI 校对弹窗)
  * ============================================ */
 .diff-view {
   display: flex;

@@ -49,7 +49,7 @@ export async function checkCorrectionReady(): Promise<ReadinessBlock | null> {
   const settings = await api.getSettings().catch(() => null)
   if (!str(settings?.aiApiKey)) {
     return {
-      message: 'AI 纠错需要先配置 API Key，请在「纠错配置」里填写',
+      message: 'AI 校对需要先配置 API Key，请在「校对配置」里填写',
       settingsTab: 'ai',
     }
   }

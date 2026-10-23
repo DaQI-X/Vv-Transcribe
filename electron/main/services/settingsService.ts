@@ -64,7 +64,7 @@ export async function saveSettings(settings: Partial<AppSettings>): Promise<AppS
  * 接口地址归一化。
  * 各家文档常直接给 `https://api.openai.com/v1` 这种带后缀的形式，而请求统一拼成
  * `${apiBase}/v1/...`，所以这里容忍末尾斜杠和多余的 /v1。
- * 转写、纠错、以及设置里的「测试连接」必须共用这一个实现，否则测试用归一化后的地址、
+ * 转写、校对、以及设置里的「测试连接」必须共用这一个实现，否则测试用归一化后的地址、
  * 干活用原始地址，就会出现「测试说可用、一转写就 404」这种最难查的分歧。
  */
 export function normalizeApiBase(raw: string): string {
@@ -81,7 +81,7 @@ export async function getASRConfig(): Promise<Record<string, unknown>> {
   }
 }
 
-/** AI 纠错配置；留空时回落到 OpenAI 端点，否则拼出来的是非法相对地址，报错对用户毫无意义 */
+/** AI 校对配置；留空时回落到 OpenAI 端点，否则拼出来的是非法相对地址，报错对用户毫无意义 */
 export async function getAIConfig(): Promise<{ apiKey: string; apiBase: string; model: string }> {
   const settings = await loadSettings()
   return {

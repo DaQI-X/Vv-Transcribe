@@ -2,7 +2,7 @@
  * 设置弹窗组件
  * 提供两个配置 Tab：
  * - 转写配置（asr）：转写模式（本地/云端）、API Base、API Key、模型
- * - 纠错配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
+ * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
  * 设置通过 IPC 持久化到 userData/settings.json
  *
  * 保存只在点「保存设置」时发生，且保存后不关窗，方便紧接着点「测试连接」；
@@ -31,7 +31,7 @@ const DEFAULT_VALUES: SettingsValues = {
   aiProvider: 'openai', aiApiKey: '', aiApiBase: '', aiModel: '',
 }
 
-/** 纠错服务商用到的端点与默认模型；主进程会在 apiBase 拼 /v1/chat/completions */
+/** 校对服务商用到的端点与默认模型；主进程会在 apiBase 拼 /v1/chat/completions */
 const AI_PROVIDER_PRESETS: Record<string, { apiBase: string; model: string }> = {
   openai: { apiBase: 'https://api.openai.com', model: 'gpt-4o-mini' },
   deepseek: { apiBase: 'https://api.deepseek.com', model: 'deepseek-chat' },
@@ -40,7 +40,7 @@ const AI_PROVIDER_PRESETS: Record<string, { apiBase: string; model: string }> = 
 
 const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
-  ai: '纠错配置',
+  ai: '校对配置',
   theme: '主题',
   about: '关于与更新',
 }
@@ -478,7 +478,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   {testingKind === 'ai' ? '检查中...' : '测试连接'}
                 </button>
                 <span className="settings-form-hint">
-                  按上面填写的值发一条最短的纠错请求（花费可忽略），确认这个模型能按我们的 JSON 格式返回，不需要先保存
+                  按上面填写的值发一条最短的校对请求（花费可忽略），确认这个模型能按我们的 JSON 格式返回，不需要先保存
                 </span>
                 {testResults.ai && <TestResultView result={testResults.ai} />}
               </div>
@@ -558,7 +558,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     打开日志文件夹
                   </button>
                 </div>
-                <span className="settings-form-hint">转写或纠错失败时，把这里的日志文件发给开发者便于排查</span>
+                <span className="settings-form-hint">转写或校对失败时，把这里的日志文件发给开发者便于排查</span>
               </div>
             </>
           )}

@@ -40,7 +40,7 @@ export async function runTranscription(
   },
 ): Promise<TranscriptionResult> {
   // 只有用户显式选择「云端优先」才允许把音频发出本机。
-  // 仅存在 API Key（例如只为 AI 纠错而填）不构成上传授权。
+  // 仅存在 API Key（例如只为 AI 校对而填）不构成上传授权。
   const cloudProvider = config.provider === 'cloud' ? createCloudProvider(config) : null
   let cloudError: string | null = null
 

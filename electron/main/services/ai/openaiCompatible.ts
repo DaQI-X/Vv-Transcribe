@@ -1,8 +1,8 @@
 /**
- * OpenAI 兼容 AI 纠错提供者
- * 调用 OpenAI / DeepSeek / 通义千问等兼容接口进行文本纠错
+ * OpenAI 兼容 AI 校对提供者
+ * 调用 OpenAI / DeepSeek / 通义千问等兼容接口进行文本校对
  * 
- * 纠错流程（三层架构）：
+ * 校对流程（三层架构）：
  * 1. ASR 错误表：确定性修正已知同音字错误（如"决性→觉性"）
  * 2. 词典验证：用修正后的词查词典，获取释义注入 prompt
  * 3. Prompt 强化：强调语音识别同音字错误，附带已修正线索
@@ -88,7 +88,7 @@ async function buildDictionaryContext(text: string): Promise<string> {
   return `\n\n参考词典释义：\n${dictLines}`
 }
 
-/** 纠错用的基础 prompt。「测试连接」要复用同一个契约，否则测的就不是干活时发的那份请求 */
+/** 校对用的基础 prompt。「测试连接」要复用同一个契约，否则测的就不是干活时发的那份请求 */
 export const DEFAULT_PROMPT = `你是一个专业的中文文本校对助手。以下是一段语音识别生成的文本。
 
 **重要提示**：这是语音识别（ASR）生成的文本，存在同音字、近音字误识别问题。已根据常见 ASR 错误表进行了初步修正。
@@ -159,7 +159,7 @@ export class OpenAICompatibleProvider implements AIProvider {
 
       if (!response.ok) {
         const errorText = await response.text()
-        throw new Error(`AI 纠错请求失败 (${response.status}): ${errorText}`)
+        throw new Error(`AI 校对请求失败 (${response.status}): ${errorText}`)
       }
 
       const result = (await response.json()) as {
@@ -183,7 +183,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     } catch (err) {
       clearTimeout(timeoutId)
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error('AI 纠错请求超时（60秒），请检查网络连接或 API 配置')
+        throw new Error('AI 校对请求超时（60秒），请检查网络连接或 API 配置')
       }
       throw err
     }

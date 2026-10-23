@@ -305,7 +305,7 @@ export function FileUploader() {
 
       <div className="feature_highlights">
         <span className="feature_highlights_text">
-          支持音频、视频转写 · AI 智能纠错 · 多格式导出
+          支持音频、视频转写 · AI 智能校对 · 多格式导出
         </span>
       </div>
     </div>

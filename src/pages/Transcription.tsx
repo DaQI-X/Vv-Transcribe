@@ -1,7 +1,7 @@
 /**
  * 转写主页面
  * 根据文件状态切换三种视图：上传区 → 处理状态 → 结果展示（播放器 + 编辑器）
- * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 纠错配置）
+ * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 校对配置）
  */
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Settings } from 'lucide-react'
@@ -22,7 +22,7 @@ import logoIcon from '@/assets/mac/logo_1024.png'
 
 const SETTINGS_MENU = [
   { key: 'asr', label: '转写配置' },
-  { key: 'ai', label: '纠错配置' },
+  { key: 'ai', label: '校对配置' },
   { key: 'theme', label: '主题' },
   { key: 'about', label: '关于与更新' },
 ]

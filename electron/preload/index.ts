@@ -1,7 +1,7 @@
 /**
  * Electron preload 脚本
  * 通过 contextBridge 向渲染进程暴露安全的 IPC 调用接口
- * 涵盖：文件操作、ASR 转写、AI 纠错、设置管理、词典查询
+ * 涵盖：文件操作、ASR 转写、AI 校对、设置管理、词典查询
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 

@@ -35,7 +35,7 @@ export function DiffPanel({ diff, onAcceptAll, mode = 'reference' }: DiffPanelPr
             <AlertTriangle size={12} /> {issueCount} 处参考稿疑问
           </span>
         )}
-        <span className="diff-panel__label">{mode === 'ai' ? 'AI 纠错' : '参考稿对比'}</span>
+        <span className="diff-panel__label">{mode === 'ai' ? 'AI 校对' : '参考稿对比'}</span>
         {onAcceptAll && hasDiff && (
           <button
             className="diff-panel__accept-all-btn"

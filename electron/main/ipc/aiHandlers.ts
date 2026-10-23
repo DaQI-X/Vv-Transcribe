@@ -1,6 +1,6 @@
 /**
- * AI 文本纠错 IPC 处理器
- * 读取用户设置的 AI 配置，调用 OpenAI 兼容接口进行文本纠错
+ * AI 文本校对 IPC 处理器
+ * 读取用户设置的 AI 配置，调用 OpenAI 兼容接口进行文本校对
  * 未配置 Key 或调用失败时通过 error 字段回传原因，避免渲染进程把「失败」当成「无需纠正」
  */
 import { ipcMain } from 'electron'
@@ -22,7 +22,7 @@ export function registerAIHandlers() {
         return {
           corrected: text,
           changes: [],
-          error: '未配置 AI 纠错 API Key，请在「设置 → 纠错配置」中填写',
+          error: '未配置 AI 校对 API Key，请在「设置 → 校对配置」中填写',
         }
       }
 
@@ -30,8 +30,8 @@ export function registerAIHandlers() {
         const provider = new OpenAICompatibleProvider(config)
         return await provider.correctText(text, options)
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'AI 纠错失败'
-        return { corrected: text, changes: [], error: `AI 纠错失败: ${message}` }
+        const message = err instanceof Error ? err.message : 'AI 校对失败'
+        return { corrected: text, changes: [], error: `AI 校对失败: ${message}` }
       }
     },
   )
@@ -74,7 +74,7 @@ export function registerAIHandlers() {
       if (!config.apiKey) {
         return {
           issues: [],
-          error: '未配置 AI 纠错 API Key，请在「设置 → 纠错配置」中填写',
+          error: '未配置 AI 校对 API Key，请在「设置 → 校对配置」中填写',
         }
       }
 

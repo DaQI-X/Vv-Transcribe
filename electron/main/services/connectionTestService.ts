@@ -3,7 +3,7 @@
  *
  * 为什么必须真发一次请求：只探活（GET /v1/models 之类）证明不了这套配置能干活。
  * 模型名写错是最常见的失败，而绝大多数兼容网关对任意模型名都照常返回 200 列表，
- * 探活全绿、真正转写时才报错。所以这里带上 1 秒静音音频和一条最小纠错样例，
+ * 探活全绿、真正转写时才报错。所以这里带上 1 秒静音音频和一条最小校对样例，
  * 走的就是干活时那两个接口，把失败提前到用户还在填表的时候。
  *
  * 测试用的是表单里的当前值，不读已保存设置、也不写盘 —— 用户应当在「没点保存」的情况下
@@ -253,7 +253,7 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
   const base = normalizeApiBase(values.apiBase)
   const baseProblem = invalidBase(base)
   if (baseProblem) return { level: 'fail', title: '还测不了', message: baseProblem }
-  if (!values.apiKey.trim()) return { level: 'fail', title: '还测不了', message: 'AI 纠错需要 API Key 才能调用' }
+  if (!values.apiKey.trim()) return { level: 'fail', title: '还测不了', message: 'AI 校对需要 API Key 才能调用' }
 
   const model = values.model.trim() || 'gpt-4o-mini'
   const usedDefault = !values.model.trim()
@@ -265,7 +265,7 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
     response = await fetch(`${base}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${values.apiKey.trim()}` },
-      // 与真实纠错请求保持同一契约：同样的 prompt、同样要求只回 JSON、同样的 temperature
+      // 与真实校对请求保持同一契约：同样的 prompt、同样要求只回 JSON、同样的 temperature
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content: DEFAULT_PROMPT + AI_PROBE_TEXT }],
@@ -306,7 +306,7 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
     return {
       level: 'fail',
       title: '这个模型不遵守输出格式',
-      message: `接口能通，但它没有按要求只返回 JSON（开头是「${content.trim().replace(/\s+/g, ' ').slice(0, 40)}」）。纠错结果会解析失败，建议换 gpt-4o-mini / deepseek-chat 这类支持 json_object 的模型`,
+      message: `接口能通，但它没有按要求只返回 JSON（开头是「${content.trim().replace(/\s+/g, ' ').slice(0, 40)}」）。校对结果会解析失败，建议换 gpt-4o-mini / deepseek-chat 这类支持 json_object 的模型`,
     }
   }
 
@@ -328,7 +328,7 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
   }
   return {
     level: 'pass',
-    title: 'AI 纠错可用',
+    title: 'AI 校对可用',
     message: `${originNote}耗时 ${formatLatency(latencyMs)}，输出格式正确，示例句里的同音错字也改对了`,
   }
 }

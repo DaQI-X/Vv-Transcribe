@@ -1,12 +1,12 @@
 # Vv Transcribe
 
-一款基于 Electron 的桌面端音视频转写应用，支持本地/云端 ASR 语音识别、AI 智能纠错（集成中文词典）、段落级播放同步和多格式导出。
+一款基于 Electron 的桌面端音视频转写应用，支持本地/云端 ASR 语音识别、AI 智能校对（集成中文词典）、段落级播放同步和多格式导出。
 
 ## 功能特性
 
 - **音视频文件上传**：支持拖拽/点击上传，兼容 MP3/WAV/M4A/FLAC/MP4/MKV/AVI/MOV/WebM/FLV 等格式
 - **ASR 语音转写**：云端优先（OpenAI Whisper API）、本地兜底（Python faster-whisper），自动降级
-- **AI 智能纠错**：集成开源中文词库（chinese-xinhua），在 AI 纠错前注入词典释义，提升用词准确性
+- **AI 智能校对**：集成开源中文词库（chinese-xinhua），在 AI 校对前注入词典释义，提升用词准确性
 - **音视频播放器**：播放/暂停、进度拖拽 seek、段落高亮同步，视频文件内嵌播放
 - **段落编辑器**：行内编辑转写文本，点击段落跳转到对应播放时间
 - **多格式导出**：SRT 字幕 / 纯文本 TXT / JSON 数据 / Markdown 文档
@@ -25,7 +25,7 @@
 | 路由 | React Router 7（HashRouter） |
 | 音频处理 | FFmpeg（fluent-ffmpeg + @ffmpeg-installer） |
 | ASR 转写 | Python faster-whisper（本地）/ OpenAI Whisper API（云端） |
-| AI 纠错 | OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问） |
+| AI 校对 | OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问） |
 | 中文词典 | pwxcoo/chinese-xinhua 开源词库 |
 
 ## 项目结构
@@ -39,7 +39,7 @@ basic_one/
 │   │   │   ├── index.ts               #   注册中心，统一注册所有处理器
 │   │   │   ├── fileHandlers.ts        #   文件操作：选择、元数据、音频提取、清理
 │   │   │   ├── asrHandlers.ts         #   ASR 转写：任务管理、进度推送、取消
-│   │   │   ├── aiHandlers.ts          #   AI 纠错：读取配置、调用纠错接口
+│   │   │   ├── aiHandlers.ts          #   AI 校对：读取配置、调用校对接口
 │   │   │   ├── settingsHandlers.ts    #   设置：读取/保存配置
 │   │   │   └── dictionaryHandlers.ts  #   词典：查询、版本检查、更新下载
 │   │   └── services/                  # 业务服务层
@@ -52,9 +52,9 @@ basic_one/
 │   │       │   ├── asrManager.ts      #     转写管理器（云端优先→本地兜底）
 │   │       │   ├── cloudASR.ts        #     云端 ASR（OpenAI Whisper API）
 │   │       │   └── localASR.ts        #     本地 ASR（调用 Python 服务）
-│   │       └── ai/                    #   AI 纠错模块
+│   │       └── ai/                    #   AI 校对模块
 │   │           ├── types.ts           #     AI Provider 接口定义
-│   │           └── openaiCompatible.ts #    OpenAI 兼容纠错实现（含词典注入）
+│   │           └── openaiCompatible.ts #    OpenAI 兼容校对实现（含词典注入）
 │   ├── preload/
 │   │   ├── index.ts                   # Preload 脚本：contextBridge 暴露 IPC 接口
 │   │   └── index.d.ts                 # ElectronAPI 类型声明
@@ -76,10 +76,10 @@ basic_one/
 │   │   │   ├── FileUploader.tsx       #   文件上传（拖拽 + 点击）
 │   │   │   ├── UploadStatus.tsx       #   处理状态展示（上传中/转写中/失败）
 │   │   │   ├── AudioPlayer.tsx        #   音视频播放器（波形可视化 + 段落同步）
-│   │   │   ├── TranscriptEditor.tsx   #   转写编辑器（编辑/AI纠错/导出）
+│   │   │   ├── TranscriptEditor.tsx   #   转写编辑器（编辑/AI校对/导出）
 │   │   │   └── SegmentRow.tsx         #   段落行（时间戳 + 可编辑文本）
 │   │   └── settings/
-│   │       └── SettingsModal.tsx      #   设置弹窗（转写配置 / 纠错配置）
+│   │       └── SettingsModal.tsx      #   设置弹窗（转写配置 / 校对配置）
 │   ├── stores/
 │   │   ├── useTranscriptionStore.ts   # 转写状态（文件/进度/段落/错误）
 │   │   └── usePlayerStore.ts          # 播放器状态（播放/时间/倍速/高亮）
@@ -110,7 +110,7 @@ basic_one/
 ┌─────────────────────────────────────────────────────────┐
 │                    Electron 主进程                        │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
-│  │ 文件处理  │  │ ASR 管理  │  │ AI 纠错  │  │ 词典服务 │ │
+│  │ 文件处理  │  │ ASR 管理  │  │ AI 校对  │  │ 词典服务 │ │
 │  │ IPC      │  │ IPC      │  │ IPC      │  │ IPC     │ │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬────┘ │
 │       │              │              │              │      │
@@ -153,11 +153,11 @@ basic_one/
   → TranscriptionStore 更新状态
   → 转写完成 → 展示播放器 + 编辑器
 
-AI 纠错流程：
+AI 校对流程：
   TranscriptEditor → IPC ai:correct
     → 提取中文词汇 → 查询本地词典
     → 注入词典释义到 prompt → 调用 AI 接口
-    → 返回纠错结果 + Diff 对比
+    → 返回校对结果 + Diff 对比
 ```
 
 ### IPC 通道一览
@@ -173,7 +173,7 @@ AI 纠错流程：
 | `asr:start` | 渲染 → 主 | 启动转写任务 |
 | `asr:cancel` | 渲染 → 主 | 取消转写任务 |
 | `asr:progress` | 主 → 渲染 | 推送转写进度和段落 |
-| `ai:correct` | 渲染 → 主 | AI 文本纠错 |
+| `ai:correct` | 渲染 → 主 | AI 文本校对 |
 | `settings:get` | 渲染 → 主 | 读取设置 |
 | `settings:save` | 渲染 → 主 | 保存设置 |
 | `dictionary:lookup` | 渲染 → 主 | 查询单个词 |
@@ -282,7 +282,7 @@ python-asr/main.py + dependencies
 | API Key | 云端 ASR 密钥 | 空 |
 | 模型 | ASR 模型名称 | 空（默认 whisper-1） |
 
-- **只有「转写模式 = 云端优先」且填了云端 API Key，音频才会发出本机。** 默认的本地模式不发起任何网络转写请求；AI 纠错的 Key 只处理文本，不会上传音视频。
+- **只有「转写模式 = 云端优先」且填了云端 API Key，音频才会发出本机。** 默认的本地模式不发起任何网络转写请求；AI 校对的 Key 只处理文本，不会上传音视频。
 - 本地转写依赖内置的 Python ASR 服务（打包后自动拉起，开发模式需手动启动，见「快速开始」）。引擎未能启动时，转写会直接给出原因而不是 `fetch failed`。
 
 ### 链接转写
@@ -297,7 +297,7 @@ python-asr/main.py + dependencies
 内置包是官方 standalone 构建，自带 `curl_cffi`，所以 `--impersonate chrome`（TLS 指纹模拟）默认可用；第 3/4 档命中的 Homebrew 版本通常没有它，应用会探测后自动降级为不带浏览器模拟的请求。
 部分带风控的站点还需要浏览器 cookies 才能解析，应用会先用无头浏览器取 cookies 再重试。
 
-### AI 纠错配置
+### AI 校对配置
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
@@ -318,6 +318,6 @@ python-asr/main.py + dependencies
 - 开发模式下需手动启动 Python ASR 服务（`python-asr/main.py`），打包后的应用会自动启动内置的 ASR 二进制文件
 - 首次运行 Python ASR 服务时会自动下载 Whisper 模型（约 150MB），使用 hf-mirror.com 镜像
 - 视频文件播放依赖 `webSecurity: false` 配置，通过 `file://` 协议加载本地文件
-- AI 纠错需要配置有效的 API Key；未配置时点击纠错会直接弹出提示，不会静默返回原文
+- AI 校对需要配置有效的 API Key；未配置时点击校对会直接弹出提示，不会静默返回原文
 - 编译 Python ASR 二进制需要先安装 PyInstaller（`pip install pyinstaller`），并在激活的虚拟环境中执行
 # Vv-Transcribe

@@ -2,8 +2,8 @@
  * 转写结果编辑器组件
  * 展示转写段落列表，支持：
  * - 段落文本编辑（TextArea 行内编辑）
- * - 上传参考稿比对（字级 diff，点击 AI 纠错后分析差异 + 参考稿疑问）
- * - AI 纠错（有参考稿以参考稿为准，无参考稿调用 AI，行内 Popover 显示）
+ * - 上传参考稿比对（字级 diff，点击 AI 校对后分析差异 + 参考稿疑问）
+ * - AI 校对（有参考稿以参考稿为准，无参考稿调用 AI，行内 Popover 显示）
  * - 多格式字幕导出（SRT / TXT / JSON / Markdown）
  * - 点击段落跳转到对应播放时间点
  */
@@ -161,7 +161,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
     const api = getElectronAPI()
     if (!api || segments.length === 0) return
 
-    // 缺 Key 时除了说明原因，直接把纠错配置页打开，省掉让用户自己找入口的一步
+    // 缺 Key 时除了说明原因，直接把校对配置页打开，省掉让用户自己找入口的一步
     const blocked = await checkCorrectionReady()
     if (blocked) {
       raiseReadinessBlock(blocked)
@@ -208,12 +208,12 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
           // 字符级差异是本地算出来的，AI 分析失败时照样有效，只把 AI 那部分的失败如实说出
           toast.error(`${referenceAnalysis.error}（下方差异为逐字比对结果，不含 AI 判断）`)
         } else if (totalChanges === 0 && issueCount === 0) {
-          toast.info('转写内容与参考稿一致，无需纠错')
+          toast.info('转写内容与参考稿一致，无需校对')
         } else {
           const parts: string[] = []
           if (totalChanges > 0) parts.push(`${totalChanges} 处差异`)
           if (issueCount > 0) parts.push(`${issueCount} 处参考稿疑问`)
-          toast.success(`AI 纠错完成（以参考稿为准），${parts.join('，')}`)
+          toast.success(`AI 校对完成（以参考稿为准），${parts.join('，')}`)
         }
       } else {
         setStatus('comparing')
@@ -250,11 +250,11 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         setStatus('completed')
 
         const totalChanges = Array.from(diffs.values()).reduce((sum, d) => sum + d.totalChanges, 0)
-        toast.success(`AI 纠错完成，共 ${totalChanges} 处差异`)
+        toast.success(`AI 校对完成，共 ${totalChanges} 处差异`)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'AI 纠错失败')
-      toast.error('AI 纠错失败')
+      setError(err instanceof Error ? err.message : 'AI 校对失败')
+      toast.error('AI 校对失败')
     } finally {
       clearInterval(waitingTimer)
       setLoading(false)
@@ -290,7 +290,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
       if (totalChanges === 0) {
         toast.info('参考稿已上传，转写内容与参考稿一致')
       } else {
-        toast.success(`参考稿已上传，共 ${totalChanges} 处差异，点击"AI 纠错"查看详细说明`)
+        toast.success(`参考稿已上传，共 ${totalChanges} 处差异，点击"AI 校对"查看详细说明`)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '参考稿上传失败')
@@ -360,7 +360,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             className="transcript-editor__correct-btn"
           >
             <Pencil size={14} />
-            {loading ? '纠错中...' : 'AI 纠错'}
+            {loading ? '校对中...' : 'AI 校对'}
           </button>
           <Dropdown items={FORMAT_OPTIONS.map((opt) => ({ key: opt.key, label: opt.label, onClick: () => handleExport(opt.key) }))}>
             <button className="transcript-editor__export-btn">

@@ -1,6 +1,6 @@
 /**
- * AI 纠错模块类型定义
- * 定义 AI Provider 接口规范：接收原文，返回纠错后文本和改动说明
+ * AI 校对模块类型定义
+ * 定义 AI Provider 接口规范：接收原文，返回校对后文本和改动说明
  */
 export interface DifferenceItem {
   original: string
