@@ -392,3 +392,35 @@ export function getASRServiceStatus(): { ready: boolean; error: string | null } 
     error: asrReady ? null : (asrError || '本地转写引擎未运行，请重新启动应用'),
   }
 }
+
+/**
+ * 设置里「检查引擎状态」用：现场探一次 /health，而不是只读启动时缓存的布尔值。
+ * 引擎可能被外部杀掉，也可能模型还没加载（首次转写才加载），这些信息必须现问才有意义。
+ */
+export async function getLocalEngineDetail(): Promise<{
+  ready: boolean
+  error: string | null
+  modelLoaded: boolean
+  protocol: number | null
+  port: number
+}> {
+  const health = await probeHealth()
+  const status = getASRServiceStatus()
+  if (!health) {
+    return {
+      ready: false,
+      error: status.error || '本地转写引擎没有应答，请完全退出应用后重新启动',
+      modelLoaded: false,
+      protocol: null,
+      port: ASR_PORT,
+    }
+  }
+  return {
+    ready: status.ready,
+    // /health 应答了但身份对不上：端口上是别家程序或上一代残尸，不能报「正常」
+    error: status.ready ? null : status.error,
+    modelLoaded: health.model_loaded === true,
+    protocol: typeof health.protocol === 'number' ? health.protocol : null,
+    port: ASR_PORT,
+  }
+}

@@ -1080,6 +1080,9 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* 窄窗口下让按钮组整组换到第二行，而不是两组互相压缩、按钮内文字折行 */
+  flex-wrap: wrap;
+  row-gap: 10px;
   border-bottom: 1px solid var(--border-color);
   padding: 16px 24px;
 }
@@ -1088,6 +1091,11 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 表头按钮（返回首页/上传参考/AI 纠错/导出）文字不折行，宁可整组换行也不压字 */
+.transcript-editor__header button {
+  white-space: nowrap;
 }
 
 .transcript-editor__back-btn {
@@ -1427,7 +1435,10 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 .settings-modal__body {
   padding: 20px 24px;
-  max-height: 400px;
+  /* 让弹窗按内容长高（上限 80vh），而不是把表单压在固定 400px 里——
+     「配置自检」这类靠后的分组压在小窗口里就完全看不见了 */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -1471,6 +1482,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .settings-form-hint {
+  display: block;
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 4px;
@@ -1607,6 +1619,54 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .settings-modal__dict-update-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 关闭确认条：提示靠左、两个按钮仍贴右，沿用 footer 的 flex 布局 */
+.settings-modal__dirty-tip {
+  margin-right: auto;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* 测试连接结论：只有图标带语义色，边框/底色保持中性，避免界面花 */
+.settings-test-result {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-hover);
+}
+
+.settings-test-result__icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.settings-test-result__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-test-result__message {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.settings-test-result--pass .settings-test-result__icon {
+  color: #16a34a;
+}
+
+.settings-test-result--warn .settings-test-result__icon {
+  color: #d97706;
+}
+
+.settings-test-result--fail .settings-test-result__icon {
+  color: #dc2626;
 }
 
 .settings-update-notice {

@@ -17,6 +17,7 @@ import { useReferenceStore } from '@/stores/useReferenceStore'
 import { SegmentRow } from './SegmentRow'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
+import { checkCorrectionReady, raiseReadinessBlock } from '@/utils/readiness'
 import { compareWithReference } from '@/utils/referenceComparator'
 import { computeSegmentDiff } from '@/utils/segmentDiff'
 import { alignReferenceToSegments } from '@/utils/textAlignment'
@@ -160,9 +161,10 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
     const api = getElectronAPI()
     if (!api || segments.length === 0) return
 
-    const settings = await api.getSettings()
-    if (!settings.aiApiKey) {
-      toast.error('请先在「设置 → 纠错配置」中填写 AI API Key')
+    // 缺 Key 时除了说明原因，直接把纠错配置页打开，省掉让用户自己找入口的一步
+    const blocked = await checkCorrectionReady()
+    if (blocked) {
+      raiseReadinessBlock(blocked)
       return
     }
 

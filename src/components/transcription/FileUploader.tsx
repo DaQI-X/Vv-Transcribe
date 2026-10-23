@@ -9,6 +9,7 @@ import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { frontendLogger } from '@/utils/logger'
+import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
 
 type UploadMode = 'file' | 'url'
 
@@ -32,6 +33,14 @@ export function FileUploader() {
     frontendLogger.userAction('Start transcription process', { fileName, fileSize })
     if (!api) {
       frontendLogger.error('FileUploader', 'API is null')
+      return
+    }
+
+    // 开工前置校验：配置不可用时当场拦下并直达设置页，不要等音频提取完才失败
+    const blocked = await checkTranscriptionReady()
+    if (blocked) {
+      frontendLogger.warn('FileUploader', 'Transcription blocked by preflight', { reason: blocked.message })
+      raiseReadinessBlock(blocked)
       return
     }
 

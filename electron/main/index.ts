@@ -6,7 +6,7 @@
 import { app, BrowserWindow, nativeImage, ipcMain, powerSaveBlocker } from 'electron'
 import { join } from 'node:path'
 import { registerAllHandlers } from './ipc'
-import { startASRService, stopASRService } from './services/asrServiceManager'
+import { startASRService, stopASRService, getASRServiceStatus } from './services/asrServiceManager'
 import { initDictionary } from './services/dictionaryService'
 import { logger } from './services/logger'
 
@@ -50,12 +50,22 @@ let serviceError: string | null = null
 /** 两项前置服务各自完成的时间差很远（ASR 要等子进程就绪，词典要读大文件），分开上报才能给开屏页写阶段文案 */
 let asrTaskDone = false
 let dictionaryTaskDone = false
+/** 引擎「跑完了启动流程」和「真的能用」是两件事：startASRService 失败时是 return false，不是抛异常 */
+let asrStarted = false
+
+/** 引擎不可用的具体原因。开屏页不把它当致命错误（用户还得进设置改云端），但开工前置校验要说清 */
+function asrFailureReason(): string | null {
+  if (asrStarted) return null
+  if (!asrTaskDone) return '本地转写引擎还在启动中，请等开屏结束后再试'
+  return getASRServiceStatus().error || '本地转写引擎未能启动，请完全退出应用后重新启动'
+}
 
 /** 查询服务就绪状态 */
 ipcMain.handle('app:getServiceReady', () => ({
   ready: serviceReady,
   error: serviceError,
-  asrDone: asrTaskDone,
+  asrDone: asrTaskDone && asrStarted,
+  asrError: asrFailureReason(),
   dictionaryDone: dictionaryTaskDone,
 }))
 
@@ -85,7 +95,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 1000,
+    // 结果页是「播放器 480px 固定列 + 编辑列」两栏，编辑列表头一行的自然宽度约 608px，
+    // 窗口 1100 时编辑列 556、内容区 508，按钮组换到第二行且不挤压
+    minWidth: 1100,
     minHeight: 700,
     title: '',
     titleBarStyle: 'hiddenInset',
@@ -132,9 +144,11 @@ app.whenReady().then(async () => {
   // 异步初始化前置服务（词典 + ASR），完成后标记就绪
   logger.info('App', 'Initializing services...')
   const asrTask = startASRService()
+    .then((ok) => {
+      asrStarted = ok === true
+    })
     .catch((e) => {
       logger.error('App', 'ASR service failed', e?.message)
-      return null
     })
     .finally(() => {
       asrTaskDone = true
@@ -145,7 +159,7 @@ app.whenReady().then(async () => {
   Promise.all([asrTask, dictionaryTask])
     .then(() => {
       serviceReady = true
-      logger.info('App', 'Services initialization completed', { ready: serviceReady })
+      logger.info('App', 'Services initialization completed', { ready: serviceReady, asrStarted, asrError: asrFailureReason() })
     })
     .catch((e) => {
       serviceError = e?.message || '服务初始化失败，请重启应用'

@@ -69,6 +69,8 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: unknown) =>
     ipcRenderer.invoke('settings:save', settings),
+  testConnection: (kind: 'asr' | 'ai', values: unknown) =>
+    ipcRenderer.invoke('settings:testConnection', kind, values),
 
   getServiceReady: () =>
     ipcRenderer.invoke('app:getServiceReady'),

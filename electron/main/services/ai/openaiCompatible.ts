@@ -88,7 +88,8 @@ async function buildDictionaryContext(text: string): Promise<string> {
   return `\n\n参考词典释义：\n${dictLines}`
 }
 
-const DEFAULT_PROMPT = `你是一个专业的中文文本校对助手。以下是一段语音识别生成的文本。
+/** 纠错用的基础 prompt。「测试连接」要复用同一个契约，否则测的就不是干活时发的那份请求 */
+export const DEFAULT_PROMPT = `你是一个专业的中文文本校对助手。以下是一段语音识别生成的文本。
 
 **重要提示**：这是语音识别（ASR）生成的文本，存在同音字、近音字误识别问题。已根据常见 ASR 错误表进行了初步修正。
 

@@ -38,6 +38,22 @@ export interface ProbeAudioResult {
   error?: string
 }
 
+/** 「测试连接 / 检查引擎状态」的结构化结论，由主进程生成中文文案 */
+export interface TestOutcome {
+  /** pass=可以直接干活；warn=能用但工作阶段会掉级；fail=干活一定失败 */
+  level: 'pass' | 'warn' | 'fail'
+  title: string
+  message: string
+}
+
+export interface ConnectionTestValues {
+  /** 转写用：local 时主进程改查本机引擎，不发任何网络请求 */
+  provider?: string
+  apiBase: string
+  apiKey: string
+  model: string
+}
+
 export interface ElectronAPI {
   getDroppedFilePath: (file: File) => string
   selectFile: () => Promise<string | null>
@@ -109,11 +125,15 @@ export interface ElectronAPI {
 
   getSettings: () => Promise<Record<string, unknown>>
   saveSettings: (settings: Record<string, unknown>) => Promise<void>
+  testConnection: (kind: 'asr' | 'ai', values: ConnectionTestValues) => Promise<TestOutcome>
 
   getServiceReady: () => Promise<{
     ready: boolean
     error: string | null
+    /** 引擎真的可用；启动流程跑完但失败时为 false */
     asrDone: boolean
+    /** asrDone 为 false 时的可读原因，不会因此把开屏页判成致命错误 */
+    asrError: string | null
     dictionaryDone: boolean
   }>
 

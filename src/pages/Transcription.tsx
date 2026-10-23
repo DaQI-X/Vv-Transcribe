@@ -3,7 +3,7 @@
  * 根据文件状态切换三种视图：上传区 → 处理状态 → 结果展示（播放器 + 编辑器）
  * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 纠错配置）
  */
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Settings } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { FileUploader } from '@/components/transcription/FileUploader'
@@ -16,6 +16,7 @@ import { Dropdown } from '@/components/ui/Dropdown'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
+import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import logoIcon from '@/assets/mac/logo_1024.png'
 
@@ -28,8 +29,20 @@ const SETTINGS_MENU = [
 
 export function Transcription() {
   const navigate = useNavigate()
-  const [settingsTab, setSettingsTab] = useState<string | null>(null)
+  // 设置弹窗改成全局状态：开工前置校验等入口也要能把某个 tab 直接打开
+  const settingsTab = useSettingsModalStore((s) => s.tab)
+  const openSettings = useSettingsModalStore((s) => s.open)
+  const closeSettings = useSettingsModalStore((s) => s.close)
+  const [appVersion, setAppVersion] = useState('')
   const { fileName, status, reset } = useTranscriptionStore()
+
+  useEffect(() => {
+    const api = getElectronAPI()
+    if (!api) return
+    api.getAppVersion()
+      .then(setAppVersion)
+      .catch(() => {})
+  }, [])
 
   const clickCountRef = useRef(0)
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -96,7 +109,7 @@ export function Transcription() {
         </div>
         <div className="header_actions">
           <div className="header_settings">
-            <Dropdown items={SETTINGS_MENU.map((item) => ({ key: item.key, label: item.label, onClick: () => setSettingsTab(item.key) }))}>
+            <Dropdown items={SETTINGS_MENU.map((item) => ({ key: item.key, label: item.label, onClick: () => openSettings(item.key) }))}>
               <button>
                 <Settings size={16} />
               </button>
@@ -128,11 +141,11 @@ export function Transcription() {
           onClick={handleVersionClick}
           style={{ cursor: 'pointer', userSelect: 'none' }}
         >
-          Vv Transcribe v1.0.0
+          {appVersion ? `Vv Transcribe v${appVersion}` : 'Vv Transcribe'}
         </span>
       </div>
 
-      <SettingsModal tab={settingsTab} onClose={() => setSettingsTab(null)} />
+      <SettingsModal tab={settingsTab} onClose={closeSettings} />
       <ToastContainer />
     </div>
   )
