@@ -8,6 +8,7 @@
  * - 点击段落跳转到对应播放时间点
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { Pencil, Download, FileText, X, ArrowLeft } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { Dropdown } from '@/components/ui/Dropdown'
@@ -431,9 +432,13 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         </div>
       </div>
 
-      {referenceFileName && (
-        <ReferenceBubble fileName={referenceFileName} onClear={handleClearReference} disabled={loading} />
-      )}
+      {/* 参考稿气泡是视口级浮层，必须挂在 body 上：卡片 hover 的 transform（以及入场动画）
+          会把 position: fixed 的后代重新锚定到卡片里，鼠标一进一出气泡就会跳位。 */}
+      {referenceFileName &&
+        createPortal(
+          <ReferenceBubble fileName={referenceFileName} onClear={handleClearReference} disabled={loading} />,
+          document.body,
+        )}
 
       {modeDialogOpen && <ProofreadModeDialog onPick={handlePickMode} onClose={() => setModeDialogOpen(false)} />}
     </div>

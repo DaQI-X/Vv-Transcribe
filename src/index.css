@@ -817,7 +817,8 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .result-layout__editor {
   min-width: 0;
   flex: 1;
-  overflow: hidden;
+  /* 这里不能开 overflow: hidden：卡片正好铺满本列，会把 hover 那圈蓝色光晕整条裁掉，
+     导致左卡有光、右卡没光。裁剪交给 .transcript-editor 自己做。 */
   display: flex;
   flex-direction: column;
 }
