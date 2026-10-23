@@ -119,6 +119,7 @@ jobs:
 
   # 仅当推送 v* tag 时触发：汇总三平台产物发布到 GitHub Release，产出面向用户的永久下载直链。
   # main 守卫：tag 指向的 commit 必须是 main 的祖先，否则拒绝发布——保证只有 main 的稳定版本能对外。
+  # 版本守卫：package.json 的 version 必须等于 tag 名，否则拒绝发布——v1.0.2 就是漏了 bump，发出去的安装包自报 1.0.1。
   release:
     name: Publish GitHub Release
     needs: build
@@ -140,6 +141,22 @@ jobs:
             exit 1
           fi
           echo "tag ${{ github.ref_name }} 已在 main 上，允许发布 Release"
+
+      # 版本号来源只有 package.json（electron-builder.cjs 没有 extraMetadata.version 覆盖），
+      # 所以 tag 名和它不一致就意味着发布出去的应用自报另一个版本，检查更新会永久误报。
+      - name: Verify package.json version matches tag
+        run: |
+          pkg_version=$(sed -nE 's/^[[:space:]]*"version":[[:space:]]*"([^"]*)",?[[:space:]]*$/\1/p' package.json | head -1)
+          expected="${GITHUB_REF_NAME#v}"
+          if [ -z "${pkg_version}" ]; then
+            echo "::error::没能从 package.json 读出 version 字段"
+            exit 1
+          fi
+          if [ "${pkg_version}" != "${expected}" ]; then
+            echo "::error::package.json 版本 ${pkg_version} 与 tag ${GITHUB_REF_NAME} 不一致，拒绝发布。先提交「chore: 版本号升到 ${expected}」再打 tag"
+            exit 1
+          fi
+          echo "package.json ${pkg_version} == tag ${GITHUB_REF_NAME}，版本一致"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
