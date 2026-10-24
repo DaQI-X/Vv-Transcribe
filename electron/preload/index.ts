@@ -29,6 +29,8 @@ const api = {
     ipcRenderer.invoke('asr:start', filePath, options),
   cancelTranscription: (jobId: string) =>
     ipcRenderer.invoke('asr:cancel', jobId),
+  restartLocalEngine: () =>
+    ipcRenderer.invoke('asr:restartEngine'),
 
   onTranscriptionProgress: (
     callback: (data: {

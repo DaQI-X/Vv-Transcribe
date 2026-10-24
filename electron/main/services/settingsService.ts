@@ -12,6 +12,8 @@ interface AppSettings {
   asrApiKey: string
   asrApiBase: string
   asrModel: string
+  /** Whisper 语言码（zh/en/ja/…），同时决定校对走中文规则还是通用 prompt */
+  asrLanguage: string
   aiProvider: string
   aiApiKey: string
   aiApiBase: string
@@ -23,6 +25,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   asrApiKey: '',
   asrApiBase: '',
   asrModel: '',
+  asrLanguage: 'zh',
   aiProvider: 'openai',
   aiApiKey: '',
   aiApiBase: '',

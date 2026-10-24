@@ -19,6 +19,8 @@ interface TranscriptionState {
   error: string | null
   jobId: string | null
   asrProvider: 'local' | 'cloud' | null
+  /** 这次转写用的 Whisper 语言码；校对分支要靠它判断中文规则是否成立 */
+  asrLanguage: string
   unsubscribeProgress: (() => void) | null
 
   setFile: (info: {
@@ -32,6 +34,7 @@ interface TranscriptionState {
   setStage: (stage: string | null) => void
   setJobId: (jobId: string | null) => void
   setAsrProvider: (provider: 'local' | 'cloud') => void
+  setAsrLanguage: (language: string) => void
   addSegment: (segment: TranscriptionSegment) => void
   setSegments: (segments: TranscriptionSegment[]) => void
   updateSegment: (id: string, text: string) => void
@@ -52,6 +55,7 @@ const initialState = {
   error: null,
   jobId: null,
   asrProvider: null as 'local' | 'cloud' | null,
+  asrLanguage: 'zh',
   unsubscribeProgress: null as (() => void) | null,
 }
 
@@ -70,6 +74,8 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
   setJobId: (jobId) => set({ jobId }),
 
   setAsrProvider: (provider) => set({ asrProvider: provider }),
+
+  setAsrLanguage: (language) => set({ asrLanguage: language }),
 
   addSegment: (segment) =>
     set((state) => ({ segments: [...state.segments, segment] })),

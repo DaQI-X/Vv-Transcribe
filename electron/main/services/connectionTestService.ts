@@ -148,7 +148,7 @@ async function checkLocalEngine(): Promise<TestOutcome> {
     return {
       level: 'fail',
       title: '本地转写引擎不可用',
-      message: detail.error || '引擎没有应答，请完全退出 Vv Transcribe 后重新启动',
+      message: detail.error || '引擎没有应答，可点本页的「重启本地引擎」再试，不必退出应用',
     }
   }
 
@@ -159,7 +159,7 @@ async function checkLocalEngine(): Promise<TestOutcome> {
     return {
       level: 'warn',
       title: '本地引擎在线，但协议偏旧',
-      message: `引擎协议为 ${detail.protocol}，当前应用期望逐句流式（协议 2）。可能端口上跑的是上一代引擎，请完全退出应用后重新启动`,
+      message: `引擎协议为 ${detail.protocol}，当前应用期望逐句流式（协议 2）。端口上大概率是上一代引擎的残留，点本页的「重启本地引擎」会自动回收并重开`,
     }
   }
   return {

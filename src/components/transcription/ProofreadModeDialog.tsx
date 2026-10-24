@@ -34,9 +34,14 @@ const OPTIONS: Array<{
 interface ProofreadModeDialogProps {
   onPick: (mode: ProofreadMode) => void
   onClose: () => void
+  /**
+   * 本地校对走的是中文误听表 + 中文词库，非中文素材不成立。
+   * 这时把原因传进来：选项置灰并写明为什么，而不是悄悄少一个按钮让用户猜。
+   */
+  localUnavailableReason?: string
 }
 
-export function ProofreadModeDialog({ onPick, onClose }: ProofreadModeDialogProps) {
+export function ProofreadModeDialog({ onPick, onClose, localUnavailableReason }: ProofreadModeDialogProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -58,11 +63,14 @@ export function ProofreadModeDialog({ onPick, onClose }: ProofreadModeDialogProp
         <div className="settings-modal__body">
           {OPTIONS.map((option) => {
             const Icon = option.icon
+            const disabled = option.mode === 'local' && !!localUnavailableReason
             return (
               <button
                 key={option.mode}
-                className="proofread-option"
+                className={`proofread-option ${disabled ? 'proofread-option--disabled' : ''}`}
                 onClick={() => onPick(option.mode)}
+                disabled={disabled}
+                title={disabled ? localUnavailableReason : undefined}
               >
                 <span className="proofread-option__icon">
                   <Icon size={16} />
@@ -70,9 +78,11 @@ export function ProofreadModeDialog({ onPick, onClose }: ProofreadModeDialogProp
                 <span className="proofread-option__text">
                   <span className="proofread-option__title">
                     {option.title}
-                    <span className="proofread-option__tag">{option.tag}</span>
+                    <span className="proofread-option__tag">{disabled ? '仅支持中文' : option.tag}</span>
                   </span>
-                  <span className="proofread-option__desc">{option.description}</span>
+                  <span className="proofread-option__desc">
+                    {disabled ? localUnavailableReason : option.description}
+                  </span>
                 </span>
               </button>
             )

@@ -376,6 +376,15 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   margin-bottom: 20px;
 }
 
+/* 链接转写的限制说明：夹在输入框和「开始转写」之间，需要自己的下边距，否则按钮会贴上文字 */
+.url-input-zone .upload-subtitle {
+  max-width: 480px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
 .url-input-row {
   display: flex;
   width: 100%;
@@ -1654,6 +1663,15 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .proofread-option:hover {
   border-color: var(--brand-blue);
   box-shadow: 0 4px 12px rgba(27, 85, 245, 0.12);
+}
+
+/* 非中文素材时本地校对不成立：置灰但留在列表里，让用户看到这条限制，而不是少了一个按钮瞎猜 */
+.proofread-option--disabled,
+.proofread-option--disabled:hover {
+  border-color: var(--border-color);
+  box-shadow: none;
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .proofread-option__icon {

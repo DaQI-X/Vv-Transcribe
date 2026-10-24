@@ -9,13 +9,14 @@
  * 有未保存修改时关闭会先二次确认，切 Tab 不再重新拉取磁盘值，避免静默丢掉刚填的内容。
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { X, Eye, EyeOff, Sun, Moon, FolderOpen, Plug, CircleCheck, CircleX, TriangleAlert } from 'lucide-react'
+import { X, Eye, EyeOff, Sun, Moon, FolderOpen, Plug, RotateCcw, CircleCheck, CircleX, TriangleAlert } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useThemeStore } from '@/stores/useThemeStore'
+import { ASR_LANGUAGE_OPTIONS } from '@/utils/asrLanguage'
 
 interface SettingsValues {
-  asrProvider: string; asrApiKey: string; asrApiBase: string; asrModel: string
+  asrProvider: string; asrApiKey: string; asrApiBase: string; asrModel: string; asrLanguage: string
   aiProvider: string; aiApiKey: string; aiApiBase: string; aiModel: string
 }
 
@@ -27,7 +28,7 @@ interface TestOutcome {
 }
 
 const DEFAULT_VALUES: SettingsValues = {
-  asrProvider: 'local', asrApiKey: '', asrApiBase: '', asrModel: '',
+  asrProvider: 'local', asrApiKey: '', asrApiBase: '', asrModel: '', asrLanguage: 'zh',
   aiProvider: 'openai', aiApiKey: '', aiApiBase: '', aiModel: '',
 }
 
@@ -148,6 +149,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [testingKind, setTestingKind] = useState<'asr' | 'ai' | null>(null)
   const [testResults, setTestResults] = useState<{ asr?: TestOutcome; ai?: TestOutcome }>({})
+  const [restarting, setRestarting] = useState(false)
   const api = getElectronAPI()
   const { theme, setTheme } = useThemeStore()
 
@@ -244,8 +246,13 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     onClose()
   }
 
+  // 连点守卫只能放 ref：state 在同一次渲染里读不到刚 set 的值，快速点三下会放行三次
+  const testingRef = useRef(false)
+  const restartingRef = useRef(false)
+
   const handleTestConnection = async (kind: 'asr' | 'ai') => {
-    if (!api || testingKind) return
+    if (!api || testingRef.current) return
+    testingRef.current = true
     setTestingKind(kind)
     try {
       const payload = kind === 'asr'
@@ -259,7 +266,32 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         [kind]: { level: 'fail', title: '测试没能跑完', message: '应用内部出错，请关闭设置窗口后重试' } as TestOutcome,
       }))
     } finally {
+      testingRef.current = false
       setTestingKind(null)
+    }
+  }
+
+  /**
+   * 引擎起不来不必退出应用：首启下载模型失败、被外部杀掉这类情况，重启一次就能恢复。
+   * 最长可能等 60 秒（首次要下载模型），所以按钮必须有「重启中」态，否则像坏了。
+   */
+  const handleRestartEngine = async () => {
+    if (!api || restartingRef.current || testingRef.current) return
+    restartingRef.current = true
+    setRestarting(true)
+    try {
+      const result = await api.restartLocalEngine()
+      if (result.ok) {
+        toast.success('本地引擎已重启，可以直接开始转写')
+        await handleTestConnection('asr')
+      } else {
+        toast.error(result.error || '本地引擎重启失败，请稍后再试', 8000)
+      }
+    } catch {
+      toast.error('本地引擎重启失败。可在「关于与更新 → 打开日志文件夹」取日志后重新安装', 8000)
+    } finally {
+      restartingRef.current = false
+      setRestarting(false)
     }
   }
 
@@ -369,6 +401,22 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 </select>
               </div>
               <div className="settings-form-group">
+                <label className="settings-form-label">转写语言</label>
+                <select
+                  className="settings-form-select"
+                  value={values.asrLanguage}
+                  onChange={(e) => updateField('asrLanguage', e.target.value)}
+                >
+                  {ASR_LANGUAGE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <span className="settings-form-hint">
+                  本地和云端都按这个语言转写，保存后对下一次转写生效。选错会整段跑偏、甚至输出成另一种语言的翻译，比错字更难发现。
+                  非中文内容暂不支持「本地校对」（误听表和词库都是中文的），需要在「校对配置」里填 API Key 走 AI 校对
+                </span>
+              </div>
+              <div className="settings-form-group">
                 <label className="settings-form-label">API Base URL</label>
                 <input
                   className="settings-form-input"
@@ -411,10 +459,22 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <Plug size={12} />
                   {testingKind === 'asr' ? '检查中...' : values.asrProvider === 'cloud' ? '测试连接' : '检查引擎状态'}
                 </button>
+                {values.asrProvider !== 'cloud' && (
+                  <button
+                    type="button"
+                    onClick={handleRestartEngine}
+                    disabled={restarting || testingKind !== null}
+                    className="settings-modal__dict-update-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 8 }}
+                  >
+                    <RotateCcw size={12} />
+                    {restarting ? '重启中…' : '重启本地引擎'}
+                  </button>
+                )}
                 <span className="settings-form-hint">
                   {values.asrProvider === 'cloud'
                     ? '按上面填写的值真实走一次转写接口：上传 1 秒静音音频，花费可忽略，不需要先保存'
-                    : '只检查本机转写引擎是否在线，不发起任何网络请求'}
+                    : '只检查本机转写引擎是否在线，不发起任何网络请求；引擎没起来时点「重启本地引擎」，不用退出应用（首次要下载模型，重启可能等上一两分钟）'}
                 </span>
                 {testResults.asr && <TestResultView result={testResults.asr} />}
               </div>

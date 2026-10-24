@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { extractAudio, cleanupTemp } from '../services/audioProcessor'
 import { runTranscription } from '../services/asr/asrManager'
+import { restartLocalEngine } from '../services/asrServiceManager'
 import { getASRConfig } from '../services/settingsService'
 import type { ASRSegment, ASRStage } from '../services/asr/types'
 
@@ -92,5 +93,17 @@ export function registerASRHandlers() {
       }
       activeJobs.delete(jobId)
     }
+  })
+
+  /**
+   * 应用内重启本地引擎：首启下载模型失败、引擎被外部杀掉这类「不必退出应用就能恢复」的情况。
+   * 转写进行中直接拒绝——停引擎会截断正在推的 NDJSON 流，半截结果比报错更糟。
+   * 最长可能等满 60 秒（首次要下载模型），渲染进程需要自己显示「重启中」。
+   */
+  ipcMain.handle('asr:restartEngine', async () => {
+    if (activeJobs.size > 0) {
+      return { ok: false, error: '转写正在进行中，重启会中断当前任务。请等它跑完，或先点取消' }
+    }
+    return restartLocalEngine()
   })
 }

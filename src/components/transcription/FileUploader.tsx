@@ -14,7 +14,7 @@ import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
 type UploadMode = 'file' | 'url'
 
 export function FileUploader() {
-  const { setFile, setStatus, setProgress, setStage, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
+  const { setFile, setStatus, setProgress, setStage, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
   const [mode, setMode] = useState<UploadMode>('file')
@@ -84,8 +84,16 @@ export function FileUploader() {
 
       setUnsubscribeProgress(unsubscribe)
 
-      frontendLogger.serviceCall('ASR', 'startTranscription', { fileName, language: 'zh' })
-      const result = await api.startTranscription(filePath, { language: 'zh' })
+      // 语言以设置里的「转写语言」为准，不再写死中文；同时记进 store，
+      // 校对那条分支要靠它判断中文规则是否成立
+      const settings = await api.getSettings()
+      const language = typeof settings.asrLanguage === 'string' && settings.asrLanguage
+        ? settings.asrLanguage
+        : 'zh'
+      setAsrLanguage(language)
+
+      frontendLogger.serviceCall('ASR', 'startTranscription', { fileName, language })
+      const result = await api.startTranscription(filePath, { language })
 
       if (!result.success) {
         unsubscribe()
@@ -109,7 +117,7 @@ export function FileUploader() {
       frontendLogger.error('FileUploader', 'Transcription error', err instanceof Error ? err.message : '转写失败')
       setError(err instanceof Error ? err.message : '转写失败')
     }
-  }, [api, setFile, setStatus, setProgress, setJobId, setAsrProvider, addSegment, setError, setUnsubscribeProgress, reset])
+  }, [api, setFile, setStatus, setProgress, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset])
 
   const handleSelectFile = useCallback(async () => {
     frontendLogger.userAction('File selection dialog opened')
@@ -206,7 +214,11 @@ export function FileUploader() {
             onClick: () => { void api.openSystemSettings() },
           })
         } else {
-          toast.error(result.error || '链接解析失败，请重试')
+          // 链接取不到音频时，绝大多数情况的出路只有「换成本地文件」，把这条路直接给出来
+          toast.error(result.error || '链接解析失败，请重试', 8000, {
+            label: '改传本地文件',
+            onClick: () => setMode('file'),
+          })
         }
         setDownloading(false)
         setDownloadStatus('')
@@ -229,7 +241,10 @@ export function FileUploader() {
       await startTranscriptionProcess(metadata.path, result.title || metadata.name, metadata.size)
     } catch (err) {
       frontendLogger.error('FileUploader', 'URL download error', err instanceof Error ? err.message : '下载失败')
-      toast.error('链接解析失败，请重试')
+      toast.error('链接解析失败，请重试', 8000, {
+        label: '改传本地文件',
+        onClick: () => setMode('file'),
+      })
       setDownloading(false)
       setDownloadStatus('')
     }
@@ -283,7 +298,7 @@ export function FileUploader() {
             <input
               className="url-input"
               type="text"
-              placeholder="支持 YouTube, Bilibili, 抖音等公开视频链接"
+              placeholder="粘贴公开音视频链接（不需要登录的那种）"
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && !downloading && handleSubmitUrl()}
@@ -292,6 +307,10 @@ export function FileUploader() {
             <button className="url-paste-btn" onClick={handlePasteUrl} title="粘贴" disabled={downloading}>
               <Copy size={16} />
             </button>
+          </div>
+          <div className="upload-subtitle">
+            只能取公开视频。需要登录或会员的视频（抖音、B 站会员片、部分 YouTube）拿不到音频，
+            请先在本地下载好，再走「本地文件」上传
           </div>
           <button
             className="url-submit-btn"

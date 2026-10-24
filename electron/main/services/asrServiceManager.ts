@@ -8,6 +8,10 @@
  *
  * 启动流程：spawn 子进程 → 轮询 /health 直到「应答者确实是我拉起的那个」→ 标记服务可用
  * 关闭流程：对整个进程组 SIGTERM → 等待退出 → 超时升级 SIGKILL → 确认端口上不再有我这次的身份标识
+ *
+ * 应用内重启引擎（restartLocalEngine）也必须走同一套握手，所以 bootId 是每次 spawn 现生成的：
+ * 一个进程内复用同一个身份标识的话，上一代没退干净的残尸照样能对上号被判成就绪，
+ * 而它那份 PyInstaller 临时解包目录已经删了，用户第一次转写就会撞见看不懂的报错。
  */
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -27,13 +31,16 @@ const SHUTDOWN_TIMEOUT_MS = 5_000
 const FOREIGN_ANSWER_LIMIT = 3
 
 /**
- * 本次应用启动的身份标识，随 env 下发给引擎并由 /health 回显。
+ * 这次 spawn 的身份标识，随 env 下发给引擎并由 /health 回显。
  * 只有对得上这个 id 的应答才代表「我拉起的引擎已经起来了」——
  * 上一代没退干净的残尸照样能应答 /health（它已加载的模块还在内存里），
  * 但它那份 PyInstaller 临时解包目录早被删了，任何懒加载的模块都会报
  * 「No module named ...」这种用户完全看不懂的错。
+ *
+ * let 而不是 const：应用内重启（restartLocalEngine）复用同一个 Electron 进程，
+ * 沿用同一个 id 等于把上面这道校验关掉，#128/#129 修的正是这个。
  */
-const bootId = randomUUID()
+let bootId = randomUUID()
 
 interface AsrHealth {
   status?: string
@@ -270,6 +277,10 @@ export async function startASRService(): Promise<boolean> {
 
   console.log('[ASR Service] Starting:', binaryPath)
 
+  // 换一份身份标识再 spawn：新引擎只会由新 id 认领，重启前留在端口上的残尸
+  // 再也过不了握手这道关（见 bootId 上方注释）
+  bootId = randomUUID()
+
   const ffmpegPath = getFfmpegBinaryPath('ffmpeg')
   const ffprobePath = getFfmpegBinaryPath('ffprobe')
   console.log('[ASR Service] FFmpeg paths:', { ffmpegPath, ffprobePath })
@@ -340,11 +351,11 @@ function readyFailureMessage(outcome: 'ready' | 'foreign' | 'died' | 'timeout'):
     case 'ready':
       return null
     case 'foreign':
-      return '8000 端口上的转写服务不属于本次启动，请完全退出 Vv Transcribe 后重新启动'
+      return '8000 端口上的转写服务不属于本次启动。点「重启本地引擎」可自动回收并重开；反复出现请完全退出 Vv Transcribe 后重新启动'
     case 'died':
-      return '本地转写引擎启动后立即退出，请重新启动应用；若反复出现请重新安装 Vv Transcribe'
+      return '本地转写引擎启动后立即退出，可点「重启本地引擎」再试；若反复出现请重新安装 Vv Transcribe'
     case 'timeout':
-      return '本地转写引擎启动超时（首次运行需下载模型，可能耗时较久），请重新启动应用'
+      return '本地转写引擎启动超时（首次运行需下载模型，可能耗时较久）。网络确认无误后可点「重启本地引擎」再试'
   }
 }
 
@@ -413,11 +424,43 @@ export async function stopASRService(): Promise<void> {
   await ensureTreeGone()
 }
 
+export interface EngineActionResult {
+  ok: boolean
+  /** ok 为 false 时可直接展示给用户的原因 */
+  error: string | null
+}
+
+/**
+ * 重启同一时刻只允许跑一次：连点会并发 spawn 两个引擎抢 8000，后起的立即退出，
+ * 而「引擎秒退 + 端口仍有人监听」会被判成端口被占，顺手把刚起好的那个也关掉。
+ */
+let restartInFlight: Promise<EngineActionResult> | null = null
+
+async function doRestartLocalEngine(): Promise<EngineActionResult> {
+  // 先停再起。stop 里的 ensureTreeGone 用的还是旧 bootId，正好用来确认「上一代真退干净了」；
+  // 新身份由 startASRService 在 spawn 前现生成，残尸过不了握手这道关
+  await stopASRService()
+  const ok = await startASRService()
+  return { ok, error: ok ? null : (asrError || '本地转写引擎没能重启成功，请稍后再试') }
+}
+
+/** 应用内重启本地引擎：让用户在软件里就能再试一次，不必退出重开 */
+export function restartLocalEngine(): Promise<EngineActionResult> {
+  if (restartInFlight) return restartInFlight
+  restartInFlight = doRestartLocalEngine().finally(() => {
+    restartInFlight = null
+  })
+  return restartInFlight
+}
+
 /** 获取 ASR 服务状态；未就绪时 error 为可直接展示给用户的原因 */
 export function getASRServiceStatus(): { ready: boolean; error: string | null } {
+  if (asrReady) return { ready: true, error: null }
+  // 重启进行中时 asrError 还是上一轮的原因，照原样报出去会误导（端口此刻本来就该是空的）
+  if (restartInFlight) return { ready: false, error: '本地转写引擎正在重启中，请等这次重启完成' }
   return {
-    ready: asrReady,
-    error: asrReady ? null : (asrError || '本地转写引擎未运行，请重新启动应用'),
+    ready: false,
+    error: asrError || '本地转写引擎未运行，可在「设置 → 转写配置」点「重启本地引擎」',
   }
 }
 
@@ -437,7 +480,7 @@ export async function getLocalEngineDetail(): Promise<{
   if (!health) {
     return {
       ready: false,
-      error: status.error || '本地转写引擎没有应答，请完全退出应用后重新启动',
+      error: status.error || '本地转写引擎没有应答，可点「重启本地引擎」再试',
       modelLoaded: false,
       protocol: null,
       port: ASR_PORT,

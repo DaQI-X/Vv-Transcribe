@@ -20,6 +20,7 @@ import { ProofreadModeDialog, type ProofreadMode } from './ProofreadModeDialog'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
 import { checkCorrectionReady, hasCorrectionModel, raiseReadinessBlock } from '@/utils/readiness'
+import { hasLocalProofreadRules, languageLabel } from '@/utils/asrLanguage'
 import { compareWithReference } from '@/utils/referenceComparator'
 import { computeSegmentDiff } from '@/utils/segmentDiff'
 import { alignReferenceToSegments } from '@/utils/textAlignment'
@@ -94,12 +95,18 @@ function ReferenceBubble({ fileName, onClear, disabled }: { fileName: string; on
 }
 
 export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
-  const { segments, updateSegment, asrProvider, fileName } = useTranscriptionStore()
+  const { segments, updateSegment, asrProvider, asrLanguage, fileName } = useTranscriptionStore()
   const { activeSegmentId, seekToTime, setActiveSegment } = usePlayerStore()
   const {
     referenceText, referenceFileName, segmentDiffs,
     setReference, clearReference, setAllSegmentDiffs, setStatus, setError,
   } = useReferenceStore()
+
+  // 本地校对吃的是「常见误听表 + 中文词库」，非中文素材跑它等于空转。
+  // 不是禁用了事：大模型那条路照走，只是把这条的限制说清楚。
+  const localUnavailableReason = hasLocalProofreadRules(asrLanguage)
+    ? undefined
+    : `本地校对只支持中文（靠常见误听表和中文词库逐段修正），当前转写语言是「${languageLabel(asrLanguage)}」。想用 AI 校对，请到「设置 → 校对配置」填写 API Key`
 
   const activeRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
@@ -256,7 +263,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         }
       } else {
         const fullText = segments.map((s) => s.text).join('')
-        const result = await api.correctText(fullText, { language: 'zh' })
+        const result = await api.correctText(fullText, { language: asrLanguage })
 
         if (result.error) {
           setStatus('idle')
@@ -299,17 +306,30 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
       clearInterval(waitingTimer)
       setLoading(false)
     }
-  }, [segments, referenceText, setAllSegmentDiffs, setStatus, setError, fetchExplanations])
+  }, [segments, referenceText, asrLanguage, setAllSegmentDiffs, setStatus, setError, fetchExplanations])
 
   /** 没配模型就不弹选择框——直接本地跑完，并把「为什么只有本地结果」说清楚 */
   const handleProofreadClick = useCallback(async () => {
-    if (!(await hasCorrectionModel())) {
+    const hasModel = await hasCorrectionModel()
+
+    // 非中文时本地校对这条路不成立，也不偷偷降级：配了模型就让用户在弹窗里选（本地项已置灰说明原因），
+    // 没配就只能把他送到校对配置那页
+    if (localUnavailableReason) {
+      if (!hasModel) {
+        raiseReadinessBlock({ message: localUnavailableReason, settingsTab: 'ai' })
+        return
+      }
+      setModeDialogOpen(true)
+      return
+    }
+
+    if (!hasModel) {
       toast.info('未配置校对模型，已用本地校对。想要结合上下文的结果，可在「设置 → 校对配置」里填写 API Key', 5000)
       void runProofread('local')
       return
     }
     setModeDialogOpen(true)
-  }, [runProofread])
+  }, [runProofread, localUnavailableReason])
 
   const handlePickMode = useCallback((mode: ProofreadMode) => {
     setModeDialogOpen(false)
@@ -453,7 +473,13 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
           document.body,
         )}
 
-      {modeDialogOpen && <ProofreadModeDialog onPick={handlePickMode} onClose={() => setModeDialogOpen(false)} />}
+      {modeDialogOpen && (
+        <ProofreadModeDialog
+          onPick={handlePickMode}
+          onClose={() => setModeDialogOpen(false)}
+          localUnavailableReason={localUnavailableReason}
+        />
+      )}
     </div>
   )
 }

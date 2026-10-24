@@ -83,6 +83,8 @@ export interface ElectronAPI {
     error?: string
   }>
   cancelTranscription: (jobId: string) => Promise<void>
+  /** 应用内重启本地引擎。转写进行中会被拒绝；最长可能等 60 秒（首次要下载模型） */
+  restartLocalEngine: () => Promise<{ ok: boolean; error: string | null }>
 
   onTranscriptionProgress: (
     callback: (data: {

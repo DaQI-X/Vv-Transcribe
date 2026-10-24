@@ -50,21 +50,24 @@ let serviceError: string | null = null
 /** 两项前置服务各自完成的时间差很远（ASR 要等子进程就绪，词典要读大文件），分开上报才能给开屏页写阶段文案 */
 let asrTaskDone = false
 let dictionaryTaskDone = false
-/** 引擎「跑完了启动流程」和「真的能用」是两件事：startASRService 失败时是 return false，不是抛异常 */
-let asrStarted = false
 
-/** 引擎不可用的具体原因。开屏页不把它当致命错误（用户还得进设置改云端），但开工前置校验要说清 */
+/**
+ * 引擎状态一律现读 asrServiceManager，不在这里缓存布尔值：
+ * 应用内「重启本地引擎」跑的是同一个 startASRService，缓存的那份会一直停在开屏那次的结果。
+ */
 function asrFailureReason(): string | null {
-  if (asrStarted) return null
   if (!asrTaskDone) return '本地转写引擎还在启动中，请等开屏结束后再试'
-  return getASRServiceStatus().error || '本地转写引擎未能启动，请完全退出应用后重新启动'
+  const status = getASRServiceStatus()
+  return status.ready
+    ? null
+    : (status.error || '本地转写引擎未能启动，可在「设置 → 转写配置」点「重启本地引擎」')
 }
 
 /** 查询服务就绪状态 */
 ipcMain.handle('app:getServiceReady', () => ({
   ready: serviceReady,
   error: serviceError,
-  asrDone: asrTaskDone && asrStarted,
+  asrDone: asrTaskDone && getASRServiceStatus().ready,
   asrError: asrFailureReason(),
   dictionaryDone: dictionaryTaskDone,
 }))
@@ -144,11 +147,8 @@ app.whenReady().then(async () => {
   // 异步初始化前置服务（词典 + ASR），完成后标记就绪
   logger.info('App', 'Initializing services...')
   const asrTask = startASRService()
-    .then((ok) => {
-      asrStarted = ok === true
-    })
     .catch((e) => {
-      logger.error('App', 'ASR service failed', e?.message)
+      logger.warn('App', 'ASR service failed', e?.message)
     })
     .finally(() => {
       asrTaskDone = true
@@ -159,7 +159,7 @@ app.whenReady().then(async () => {
   Promise.all([asrTask, dictionaryTask])
     .then(() => {
       serviceReady = true
-      logger.info('App', 'Services initialization completed', { ready: serviceReady, asrStarted, asrError: asrFailureReason() })
+      logger.info('App', 'Services initialization completed', { ready: serviceReady, asrError: asrFailureReason() })
     })
     .catch((e) => {
       serviceError = e?.message || '服务初始化失败，请重启应用'

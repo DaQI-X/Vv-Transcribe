@@ -43,6 +43,41 @@ export const DEFAULT_PROMPT = `你是一个专业的中文文本校对助手。�
 原始文本：
 `
 
+/**
+ * 非中文文本的校对 prompt。
+ * 上面那套「同音字误识别 + 词典释义」是中文专属的，硬套到英文/日文素材上，模型会开始改写风格
+ * 甚至翻译，那是比错字更糟的结果，所以这里只允许拼写、误识别和标点层面的修改。
+ * 说明文字（explainDifferences）仍然用中文写：读解释的是中文界面的操作员，不是素材里的语言。
+ */
+function buildGenericPrompt(languageName: string): string {
+  return `你是一个专业的${languageName}文本校对助手。以下是一段由语音识别（ASR）生成的${languageName}文本。
+
+请按照以下要求处理：
+1. 只修正明显的拼写错误、同音/近音误识别和标点错误
+2. 输出必须保持${languageName}，不要翻译成别的语言，不要改写表达风格
+3. 严格保持原意，不要增删内容
+4. 对于不确定的地方，保留原文，避免过度纠正
+
+请以JSON格式返回结果：
+{
+  "corrected": "修正后的完整文本",
+  "changes": ["改动1说明", "改动2说明"]
+}
+
+只返回JSON，不要添加其他内容。
+
+原始文本：
+`
+}
+
+/** Whisper 语言码 → 写进 prompt 的语言名；没收录的码直接用码本身，模型能理解 */
+const LANGUAGE_NAMES: Record<string, string> = {
+  zh: '中文', en: 'English（英语）', ja: '日本語（日语）', ko: '한국어（韩语）',
+  th: 'ไทย（泰语）', vi: 'Tiếng Việt（越南语）', id: 'Bahasa Indonesia（印尼语）',
+  fr: 'Français（法语）', de: 'Deutsch（德语）', es: 'Español（西班牙语）',
+  ru: 'Русский（俄语）', ar: 'العربية（阿拉伯语）',
+}
+
 export class OpenAICompatibleProvider implements AIProvider {
   readonly name = 'openai-compatible'
   private config: OpenAICompatibleConfig
@@ -55,19 +90,26 @@ export class OpenAICompatibleProvider implements AIProvider {
     text: string,
     options?: { language?: string; promptTemplate?: string },
   ): Promise<{ corrected: string; changes: string[] }> {
-    const { corrected: preCorrected, applied } = applyASRErrorCorrections(text)
-    
-    const dictContext = await buildDictionaryContext(preCorrected)
-    
-    let correctionHint = ''
-    if (applied.length > 0) {
-      const hints = applied.map(e => `"${e.wrong}"→"${e.correct}"`).join('、')
-      correctionHint = `\n\n已根据 ASR 常见错误表修正：${hints}\n请在此基础上进一步校对。`
+    const language = options?.language ?? 'zh'
+
+    let prompt: string
+    if (language !== 'zh' && !options?.promptTemplate) {
+      prompt = buildGenericPrompt(LANGUAGE_NAMES[language] ?? language) + text
+    } else {
+      const { corrected: preCorrected, applied } = applyASRErrorCorrections(text)
+
+      const dictContext = await buildDictionaryContext(preCorrected)
+
+      let correctionHint = ''
+      if (applied.length > 0) {
+        const hints = applied.map(e => `"${e.wrong}"→"${e.correct}"`).join('、')
+        correctionHint = `\n\n已根据 ASR 常见错误表修正：${hints}\n请在此基础上进一步校对。`
+      }
+
+      const basePrompt = options?.promptTemplate || DEFAULT_PROMPT
+      prompt =
+        basePrompt + preCorrected + correctionHint + buildDistinctionContext() + dictContext
     }
-    
-    const basePrompt = options?.promptTemplate || DEFAULT_PROMPT
-    const prompt =
-      basePrompt + preCorrected + correctionHint + buildDistinctionContext() + dictContext
 
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 60000)
