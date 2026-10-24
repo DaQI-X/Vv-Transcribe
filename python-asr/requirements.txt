@@ -1,5 +1,7 @@
 fastapi==0.115.0
 uvicorn==0.32.0
-faster-whisper>=1.2.0
+# 全部钉死精确版本：CI 每次构建都装「当时最新版」的话，上游坏版本或被投毒的版本
+# 会在我们一行代码没改的情况下被 PyInstaller 打进 ASR 二进制。升级请显式改这里。
+faster-whisper==1.2.1
 python-multipart==0.0.12
-pyinstaller>=6.0.0
+pyinstaller==6.22.3

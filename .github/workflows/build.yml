@@ -12,6 +12,11 @@ on:
     branches: [main, dev]
     tags: ['v*']
 
+# 默认只读：build job 不需要写仓库，能写的 GITHUB_TOKEN 会出现在每个步骤的环境里。
+# release job 在自己的 job 上单独提 contents: write，只有发布那一步能写。
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -178,7 +183,11 @@ jobs:
           cat release-notes.md
 
       - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
+        # 钉 SHA 而不是 @v2：这一步跑在 release job 里，环境变量里有能写 GitHub Release 的
+        # GITHUB_TOKEN。tag 是可移动的，上游一旦 force-move 或发了被投毒的版本，我们一行代码
+        # 没改就会跑到它身上。3bb1273 = v2 系列当前指向的提交（release 2.6.2，2026-04-12）。
+        # 升级流程：核对官方 release 页面与源码后，改这里并保证注释里的版本号一起更新。
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: |
             artifacts/**/*.dmg
