@@ -83,6 +83,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      # yt-dlp-manifest.json 是构建期（fetch-yt-dlp）与运行期（应用内更新）共用的唯一信任来源。
+      # 格式不对、或指纹与上游 SHA2-256SUMS/Release API 对不上，就在这一步红掉，
+      # 不用等「Fetch bundled yt-dlp」——那时三个平台都已装完 Python 与依赖了。
+      # 走官方域名而不是 YTDLP_MIRROR：这一步的职责就是核对官方产物，镜像同时给资产和 sums 时自证不了清白。
+      - name: Verify yt-dlp manifest
+        run: node scripts/yt-dlp-manifest.mjs
+
       - name: Install Rosetta (macOS x64 only)
         if: matrix.needsRosetta
         run: softwareupdate --install-rosetta --agree-to-license

@@ -14,7 +14,7 @@ import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
 type UploadMode = 'file' | 'url'
 
 export function FileUploader() {
-  const { setFile, setStatus, setProgress, setStage, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
+  const { setFile, setStatus, setProgress, setStage, setModelInfo, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
   const [mode, setMode] = useState<UploadMode>('file')
@@ -54,6 +54,7 @@ export function FileUploader() {
         setJobId(data.jobId)
         setProgress(data.progress)
         setStage(data.stage ?? null)
+        setModelInfo(data.model ?? null)
 
         if (data.progress < 5) {
           setStatus('extracting_audio')

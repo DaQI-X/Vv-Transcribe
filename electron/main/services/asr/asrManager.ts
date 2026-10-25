@@ -69,8 +69,9 @@ export async function runTranscription(
     )
   }
 
-  console.log('[ASR] using local Whisper model...')
+  console.log('[ASR] using local Whisper model, tier=%s', config.localModel || 'base')
   const local = getLocalProvider()
-  const segments = await local.transcribe(wavPath, options)
+  // 档位来自设置的 asrLocalModel，不是 asrModel：后者是云端模型名，用户填的是 API 服务商的型号
+  const segments = await local.transcribe(wavPath, { ...options, localModel: config.localModel as string | undefined })
   return { segments, provider: 'local' }
 }

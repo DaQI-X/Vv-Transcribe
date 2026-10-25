@@ -69,12 +69,12 @@ export interface ElectronAPI {
   readTextFile: (filePath: string) => Promise<string | null>
   saveTextFile: (
     suggestedName: string,
-    content: string,
+    content: string
   ) => Promise<{ success: boolean; name?: string; canceled?: boolean; error?: string }>
 
   startTranscription: (
     filePath: string,
-    options: unknown,
+    options: unknown
   ) => Promise<{
     jobId: string
     success: boolean
@@ -98,19 +98,19 @@ export interface ElectronAPI {
       }
       /** 引擎阶段性状态，目前只有本地首次转写的 'loading_model' */
       stage?: string
-    }) => void,
+      /** 随 status 事件下发的档位与权重体积，界面用它说清「这次要下载多大」 */
+      model?: { tier: string; weightsMb: number | null }
+    }) => void
   ) => () => void
 
   correctText: (
     text: string,
-    options: unknown,
+    options: unknown
   ) => Promise<{ corrected: string; changes: string[]; error?: string }>
   explainDifferences: (
-    differences: Array<{ original: string; corrected: string; context: string }>,
+    differences: Array<{ original: string; corrected: string; context: string }>
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
-  analyzeReference: (
-    referenceText: string,
-  ) => Promise<{
+  analyzeReference: (referenceText: string) => Promise<{
     issues: Array<{
       text: string
       suggestion?: string
@@ -122,25 +122,44 @@ export interface ElectronAPI {
     error: string | null
   }>
 
-  proofreadLocal: (
-    segments: Array<{ id: string; text: string }>,
-  ) => Promise<Array<{
-    segmentId: string
-    corrected: string
-    changes: Array<{ before: string; after: string; reason: string; dictionaryHint?: string }>
-  }>>
+  proofreadLocal: (segments: Array<{ id: string; text: string }>) => Promise<
+    Array<{
+      segmentId: string
+      corrected: string
+      changes: Array<{ before: string; after: string; reason: string; dictionaryHint?: string }>
+    }>
+  >
   proofreadExplain: (
-    differences: Array<{ original: string; corrected: string; context: string }>,
+    differences: Array<{ original: string; corrected: string; context: string }>
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
 
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
   lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>
-  checkDictionaryUpdate: () => Promise<{ hasUpdate: boolean; latestCommit?: string; currentVersion: string; error: string | null }>
+  checkDictionaryUpdate: () => Promise<{
+    hasUpdate: boolean
+    latestCommit?: string
+    currentVersion: string
+    error: string | null
+  }>
   downloadDictionaryUpdate: () => Promise<{ success: boolean; error?: string }>
   getDictionaryVersion: () => Promise<string>
 
+  /**
+   * 脱敏视图：两把 API Key 不回明文（值根本不过 IPC），只给状态。
+   * 字段是 asrKeyStatus / aiKeyStatus（none / encrypted / plaintext / unreadable）
+   * 与 keyEncryptionAvailable，见 SettingsModal 的 KeyStatus。
+   */
   getSettings: () => Promise<Record<string, unknown>>
-  saveSettings: (settings: Record<string, unknown>) => Promise<void>
+  /**
+   * tierRestart：本次保存改了本地档位时的引擎重启结果。
+   * busy / failed 时 error 是必须展示给用户的原因——这两种情况下新档位其实还没生效。
+   * 密钥字段按「留空＝不改、null＝清除、非空＝替换」处理，返回值同样是脱敏视图。
+   */
+  saveSettings: (settings: Record<string, unknown>) => Promise<{
+    settings: Record<string, unknown>
+    tierRestart: 'not-needed' | 'done' | 'busy' | 'failed'
+    error: string | null
+  }>
   testConnection: (kind: 'asr' | 'ai', values: ConnectionTestValues) => Promise<TestOutcome>
 
   getServiceReady: () => Promise<{
@@ -160,8 +179,36 @@ export interface ElectronAPI {
     hasUpdate: boolean
     downloadUrl: string
   }>
+  /** 本机当前生效的链接解析组件：version 探不到是 null（不要把未知显示成「未知版本」以外的任何说法） */
+  getYtDlpLocal: () => Promise<{
+    version: string | null
+    source: 'updated' | 'bundled' | 'system' | 'path'
+    bytes: number | null
+  }>
+  checkYtDlpUpdate: () => Promise<{
+    ok: boolean
+    error: string | null
+    local?: {
+      version: string | null
+      source: 'updated' | 'bundled' | 'system' | 'path'
+      bytes: number | null
+    }
+    remote?: { version: string; bytes: number }
+    hasUpdate?: boolean
+  }>
+  applyYtDlpUpdate: () => Promise<{
+    success: boolean
+    error?: string
+    version?: string
+    bytes?: number
+    rolledBack?: boolean
+    systemSettingsHint?: boolean
+  }>
+  /** 订阅下载进度，返回取消订阅的函数（与 onTranscriptionProgress 同一写法） */
+  onYtDlpProgress: (callback: (data: { received: number; total: number }) => void) => () => void
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
   openSystemSettings: () => Promise<{ success: boolean; error?: string }>
+  contactDeveloper: () => Promise<{ success: boolean; email: string; error?: string }>
 
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
 

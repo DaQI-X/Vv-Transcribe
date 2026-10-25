@@ -4,6 +4,7 @@
  * 支持自定义 apiBase，可对接任何 OpenAI 兼容的 ASR 服务
  */
 import type { ASRProvider, ASRSegment, ASRProgress } from './types'
+import { toSimplified } from './simplifyChinese'
 
 interface CloudASRConfig {
   apiKey: string
@@ -94,7 +95,7 @@ export class CloudASRProvider implements ASRProvider {
     const segments: ASRSegment[] = (result.segments ?? []).map((seg) => ({
       startTime: seg.start,
       endTime: seg.end,
-      text: seg.text.trim(),
+      text: toSimplified(seg.text.trim(), options.language),
       confidence: seg.avg_logprob != null ? Math.min(1, Math.max(0, 1 + seg.avg_logprob * 0.1)) : undefined,
     }))
 
@@ -102,7 +103,7 @@ export class CloudASRProvider implements ASRProvider {
       segments.push({
         startTime: 0,
         endTime: result.duration ?? 0,
-        text: result.text.trim(),
+        text: toSimplified(result.text.trim(), options.language),
       })
     }
 

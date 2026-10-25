@@ -152,8 +152,11 @@ async function checkLocalEngine(): Promise<TestOutcome> {
     }
   }
 
+  // 档位只报引擎自己说的，不读设置：这里要说的是「此刻干活用的是哪一档」，
+  // 用户表单里刚改还没保存的值不算数，报出来只会让人以为已经生效了
+  const tierNote = detail.loadedModel ? `，当前档位 ${detail.loadedModel}` : ''
   const modelNote = detail.modelLoaded
-    ? '模型已在内存中，转写会很快'
+    ? `模型已在内存中${tierNote}，转写会很快`
     : '模型还没加载（首次转写时才加载，第一次会慢一些）'
   if (detail.protocol !== null && detail.protocol < 2) {
     return {

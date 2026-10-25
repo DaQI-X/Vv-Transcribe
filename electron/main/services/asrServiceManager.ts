@@ -19,6 +19,7 @@ import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { existsSync, readdirSync } from 'node:fs'
 import { app } from 'electron'
+import { loadSettings, normalizeLocalModel } from './settingsService'
 
 const ASR_PORT = 8000
 const ASR_URL = `http://localhost:${ASR_PORT}`
@@ -45,6 +46,8 @@ let bootId = randomUUID()
 interface AsrHealth {
   status?: string
   model_loaded?: boolean
+  /** 引擎当前真正驻留内存的档位；没加载过是空串 */
+  model?: string
   protocol?: number
   boot_id?: string
 }
@@ -83,19 +86,22 @@ function getBinaryPath(): string {
 }
 
 /**
- * faster-whisper("base") 的权重默认落在 HuggingFace 缓存里，repo 名由档位写死成
- * Systran/faster-whisper-base。命中缓存时给引擎下发 HF_HUB_OFFLINE=1：
+ * faster-whisper 的权重默认落在 HuggingFace 缓存里，repo 名由档位拼成
+ * Systran/faster-whisper-<档位>。命中缓存时给引擎下发 HF_HUB_OFFLINE=1：
  * huggingface_hub 平时每次加载都会向 hf-mirror 发一次「有没有新版本」的在线请求，
  * 弱网/挂代理时这一步能卡十几秒——模型明明已在本地，却被它拖成「首次加载慢了很多」。
  * 没命中缓存必须保持在线，否则用户第一次下载会直接失败，所以只在权重真的在场时才离线。
+ *
+ * 必须按档位判断：缓存里有 base 不代表有 small。用户在设置里切到 small 后如果照 base 的
+ * 命中结果下发离线标志，首次转写会连不上 hf-mirror，报一个「模型没下载完」却又下载不了的死结。
  */
-function isModelCached(): boolean {
+function isModelCached(tier: string): boolean {
   const hubCache = process.env.HF_HUB_CACHE
     || process.env.HUGGINGFACE_HUB_CACHE
     || (process.env.HF_HOME ? join(process.env.HF_HOME, 'hub') : undefined)
     || join(homedir(), '.cache', 'huggingface', 'hub')
 
-  const snapshots = join(hubCache, 'models--Systran--faster-whisper-base', 'snapshots')
+  const snapshots = join(hubCache, `models--Systran--faster-whisper-${tier}`, 'snapshots')
   if (!existsSync(snapshots)) return false
   try {
     // 快照目录里的 model.bin 是指向 blobs/ 的软链，只有权重完整下载过才存在
@@ -285,8 +291,9 @@ export async function startASRService(): Promise<boolean> {
   const ffprobePath = getFfmpegBinaryPath('ffprobe')
   console.log('[ASR Service] FFmpeg paths:', { ffmpegPath, ffprobePath })
 
-  const modelCached = isModelCached()
-  console.log('[ASR Service] Whisper model cached:', modelCached ? 'online check skipped' : 'first run will download')
+  const tier = normalizeLocalModel((await loadSettings()).asrLocalModel)
+  const modelCached = isModelCached(tier)
+  console.log('[ASR Service] Whisper tier:', tier, '| cached:', modelCached ? 'online check skipped' : 'first run will download')
 
   asrProcess = spawn(binaryPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -472,6 +479,8 @@ export async function getLocalEngineDetail(): Promise<{
   ready: boolean
   error: string | null
   modelLoaded: boolean
+  /** 引擎实际驻留内存的档位（/health 原话）；还没加载时是空串 */
+  loadedModel: string
   protocol: number | null
   port: number
 }> {
@@ -482,6 +491,7 @@ export async function getLocalEngineDetail(): Promise<{
       ready: false,
       error: status.error || '本地转写引擎没有应答，可点「重启本地引擎」再试',
       modelLoaded: false,
+      loadedModel: '',
       protocol: null,
       port: ASR_PORT,
     }
@@ -491,6 +501,7 @@ export async function getLocalEngineDetail(): Promise<{
     // /health 应答了但身份对不上：端口上是别家程序或上一代残尸，不能报「正常」
     error: status.ready ? null : status.error,
     modelLoaded: health.model_loaded === true,
+    loadedModel: typeof health.model === 'string' ? health.model : '',
     protocol: typeof health.protocol === 'number' ? health.protocol : null,
     port: ASR_PORT,
   }

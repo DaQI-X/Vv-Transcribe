@@ -1,27 +1,96 @@
 /**
  * 设置持久化 IPC 处理器
  * 提供设置的读取、保存，以及「测试连接 / 检查引擎状态」接口
- * 数据存储在 userData/settings.json
+ * 数据存储在 userData/settings.json；两把 API Key 只在主进程解密，回给界面的一律是脱敏视图
  */
 import { ipcMain } from 'electron'
-import { loadSettings, saveSettings } from '../services/settingsService'
-import { testASRConfig, testAIConfig, type AsrTestValues, type AITestValues } from '../services/connectionTestService'
+import {
+  getSettingsView,
+  loadSettings,
+  saveSettings,
+  normalizeLocalModel,
+  type AppSettings,
+  type LocalModelTier,
+  type SettingsView,
+} from '../services/settingsService'
+import { restartLocalEngine } from '../services/asrServiceManager'
+import { hasActiveTranscription } from './asrHandlers'
+import {
+  testASRConfig,
+  testAIConfig,
+  type AsrTestValues,
+  type AITestValues,
+  type TestOutcome,
+} from '../services/connectionTestService'
 import { logger } from '../services/logger'
 
+/** 保存档位改动后，本地引擎要不要重启、有没有重启成功 */
+export type TierRestartOutcome = 'not-needed' | 'done' | 'busy' | 'failed'
+
+export interface SaveSettingsResult {
+  settings: SettingsView
+  tierRestart: TierRestartOutcome
+  /** tierRestart 为 failed 时可直接展示给用户的原因 */
+  error: string | null
+}
+
+/**
+ * 换档位必须重启引擎：HF_HUB_OFFLINE 是在 spawn 时按「旧档位有没有缓存」定下来的，
+ * 运行中改不了。用户从已缓存的 base 切到没下载过的 small，引擎仍带着离线标志，
+ * 首次转写会报「模型没下载完」却又下不下来，是个自己解不开的死结。
+ */
+async function applyTierChange(before: LocalModelTier, after: LocalModelTier): Promise<TierRestartOutcome> {
+  if (before === after) return 'not-needed'
+  // 重启会截断正在推的 NDJSON 流，半截结果比报错更糟，所以宁可让这一步晚点生效
+  if (hasActiveTranscription()) return 'busy'
+  return (await restartLocalEngine()).ok ? 'done' : 'failed'
+}
+
+/** 除 done/not-needed 外都必须让用户看见：档位此刻其实还没吃到 */
+const TIER_RESTART_MESSAGE: Partial<Record<TierRestartOutcome, string>> = {
+  busy: '档位已保存，但有转写正在跑，重启引擎会中断它。等这次转写结束后点「重启本地引擎」，新档位才会生效',
+  failed: '档位已保存，但本地引擎没能自动重启。点「重启本地引擎」再试一次，成功后新档位才生效',
+}
+
+/** 密文解不开＝这台机器读不出那把 Key（换过电脑或系统密钥库被清过）；说「还没填」会让人以为是自己漏填 */
+const UNREADABLE_KEY_MESSAGE =
+  '这台机器读不出已保存的 API Key（可能换过电脑，或系统密钥库被清过）。重新填一次并保存即可'
+
 export function registerSettingsHandlers() {
-  ipcMain.handle('settings:get', async () => {
-    return loadSettings()
+  // 脱敏视图：密钥字段在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」
+  ipcMain.handle('settings:get', async (): Promise<SettingsView> => {
+    return getSettingsView()
   })
 
-  ipcMain.handle('settings:save', async (_event, settings: Record<string, unknown>) => {
-    return saveSettings(settings)
-  })
+  ipcMain.handle(
+    'settings:save',
+    async (
+      _event,
+      // 界面上的 Key 输入框留空＝不改，显式清除走 null，非空才是替换（见 saveSettings）
+      patch: Partial<AppSettings> & Partial<{ asrApiKey: string | null; aiApiKey: string | null }>
+    ): Promise<SaveSettingsResult> => {
+      const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
+      const saved = await saveSettings(patch)
+      const tierRestart = await applyTierChange(before, normalizeLocalModel(saved.asrLocalModel))
+      return { settings: saved, tierRestart, error: TIER_RESTART_MESSAGE[tierRestart] ?? null }
+    }
+  )
 
   ipcMain.handle('settings:testConnection', async (_event, kind: 'asr' | 'ai', values: AsrTestValues | AITestValues) => {
     try {
-      return kind === 'ai'
-        ? await testAIConfig(values as AITestValues)
-        : await testASRConfig(values as AsrTestValues)
+      let probe = values
+      if (!values.apiKey.trim()) {
+        const view = await getSettingsView()
+        const status = kind === 'ai' ? view.aiKeyStatus : view.asrKeyStatus
+        if (status === 'unreadable') {
+          return { level: 'fail' as const, title: '还测不了', message: UNREADABLE_KEY_MESSAGE } satisfies TestOutcome
+        }
+        // 测试用的 Key 必须和真正干活的是同一把：表单留空时回落到已保存的那把，
+        // 否则改个接口地址就得重贴 Key，测出来永远是「还没填」
+        const saved = await loadSettings()
+        probe = { ...values, apiKey: kind === 'ai' ? saved.aiApiKey : saved.asrApiKey }
+      }
+      return kind === 'ai' ? await testAIConfig(probe as AITestValues) : await testASRConfig(probe as AsrTestValues)
     } catch (err) {
       // 兜底：任何未预期异常都要变成界面上的结论，而不是让渲染层的 await 直接抛
       const message = err instanceof Error ? err.message : String(err)

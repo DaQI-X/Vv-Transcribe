@@ -8,29 +8,20 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 const api = {
   getDroppedFilePath: (file: File) => webUtils.getPathForFile(file),
   selectFile: () => ipcRenderer.invoke('dialog:selectFile'),
-  getFileMetadata: (filePath: string) =>
-    ipcRenderer.invoke('file:getMetadata', filePath),
-  extractAudio: (filePath: string) =>
-    ipcRenderer.invoke('file:extractAudio', filePath),
-  cleanupTemp: (tempDir: string) =>
-    ipcRenderer.invoke('file:cleanupTemp', tempDir),
-  probeAudio: (filePath: string) =>
-    ipcRenderer.invoke('file:probeAudio', filePath),
-  downloadFromUrl: (url: string) =>
-    ipcRenderer.invoke('file:downloadFromUrl', url),
-  selectTextFile: () =>
-    ipcRenderer.invoke('dialog:selectTextFile'),
-  readTextFile: (filePath: string) =>
-    ipcRenderer.invoke('file:readTextFile', filePath),
+  getFileMetadata: (filePath: string) => ipcRenderer.invoke('file:getMetadata', filePath),
+  extractAudio: (filePath: string) => ipcRenderer.invoke('file:extractAudio', filePath),
+  cleanupTemp: (tempDir: string) => ipcRenderer.invoke('file:cleanupTemp', tempDir),
+  probeAudio: (filePath: string) => ipcRenderer.invoke('file:probeAudio', filePath),
+  downloadFromUrl: (url: string) => ipcRenderer.invoke('file:downloadFromUrl', url),
+  selectTextFile: () => ipcRenderer.invoke('dialog:selectTextFile'),
+  readTextFile: (filePath: string) => ipcRenderer.invoke('file:readTextFile', filePath),
   saveTextFile: (suggestedName: string, content: string) =>
     ipcRenderer.invoke('file:saveText', { suggestedName, content }),
 
   startTranscription: (filePath: string, options: unknown) =>
     ipcRenderer.invoke('asr:start', filePath, options),
-  cancelTranscription: (jobId: string) =>
-    ipcRenderer.invoke('asr:cancel', jobId),
-  restartLocalEngine: () =>
-    ipcRenderer.invoke('asr:restartEngine'),
+  cancelTranscription: (jobId: string) => ipcRenderer.invoke('asr:cancel', jobId),
+  restartLocalEngine: () => ipcRenderer.invoke('asr:restartEngine'),
 
   onTranscriptionProgress: (
     callback: (data: {
@@ -38,11 +29,18 @@ const api = {
       progress: number
       segment?: unknown
       stage?: string
-    }) => void,
+      model?: { tier: string; weightsMb: number | null }
+    }) => void
   ) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      data: { jobId: string; progress: number; segment?: unknown; stage?: string },
+      data: {
+        jobId: string
+        progress: number
+        segment?: unknown
+        stage?: string
+        model?: { tier: string; weightsMb: number | null }
+      }
     ) => callback(data)
     ipcRenderer.on('asr:progress', listener)
     return () => {
@@ -50,61 +48,58 @@ const api = {
     }
   },
 
-  correctText: (text: string, options: unknown) =>
-    ipcRenderer.invoke('ai:correct', text, options),
+  correctText: (text: string, options: unknown) => ipcRenderer.invoke('ai:correct', text, options),
   explainDifferences: (differences: unknown[]) =>
     ipcRenderer.invoke('ai:explainDifferences', differences),
   analyzeReference: (referenceText: string) =>
     ipcRenderer.invoke('ai:analyzeReference', referenceText),
 
-  proofreadLocal: (segments: unknown[]) =>
-    ipcRenderer.invoke('proofread:local', segments),
+  proofreadLocal: (segments: unknown[]) => ipcRenderer.invoke('proofread:local', segments),
   proofreadExplain: (differences: unknown[]) =>
     ipcRenderer.invoke('proofread:explain', differences),
 
-  lookupWord: (word: string) =>
-    ipcRenderer.invoke('dictionary:lookup', word),
-  lookupMultipleWords: (words: string[]) =>
-    ipcRenderer.invoke('dictionary:lookupMultiple', words),
-  checkDictionaryUpdate: () =>
-    ipcRenderer.invoke('dictionary:checkUpdate'),
-  downloadDictionaryUpdate: () =>
-    ipcRenderer.invoke('dictionary:downloadUpdate'),
-  getDictionaryVersion: () =>
-    ipcRenderer.invoke('dictionary:getVersion'),
+  lookupWord: (word: string) => ipcRenderer.invoke('dictionary:lookup', word),
+  lookupMultipleWords: (words: string[]) => ipcRenderer.invoke('dictionary:lookupMultiple', words),
+  checkDictionaryUpdate: () => ipcRenderer.invoke('dictionary:checkUpdate'),
+  downloadDictionaryUpdate: () => ipcRenderer.invoke('dictionary:downloadUpdate'),
+  getDictionaryVersion: () => ipcRenderer.invoke('dictionary:getVersion'),
 
   getSettings: () => ipcRenderer.invoke('settings:get'),
-  saveSettings: (settings: unknown) =>
-    ipcRenderer.invoke('settings:save', settings),
+  saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
   testConnection: (kind: 'asr' | 'ai', values: unknown) =>
     ipcRenderer.invoke('settings:testConnection', kind, values),
 
-  getServiceReady: () =>
-    ipcRenderer.invoke('app:getServiceReady'),
+  getServiceReady: () => ipcRenderer.invoke('app:getServiceReady'),
 
-  getAppVersion: () =>
-    ipcRenderer.invoke('app:getVersion'),
-  checkAppUpdate: () =>
-    ipcRenderer.invoke('app:checkUpdate'),
-  openExternal: (url: string) =>
-    ipcRenderer.invoke('app:openExternal', url),
-  openSystemSettings: () =>
-    ipcRenderer.invoke('app:openSystemSettings'),
+  getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
+  checkAppUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+  getYtDlpLocal: () => ipcRenderer.invoke('ytDlp:getLocal'),
+  checkYtDlpUpdate: () => ipcRenderer.invoke('ytDlp:check'),
+  applyYtDlpUpdate: () => ipcRenderer.invoke('ytDlp:apply'),
+  // 下载进度是事件推回来的（37MB 在慢网里要跑几分钟），不包一层渲染层就看不见它在动
+  onYtDlpProgress: (callback: (data: { received: number; total: number }) => void) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      data: { received: number; total: number }
+    ) => callback(data)
+    ipcRenderer.on('ytDlp:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('ytDlp:progress', listener)
+    }
+  },
+  openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+  openSystemSettings: () => ipcRenderer.invoke('app:openSystemSettings'),
+  contactDeveloper: () => ipcRenderer.invoke('app:contactDeveloper'),
 
-  openLogDirectory: () =>
-    ipcRenderer.invoke('app:openLogDirectory'),
+  openLogDirectory: () => ipcRenderer.invoke('app:openLogDirectory'),
 
-  toggleWindowMaximize: () =>
-    ipcRenderer.invoke('window:toggleMaximize'),
+  toggleWindowMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
 
-  minimizeWindow: () =>
-    ipcRenderer.invoke('window:minimize'),
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
 
-  closeWindow: () =>
-    ipcRenderer.invoke('window:close'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
 
-  log: (entry: unknown) =>
-    ipcRenderer.invoke('app:log', entry),
+  log: (entry: unknown) => ipcRenderer.invoke('app:log', entry),
 }
 
 contextBridge.exposeInMainWorld('electronAPI', api)

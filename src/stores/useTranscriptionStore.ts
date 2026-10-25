@@ -15,6 +15,8 @@ interface TranscriptionState {
   progress: number
   /** 引擎上报的阶段，如本地首次转写的 loading_model；无阶段事件时为 null */
   stage: string | null
+  /** 引擎自报的档位与权重体积，首次转写的「要下载多大」这句提示靠它 */
+  modelInfo: { tier: string; weightsMb: number | null } | null
   segments: TranscriptionSegment[]
   error: string | null
   jobId: string | null
@@ -32,6 +34,7 @@ interface TranscriptionState {
   setStatus: (status: TranscriptionStatus) => void
   setProgress: (progress: number) => void
   setStage: (stage: string | null) => void
+  setModelInfo: (modelInfo: { tier: string; weightsMb: number | null } | null) => void
   setJobId: (jobId: string | null) => void
   setAsrProvider: (provider: 'local' | 'cloud') => void
   setAsrLanguage: (language: string) => void
@@ -51,6 +54,7 @@ const initialState = {
   status: 'idle' as TranscriptionStatus,
   progress: 0,
   stage: null as string | null,
+  modelInfo: null as { tier: string; weightsMb: number | null } | null,
   segments: [] as TranscriptionSegment[],
   error: null,
   jobId: null,
@@ -63,13 +67,25 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
   ...initialState,
 
   setFile: ({ filePath, fileName, fileSize, duration }) =>
-    set({ filePath, fileName, fileSize, duration, status: 'idle', progress: 0, stage: null, error: null }),
+    set({
+      filePath,
+      fileName,
+      fileSize,
+      duration,
+      status: 'idle',
+      progress: 0,
+      stage: null,
+      modelInfo: null,
+      error: null,
+    }),
 
   setStatus: (status) => set({ status }),
 
   setProgress: (progress) => set({ progress }),
 
   setStage: (stage) => set({ stage }),
+
+  setModelInfo: (modelInfo) => set({ modelInfo }),
 
   setJobId: (jobId) => set({ jobId }),
 

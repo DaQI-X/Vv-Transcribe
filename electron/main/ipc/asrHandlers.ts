@@ -10,7 +10,7 @@ import { extractAudio, cleanupTemp } from '../services/audioProcessor'
 import { runTranscription } from '../services/asr/asrManager'
 import { restartLocalEngine } from '../services/asrServiceManager'
 import { getASRConfig } from '../services/settingsService'
-import type { ASRSegment, ASRStage } from '../services/asr/types'
+import type { ASRModelInfo, ASRSegment, ASRStage } from '../services/asr/types'
 
 /** 活跃的转写任务映射表，jobId → 任务状态 */
 interface TranscriptionState {
@@ -20,6 +20,14 @@ interface TranscriptionState {
 }
 
 const activeJobs = new Map<string, TranscriptionState>()
+
+/**
+ * 有没有转写正在跑。改本地档位需要重启引擎（HF_HUB_OFFLINE 只能在 spawn 时决定），
+ * 而重启会截断正在推的 NDJSON 流，所以设置保存那边要先问一句。
+ */
+export function hasActiveTranscription(): boolean {
+  return activeJobs.size > 0
+}
 
 export function registerASRHandlers() {
   ipcMain.handle(
@@ -32,9 +40,9 @@ export function registerASRHandlers() {
 
       const win = BrowserWindow.fromWebContents(event.sender)
 
-      const sendProgress = (progress: number, segment?: ASRSegment, stage?: ASRStage) => {
+      const sendProgress = (progress: number, segment?: ASRSegment, stage?: ASRStage, model?: ASRModelInfo) => {
         if (win && !win.isDestroyed()) {
-          win.webContents.send('asr:progress', { jobId, progress, segment, stage })
+          win.webContents.send('asr:progress', { jobId, progress, segment, stage, model })
         }
       }
 
@@ -56,7 +64,7 @@ export function registerASRHandlers() {
           language: options?.language ?? 'zh',
           onProgress: (p) => {
             const totalProgress = 5 + p.percent * 0.95
-            sendProgress(totalProgress, p.segment, p.stage)
+            sendProgress(totalProgress, p.segment, p.stage, p.model)
           },
           signal: signal.signal,
         })
@@ -101,7 +109,7 @@ export function registerASRHandlers() {
    * 最长可能等满 60 秒（首次要下载模型），渲染进程需要自己显示「重启中」。
    */
   ipcMain.handle('asr:restartEngine', async () => {
-    if (activeJobs.size > 0) {
+    if (hasActiveTranscription()) {
       return { ok: false, error: '转写正在进行中，重启会中断当前任务。请等它跑完，或先点取消' }
     }
     return restartLocalEngine()
