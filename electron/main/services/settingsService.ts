@@ -29,6 +29,13 @@ export interface AppSettings {
   aiApiKey: string
   aiApiBase: string
   aiModel: string
+  /**
+   * 配音（TTS）用的模型与音色，与 aiModel 分开存：`/v1/audio/speech` 要的是配音模型 id
+   * （OpenAI 形如 tts-1），拿 chat 模型去调必然 400；两者共用上面那套 apiBase 与 Key。
+   * 只有配了音的服务商能用，界面不能承诺通用。
+   */
+  aiTtsModel: string
+  aiTtsVoice: string
 }
 
 /** 两把密钥的字段名；脱敏视图与保存语义都按这两个键走 */
@@ -62,6 +69,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   aiApiKey: '',
   aiApiBase: '',
   aiModel: '',
+  aiTtsModel: '',
+  aiTtsVoice: '',
 }
 
 /**
@@ -261,5 +270,26 @@ export async function getAIConfig(): Promise<{ apiKey: string; apiBase: string; 
     apiKey: settings.aiApiKey,
     apiBase: normalizeApiBase(settings.aiApiBase) || 'https://api.openai.com',
     model: settings.aiModel || 'gpt-4o-mini',
+  }
+}
+
+/**
+ * 配音（TTS）配置。接口地址与 Key 与校对共用，模型和音色不共用：
+ * `/v1/audio/speech` 收的是配音模型 id，拿 chat 模型去调必然 400，所以这里只读 aiTtsModel/aiTtsVoice。
+ * 两个新字段留空时**不做回落**——填 tts-1 还是 CosyVoice 由服务商决定，静默替用户猜一个
+ * 只会把「配置没填」变成一条看不出所以然的 404/400，宁可让调用方报「还没填」。
+ */
+export async function getTTSConfig(): Promise<{
+  apiKey: string
+  apiBase: string
+  model: string
+  voice: string
+}> {
+  const settings = await loadSettings()
+  return {
+    apiKey: settings.aiApiKey,
+    apiBase: normalizeApiBase(settings.aiApiBase) || 'https://api.openai.com',
+    model: settings.aiTtsModel,
+    voice: settings.aiTtsVoice,
   }
 }

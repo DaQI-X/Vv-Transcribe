@@ -2,7 +2,7 @@
  * 设置弹窗组件
  * 提供两个配置 Tab：
  * - 转写配置（asr）：转写模式（本地/云端）、API Base、API Key、模型
- * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
+ * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、配音模型与音色、本地词典版本与更新
  * 设置通过 IPC 持久化到 userData/settings.json
  *
  * 保存只在点「保存设置」时发生，且保存后不关窗，方便紧接着点「测试连接」；
@@ -46,6 +46,9 @@ interface SettingsValues {
   aiApiKey: string
   aiApiBase: string
   aiModel: string
+  /** 配音用的模型与音色：接口地址与 Key 沿用上面的，但这两个值不能和校对模型混用 */
+  aiTtsModel: string
+  aiTtsVoice: string
 }
 
 /** 与主进程 connectionTestService 的 TestOutcome 对应 */
@@ -66,6 +69,8 @@ const DEFAULT_VALUES: SettingsValues = {
   aiApiKey: '',
   aiApiBase: '',
   aiModel: '',
+  aiTtsModel: '',
+  aiTtsVoice: '',
 }
 
 /**
@@ -82,9 +87,18 @@ const LOCAL_MODEL_OPTIONS: { value: string; label: string }[] = [
 /** 只是给关于页显示和「复制」用；真正拼 mailto 的是主进程 app:contactDeveloper，改地址要同步改那边 */
 const CONTACT_EMAIL = 'hi@vvscribe.com'
 
-/** 校对服务商用到的端点与默认模型；主进程会在 apiBase 拼 /v1/chat/completions */
-const AI_PROVIDER_PRESETS: Record<string, { apiBase: string; model: string }> = {
-  openai: { apiBase: 'https://api.openai.com', model: 'gpt-4o-mini' },
+/**
+ * 校对服务商用到的端点与默认模型；主进程会在 apiBase 拼 /v1/chat/completions。
+ * ttsModel/ttsVoice 是配音那一腿的取值，只有确实提供 `/v1/audio/speech` 的才填：
+ * OpenAI 用的是它文档里的 tts-1 + alloy；其余服务商我们**没有实测过它们有没有这个端点**，
+ * 所以不预填、也不替用户猜——留空＝切换服务商时**不动**用户已填的配音配置（很多人走聚合网关，
+ * 那家的音色 id 是自定义的，被下拉框一键清掉比不清更容易让人丢配置）。
+ */
+const AI_PROVIDER_PRESETS: Record<
+  string,
+  { apiBase: string; model: string; ttsModel?: string; ttsVoice?: string }
+> = {
+  openai: { apiBase: 'https://api.openai.com', model: 'gpt-4o-mini', ttsModel: 'tts-1', ttsVoice: 'alloy' },
   deepseek: { apiBase: 'https://api.deepseek.com', model: 'deepseek-chat' },
   qwen: { apiBase: 'https://dashscope.aliyuncs.com/compatible-mode', model: 'qwen-plus' },
 }
@@ -379,7 +393,15 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     setValues((prev) => ({
       ...prev,
       aiProvider: provider,
-      ...(preset ? { aiApiBase: preset.apiBase, aiModel: preset.model } : {}),
+      ...(preset
+        ? {
+            aiApiBase: preset.apiBase,
+            aiModel: preset.model,
+            // 配音取值只有「这家确实有这个端点」才填，没给就保持用户原来的，不清空
+            ...(preset.ttsModel ? { aiTtsModel: preset.ttsModel } : {}),
+            ...(preset.ttsVoice ? { aiTtsVoice: preset.ttsVoice } : {}),
+          }
+        : {}),
     }))
     invalidateTest('ai')
   }
@@ -938,6 +960,33 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   onChange={(e) => updateField('aiModel', e.target.value)}
                   placeholder="gpt-4o-mini"
                 />
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">配音模型</label>
+                <input
+                  className="settings-form-input"
+                  value={values.aiTtsModel}
+                  onChange={(e) => updateField('aiTtsModel', e.target.value)}
+                  placeholder="tts-1"
+                />
+                <span className="settings-form-hint">
+                  配音走 OpenAI 标准的音频接口，与上面的「模型」不是同一个值：这里要填服务商文档里的
+                  <b>配音模型</b>（如 tts-1、tts-1-hd、CosyVoice 类），填 chat 模型会直接被拒。
+                  只有提供该端点的服务商能用（只做对话的服务商通常没有，以服务商文档为准），接口地址和 Key 仍沿用上面那套
+                </span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">配音音色</label>
+                <input
+                  className="settings-form-input"
+                  value={values.aiTtsVoice}
+                  onChange={(e) => updateField('aiTtsVoice', e.target.value)}
+                  placeholder="alloy"
+                />
+                <span className="settings-form-hint">
+                  音色 id 各家格式不同（OpenAI 是 alloy / onyx 这类短名，有的网关要求带模型前缀），
+                  照服务商文档原样填。整条配音用同一个音色，暂不支持逐段换音色
+                </span>
               </div>
               <div className="settings-form-group">
                 <label className="settings-form-label">配置自检</label>

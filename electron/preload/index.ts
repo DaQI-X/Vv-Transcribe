@@ -17,6 +17,25 @@ interface MediaProgressEvent {
   eta: string | null
 }
 
+/** 过 IPC 的段落形状：时间轴只存在于渲染层，主进程不存第二份（与 proofread:local 同一口径） */
+interface VoiceSegment {
+  id: string
+  /** 秒，浮点 */
+  startTime: number
+  endTime: number
+  text: string
+}
+
+/** 与 index.d.ts 的 VoiceProgress 对齐：index/total 是真实段号，不做假百分比 */
+interface VoiceProgressEvent {
+  jobId: string
+  stage: 'synthesizing' | 'skipped' | 'failed' | 'assembling' | 'done'
+  index: number
+  total: number
+  segmentId?: string
+  note?: string
+}
+
 const api = {
   getDroppedFilePath: (file: File) => webUtils.getPathForFile(file),
   selectFile: () => ipcRenderer.invoke('dialog:selectFile'),
@@ -83,6 +102,22 @@ const api = {
   proofreadLocal: (segments: unknown[]) => ipcRenderer.invoke('proofread:local', segments),
   proofreadExplain: (differences: unknown[]) =>
     ipcRenderer.invoke('proofread:explain', differences),
+
+  // 配音：一次调用只合成一句，供批量之前试听；产物路径是本机文件，播放器直接吃 file://
+  previewVoice: (text: string) => ipcRenderer.invoke('tts:preview', text),
+  releaseVoicePreview: () => ipcRenderer.invoke('tts:release'),
+  synthesizeVoice: (segments: VoiceSegment[]) => ipcRenderer.invoke('tts:synthesize', segments),
+  cancelVoiceJob: (jobId: string) => ipcRenderer.invoke('tts:cancel', jobId),
+  saveVoiceTrack: (jobId: string) => ipcRenderer.invoke('tts:saveTrack', jobId),
+  releaseVoiceBatch: (jobId: string) => ipcRenderer.invoke('tts:releaseBatch', jobId),
+  // 一批要跑几分钟（每段一次网络请求，串行），invoke 只给最后结果；段号得推回来界面才不会像卡死
+  onVoiceProgress: (callback: (data: VoiceProgressEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, data: VoiceProgressEvent) => callback(data)
+    ipcRenderer.on('tts:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('tts:progress', listener)
+    }
+  },
 
   lookupWord: (word: string) => ipcRenderer.invoke('dictionary:lookup', word),
   lookupMultipleWords: (words: string[]) => ipcRenderer.invoke('dictionary:lookupMultiple', words),

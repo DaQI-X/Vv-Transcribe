@@ -85,6 +85,35 @@ export async function hasCorrectionModel(): Promise<boolean> {
   return keyStatus(settings, 'aiKeyStatus') !== 'none'
 }
 
+/**
+ * 配音的前置校验：Key、配音模型、配音音色，缺任何一样整批调用都会失败。
+ * 单独查模型是必要的——音频接口吃的是配音模型 id，拿 chat 模型去调必然被拒，
+ * 而那时用户已经点了「开始配音」，烧掉的是他自己 Key 上的调用额度。
+ */
+export async function checkVoiceReady(): Promise<ReadinessBlock | null> {
+  const api = getElectronAPI()
+  if (!api) return null
+
+  const settings = await api.getSettings().catch(() => null)
+  const aiKey = keyStatus(settings, 'aiKeyStatus')
+  if (aiKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'ai' }
+  if (aiKey === 'none') {
+    return { message: '配音需要先配置 API Key，请在「校对配置」里填写', settingsTab: 'ai' }
+  }
+  const missing = !str(settings?.aiTtsModel)
+    ? '配音模型'
+    : !str(settings?.aiTtsVoice)
+      ? '配音音色'
+      : null
+  if (missing) {
+    return {
+      message: `配音还缺「${missing}」，请在「设置 → 校对配置」里填写并保存`,
+      settingsTab: 'ai',
+    }
+  }
+  return null
+}
+
 /** 拦住之后：说清原因，并直接打开要改的那个设置页 */
 export function raiseReadinessBlock(block: ReadinessBlock) {
   toast.error(block.message)

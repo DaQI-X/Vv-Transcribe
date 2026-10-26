@@ -71,6 +71,53 @@ export interface MediaProgress {
   eta: string | null
 }
 
+export interface VoiceSegment {
+  /** 段落 id，主进程只用来回指失败清单，不透明 */
+  id: string
+  /** 秒，浮点（与 src/types/transcription.ts 同一单位） */
+  startTime: number
+  endTime: number
+  text: string
+}
+
+export interface VoiceProgress {
+  jobId: string
+  stage: 'synthesizing' | 'skipped' | 'failed' | 'assembling' | 'done'
+  /** 1 起算的真实段号；0＝已发起、第一段还在接口那边（让界面早点拿到 jobId 好放「取消」）；assembling/done 时等于总数 */
+  index: number
+  total: number
+  segmentId?: string
+  /** 失败原因，或「空段落，未调用接口」 */
+  note?: string
+}
+
+export interface VoiceTrack {
+  filePath: string
+  bytes: number
+  /** 配音轨总时长（ffprobe 实测，秒） */
+  duration: number
+  /** 因为「配音比字幕槽位长」被往后推的段数——整条可能比原片长，必须如实报 */
+  pushedCount: number
+  /** 接口时长没读出来、只能按字幕槽位估算的段数 */
+  estimatedCount: number
+  /** 原时间轴最后一段的结束点，用来跟 duration 对照 */
+  originalEnd: number
+}
+
+export interface TTSSynthesizeResult {
+  /** 取消与释放都按这个 id 找主进程自己的记录；一段都没成时为 null */
+  jobId: string | null
+  track: VoiceTrack | null
+  clipCount: number
+  failures: Array<{ segmentId: string; index: number; error: string }>
+  /** 空段落 id：没调接口、没花钱 */
+  skipped: string[]
+  canceled: boolean
+  /** 连续失败熔断的原因；跟「用户自己点了取消」分开报 */
+  abortedReason: string | null
+  error: string | null
+}
+
 export interface ProbeAudioResult {
   success: boolean
   metadata?: {
@@ -188,6 +235,37 @@ export interface ElectronAPI {
   proofreadExplain: (
     differences: Array<{ original: string; corrected: string; context: string }>
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
+
+  /**
+   * 配音试听：合成一句，回本机文件路径 + 字节数 + ffprobe 实测时长（秒）。
+   * duration 为 0 是「时长没读出来」，不是「这条音频是空的」——产物本身已经落盘成功。
+   * 失败一律走 error（人话原因），主进程不跨 IPC 抛。
+   */
+  previewVoice: (text: string) => Promise<{
+    clip: { filePath: string; bytes: number; duration: number } | null
+    error: string | null
+  }>
+  /** 关闭配音弹窗时回收试听临时目录；漏调也会被启动清扫兜住 */
+  releaseVoicePreview: () => Promise<{ ok: boolean }>
+
+  /**
+   * 整批配音：逐段合成后由 ffmpeg 铺成一条对齐时间轴的音轨。
+   * 分钟级耗时，段号走 onVoiceProgress 推回来，invoke 只给最后结果。
+   * 串行调用、每段一次请求，花的是用户 Key 的钱，所以调用点必须先在界面上确认段数。
+   */
+  synthesizeVoice: (segments: VoiceSegment[]) => Promise<TTSSynthesizeResult>
+  /** 取消：正在飞出去的那次请求不打断，从下一段起不再调用；已成功的片段照常拼 */
+  cancelVoiceJob: (jobId: string) => Promise<{ success: boolean }>
+  /** 成品另存为用户选的位置（走系统保存框，主进程写盘） */
+  saveVoiceTrack: (jobId: string) => Promise<{
+    success: boolean
+    canceled: boolean
+    name?: string
+    error: string | null
+  }>
+  /** 没另存就关掉弹窗时回收整批中间产物 */
+  releaseVoiceBatch: (jobId: string) => Promise<{ ok: boolean }>
+  onVoiceProgress: (callback: (data: VoiceProgress) => void) => () => void
 
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
   lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>

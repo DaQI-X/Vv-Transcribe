@@ -1,6 +1,6 @@
 # Vv Transcribe
 
-一款基于 Electron 的桌面端音视频转写应用，支持本地/云端 ASR 语音识别、参考稿逐字比对、本地校对与 AI 校对、段落级播放同步和多格式导出。
+一款基于 Electron 的桌面端音视频转写应用，支持本地/云端 ASR 语音识别、参考稿逐字比对、本地校对与 AI 校对、段落级播放同步、字幕配音和多格式导出。
 
 ## 功能特性
 
@@ -13,6 +13,7 @@
 - **音视频播放器**：播放/暂停、进度拖拽 seek、段落高亮同步，视频文件内嵌播放
 - **段落编辑器**：行内编辑转写文本，点击段落跳转到对应播放时间
 - **多格式导出**：SRT 字幕 / 纯文本 TXT / JSON 数据 / Markdown 文档，走系统「另存为」面板
+- **字幕配音**：转写结果页点「配音」，先试听一句确认音色，再逐段串行调用 OpenAI 兼容的音频接口（一段一次请求），产物由 FFmpeg 按字幕时间轴铺成**一条独立的 MP3 配音轨**（44.1kHz 单声道）。段与段之间不重叠也不截断：某段配音比它的字幕槽位长就顺延到后面、整条往后推，结果页会写明几段被顺延、这条轨比原时间轴长多少——**字幕与时间轴一个字都不改**。跑完走系统「另存为」存成 MP3，不保存就关窗删掉这批产物。空段落不调接口；连续 3 段失败自动熔断停下整批；「取消」只停后面的段，已合成的照样拼成一条轨
 - **设置持久化**：转写与校对配置写入 `userData/settings.json`，点「保存设置」才生效；保存后窗口不关，可以直接接着点检测。转写页在云端模式下是「测试连接」、本地模式下是「检查引擎状态」，校对页是「测试连接」——都不保存也能先试一次
 - **密钥加密落盘**：两把 API Key 走系统密钥库（macOS 钥匙串 / Windows DPAPI）加密后写进同一份 `settings.json`，磁盘上的值形如 `v1:<base64>`。输入框不回显已保存的值：留空＝不改，「清除已保存的 Key」要点「保存设置」才生效。历史明文在首次读到时就地换成密文；这台机器用不了密钥库时退回明文落盘并在设置里如实标注，读不出密文（换过电脑）时提示重新填写——任何一步都不会静默丢掉用户填的 Key
 - **故障自救**：本地引擎没能起来时在「设置 → 转写配置」点「重启本地引擎」，不必退出应用；「关于与更新 → 打开日志文件夹」直接取日志
@@ -32,6 +33,7 @@
 | 音频处理 | FFmpeg（fluent-ffmpeg + @ffmpeg-installer / @ffprobe-installer） |
 | ASR 转写 | Python faster-whisper（本地，FastAPI + NDJSON 流式）/ OpenAI 兼容 Whisper 接口（云端） |
 | 校对 | 本地规则校对（误听表 + chinese-xinhua 词库 + 参考稿 diff）/ OpenAI 兼容大模型接口 |
+| 配音（TTS） | OpenAI 兼容音频接口 `POST {apiBase}/v1/audio/speech`（一次一句）+ FFmpeg 铺轴拼接（`adelay` 定位、分组 `amix normalize=0` 混成一条，`libmp3lame` 192k 输出） |
 | 文本比对 | diff 库 + 自写段落对齐（`segmentDiff` / `textAlignment`） |
 | 参考稿解析 | mammoth（.docx）、pdf-parse（.pdf）、自写 SRT/Markdown 解析 |
 | 链接转写 | yt-dlp（随包内置，可在应用内更新）+ puppeteer-core 取站点 cookies |
@@ -52,6 +54,7 @@ basic_one/
 │   │   │   ├── asrHandlers.ts         #   转写任务：开始、取消、应用内重启引擎、进度推送
 │   │   │   ├── aiHandlers.ts          #   AI 校对、差异解释、参考稿分析
 │   │   │   ├── proofreadHandlers.ts   #   本地校对与规则解释（完全不读 API Key）
+│   │   │   ├── ttsHandlers.ts         #   配音：试听、整批合成、进度推送、取消、另存为、释放这批
 │   │   │   ├── settingsHandlers.ts    #   设置读写 + 「测试连接」
 │   │   │   ├── dictionaryHandlers.ts  #   词典查询、版本检查、更新下载
 │   │   │   ├── updateHandlers.ts      #   版本号、检查更新、外链与系统设置入口
@@ -67,6 +70,7 @@ basic_one/
 │   │       ├── dictionaryService.ts   #   中文词典加载 / 查询 / GitHub 更新
 │   │       ├── ai/                    #   AI 校对：types（Provider 接口）+ openaiCompatible
 │   │       │                          #     中文走误听表 + 词典 prompt，其他语言走通用 prompt
+│   │       ├── ttsService.ts          #   配音：逐段合成落盘 + ffprobe 读真实时长 + 铺轴（溢出顺延）+ 一次 ffmpeg 拼成整轨
 │   │       ├── referenceParser.ts     #   参考稿解析：txt / md / srt / docx / pdf
 │   │       ├── urlDownloader.ts       #   链接取内容：`-J` 解析元信息 + 会话表 + 音/视频两路 args + 进度与看门狗 + 另存为 + 临时目录回收
 │   │       ├── ytDlpUpdate.ts         #   链接解析组件的应用内更新：读清单→校验指纹→落盘→重探版本→失败退回
@@ -86,7 +90,7 @@ basic_one/
 │   │   ├── ErrorPage.tsx              #   路由兜底
 │   │   ├── ui/                        #   自研 Toast / Dropdown / Popover
 │   │   ├── transcription/             #   FileUploader（本地 / 链接两个 Tab）、UploadStatus、AudioPlayer、
-│   │   │                              #     TranscriptEditor、SegmentRow、DiffPanel、ProofreadModeDialog
+│   │   │                              #     TranscriptEditor、SegmentRow、DiffPanel、ProofreadModeDialog、TtsDialog
 │   │   └── settings/SettingsModal.tsx #   转写配置 / 校对配置 / 主题 / 关于与更新
 │   ├── stores/                        #   useTranscriptionStore、usePlayerStore、useReferenceStore、
 │   │                                  #     useSettingsModalStore、useThemeStore（均 Zustand）
@@ -214,11 +218,32 @@ basic_one/
   上传参考稿 → IPC file:readTextFile → referenceParser（txt / md / srt / docx / pdf）
     → textAlignment 段落对齐 + segmentDiff 逐字比对 → DiffPanel 标出差异
     → 可选 ai:analyzeReference 让模型通读参考稿找自身问题
+
+配音（一次调用只合成一句，整条稿子串行跑完再拼成一条轨；字幕与时间轴一个字都不改）：
+  TranscriptEditor 的「配音」按钮 → TtsDialog 三段走
+    确认：段数 / 字数 + 在用的模型与音色 + 「试听一句」（默认取第一段，可改文本）
+      → IPC tts:preview → POST {apiBase}/v1/audio/speech（response_format=mp3）→ 落盘 → ffprobe 读真实时长
+      接口地址与 Key 沿用校对那一套，模型与音色是另两个独立值：音频接口吃的是配音模型 id，
+        拿 chat 模型去调必然被拒，所以开工前置校验单独查这两项，缺任何一项都不发起整批调用
+    进行中：IPC tts:synthesize 一次带走全部段落（时间轴只有渲染层这一份，主进程按 jobId 记账）
+      → 逐段**串行**调接口（并发只会换来 429），每段落进 `transcribe-tts-<uuid>/`
+      → 段号经 IPC tts:progress 推回界面，写的是「已合成 7 / 12 段」这种真实段号
+      → 空段落跳过不调接口；单段 60 秒超时；连续 3 段失败熔断停下整批（原因与「用户点了取消」分开报）
+      → 「取消」只停后面的段，正在飞的那段等它回来，已经合成的照样拼成一条轨
+    铺轴与拼接：每段落点 = max(该段字幕起点, 上一段配音终点)，配音比字幕槽位长就顺延、整条往后推
+      （不截断也不重叠混音；某段读不到时长就退回按字幕槽位估长，并在结果里标明有几段是估的）
+      → 一次 ffmpeg：`adelay` 定位 → 每 64 路一组 `amix normalize=0`（多于 64 段再汇总一次，
+        免得 filtergraph 顶到 Windows 的命令行长度上限；graph 写进文件用 `-filter_complex_script` 传）
+      → `libmp3lame -b:a 192k` 出一条 `voice-track.mp3`
+    结果：配音轨时长与体积、原时间轴到几点、这条比它长多少、几段被顺延、成功/失败/跳过清单
+      → 「保存配音轨」IPC tts:saveTrack：系统「另存为」+ copyFile（另存出去的副本不跟着临时目录删）
+      → 关弹窗 IPC tts:releaseBatch 当场删掉这批临时目录；没另存出去的产物就到此为止
+        （进程被强杀走不到这步，由下次启动的 sweepStaleMediaTempDirs 回收——同一套 `transcribe-*` 前缀）
 ```
 
 ### IPC 通道一览
 
-preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层拿不到 `ipcRenderer` 本身。下表是主进程注册的全部 46 条（43 条 `ipcMain.handle` + 3 条主 → 渲染推送）。
+preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层拿不到 `ipcRenderer` 本身。下表是主进程注册的全部 53 条（49 条 `ipcMain.handle` + 4 条主 → 渲染推送）。
 
 | 通道 | 方向 | 说明 |
 |------|------|------|
@@ -250,6 +275,13 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `ai:analyzeReference` | 渲染 → 主 | 让模型通读参考稿找自身问题 |
 | `proofread:local` | 渲染 → 主 | 本地校对：误听表 + 词库 + 参考稿 diff，全程不读 API Key |
 | `proofread:explain` | 渲染 → 主 | 差异的规则解释（同上，不需要 Key） |
+| `tts:preview` | 渲染 → 主 | 配音试听一句：`POST {apiBase}/v1/audio/speech` 拿 mp3 落进临时目录，回 `{ clip: { filePath, bytes, duration }, error }`；`duration` 是 ffprobe 读出来的真实时长，读不到也不谎报。整批之前先花这一次钱，端点/模型/音色任何一样不对都在这一步暴露 |
+| `tts:release` | 渲染 → 主 | 删掉刚才那句试听的产物（试听框换内容、关弹窗时调用） |
+| `tts:synthesize` | 渲染 → 主 | 整条稿子配音：段落（含时间轴）由渲染层一次传来，主进程不存第二份时间轴、也不用界面报回来的路径。逐段**串行**（并发只会换来 429），空段落直接跳过不调接口，单段 60 秒超时，连续 3 段失败熔断停下整批；跑完用一次 ffmpeg 拼成整轨。回 `{ jobId, track, clipCount, failures, skipped, canceled, abortedReason, error }`——`abortedReason` 只写熔断原因，与「用户自己点了取消」分开报；拼接失败时前面的账目照样带回去，不会抹成「一段都没成」 |
+| `tts:progress` | 主 → 渲染 | 推 `{ jobId, stage, index, total, segmentId, note }`，`stage` 五态：`synthesizing` / `skipped` / `failed` / `assembling` / `done`。界面写的是真实段号（「已合成 7 / 12 段」），不做假百分比 |
+| `tts:cancel` | 渲染 → 主 | 置取消标志：只停**后面**的段，正在飞的那段等它回来；已经合成的照样拼成一条轨，不白跑 |
+| `tts:saveTrack` | 渲染 → 主 | 弹系统「另存为」（默认名 `voice-track.mp3`、MP3 过滤），`copyFile` 到用户选的位置，回 `{ success, canceled, name, error }`。取消不算失败也不释放这批——界面还留着结果态让人再点一次 |
+| `tts:releaseBatch` | 渲染 → 主 | 删掉这批的临时目录：关弹窗、组件卸载两条路都会触发；另存出去的那份是副本，跟着目录一起删不掉 |
 | `dictionary:lookup` | 渲染 → 主 | 查单个词释义。词库现在由主进程在校对/prompt 组装时内部使用，界面暂无调用点 |
 | `dictionary:lookupMultiple` | 渲染 → 主 | 批量查词，同上 |
 | `dictionary:getVersion` | 渲染 → 主 | 当前词库 commit hash |
@@ -381,7 +413,7 @@ python-asr/main.py + dependencies
 
 接口地址不用自己补版本段：主进程会先 `trim` 去尾斜杠、再去掉尾巴上的 `/v1`，然后拼 `${apiBase}/v1/audio/transcriptions`。所以填 `https://example.com`、`https://example.com/v1` 或 `https://example.com/v1/` 都指向同一个端点。
 
-- **只有「转写模式 = 云端优先」且填了云端 API Key，音频才会发出本机。** 默认的本地模式不发起任何网络转写请求；AI 校对的 Key 只处理文本，不会上传音视频。已保存但在这台机器解不开的 Key 不算「填了」：开工前置校验会当场拦住并说明原因，不会带着空 `Authorization` 去打接口。
+- **只有「转写模式 = 云端优先」且填了云端 API Key，音频才会发出本机。** 默认的本地模式不发起任何网络转写请求；AI 校对的 Key 只处理文本，不会上传音视频。配音同理——发出去的是逐段的字幕文本（外加试听那一句），回来的才是音频，所以**文本会离开本机**，目的地就是「校对配置」里填的那个接口地址。已保存但在这台机器解不开的 Key 不算「填了」：开工前置校验会当场拦住并说明原因，不会带着空 `Authorization` 去打接口。
 - 本地转写依赖内置的 Python ASR 引擎：打包后自动拉起，开发模式同样由主进程 spawn `python-asr/dist-<arch>/` 里的二进制（所以要先 `pnpm build:asr`，见「快速开始」）。引擎没能应答时，转写会直接给出原因而不是 `fetch failed`，并引导到「设置 → 转写配置」的「重启本地引擎」——它先 stop 再 start，`bootId` 每次 spawn 重新生成，所以不会把上一代残尸认成自己的引擎；重启进行中按钮显示「重启中…」，连点会被合并成一次，避免两个引擎抢 8000。有转写任务在跑时该操作被拒绝，避免打断正在出的字幕。
 - 换档位就是换引擎内存里的那个模型，而 `HF_HUB_OFFLINE` 只能在 spawn 之前决定，所以点「保存」时档位变了会自动重启一次本地引擎，提示「设置已保存，本地引擎已按新档位重启」。两种情况不重启、也给人话提示：有转写正在跑（重启会截断正在推的 NDJSON 流，半截结果比报错更糟，提示让你等这次转写结束后手动点「重启本地引擎」）、自动重启失败。首次下载的体积提示不再写死数字：引擎在 `status` 事件里把档位和权重体积（`base` 138MB / `small` 461MB）一起下发，进度页直接用它，避免 JS 和 Python 两处数字各说各话。
 - 「设置 → 转写配置 → 引擎状态」里的当前档位报的是引擎自己回显的那个（`/health` 的 `model` 字段），不是表单里还没保存的值——不然会让人以为切换已经生效了。
@@ -419,6 +451,19 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 | API Base URL | AI 接口地址，主进程在其后拼 `/v1/chat/completions` | 空（等价 `https://api.openai.com`） |
 | API Key | AI 密钥，同样不回显、留空＝不改。没配 Key 时点「校对」不弹选择框，直接走本地通道；有 Key 才弹「本地校对 / AI 校对」——密文在这台机器解不开也算「有」，好在弹窗里撞上明确原因并跳去重填，而不是被「未配置校对模型」误导 | 空 |
 | 模型 | AI 模型名称 | 空（默认 `gpt-4o-mini`；预设 DeepSeek=`deepseek-chat`、通义千问=`qwen-plus`） |
+| 配音模型 | `aiTtsModel`，配音用的模型 id，与上面的「模型」**不是同一个值**：音频接口要的是配音模型，填 chat 模型会被直接拒。服务商预设里只有 OpenAI 预填（`tts-1` + `alloy`），其余留空——留空＝切换服务商时**不动**用户已填的配音配置（走聚合网关的人，音色 id 是自定义的，被下拉框一键清掉比不清更容易丢配置） | 空（不自动回落默认值，缺就报「还没填」） |
+| 配音音色 | `aiTtsVoice`，各家格式不同（OpenAI 是 `alloy` / `onyx` 这类短名，有的网关要求带模型前缀），照服务商文档原样填。整条配音用同一个音色，暂不支持逐段换 | 空 |
+
+配音与校对**共用同一套接口地址与 API Key**（`getTTSConfig()` 读的就是 `aiApiBase` / `aiApiKey`），只有模型和音色分开存；接口地址同样先 `trim` 去尾斜杠、再去掉尾巴上的 `/v1`，然后拼 `${apiBase}/v1/audio/speech`。
+
+### 配音（TTS）
+
+- **能用什么接口**：只实测了 OpenAI 标准的音频端点 `POST {apiBase}/v1/audio/speech`（body 为 `{ model, input, voice, response_format: 'mp3' }`，返回体直接是音频字节）。返回 JSON 会被当成失败并把 body 前 200 字带进报错，而不是当成一段空音频；404 会额外说明「这家可能没有这个端点，或 API Base 少/多层路径」，401 说明「Key 不对或没有该模型权限」。**只做对话的模型服务通常没有这个端点**，能不能配音以服务商文档为准——界面不承诺通用。
+- **前置校验单独查配音这两项**：`checkVoiceReady()` 缺 Key、缺配音模型、缺音色任何一样都当场拦住，不会带着空值去点「开始配音」烧用户额度。
+- **计费与耗时**：逐段串行，一段一次请求，按服务商计费方式扣费；整条耗时取决于接口响应速度。弹窗确认页把段数、字数和「另外 n 段是空的，不会调用接口」写在点下去之前，并提供「试听一句」。
+- **产物是一条独立音轨**：MP3（44.1kHz 单声道、192k），按字幕时间轴铺开。某段配音比它的字幕槽位长就顺延到后面，整条往后推——不截断、不做重叠混音。所以**这条轨可能比原时间轴长**，结果页会给出「配音轨 00:42 / 原时间轴到 00:27，这条比它长（差 00:14）/ n 段配音比字幕槽位长，已顺延到后面」，并写明「字幕与时间轴没有改动，这是一条独立的音轨」。越到后面偏差越大，对画面时要以这条轨为准重铺字幕，而不是直接盖在原时间轴上。
+- **失败与取消**：连续 3 段失败即熔断停下整批（熔断原因与「用户自己点了取消」分开报），失败清单在结果页逐段可看；「取消」只停后面的段，已经合成的照样拼成一条轨。一段都没成时不会谎报成功，报的是前面那批的真实账目。
+- **产物只有一份留在用户手上**：中间片段与整轨都写在 `$TMPDIR/transcribe-tts-<uuid>/`，关弹窗当场整目录删掉；要留下必须点「保存配音轨」走系统「另存为」。进程被强杀没走到那一步时，由下次启动的临时清扫回收（`transcribe-*` 前缀、mtime 超 24 小时）。
 
 ### 本地词典
 
@@ -434,6 +479,8 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 - 视频文件播放依赖 `webSecurity: false` 配置，通过 `file://` 协议加载本地文件
 - 「校对」不要求 API Key：没配置校对模型时不弹选择框，直接跑本地校对（误听表 + 词库 + 参考稿 diff）；配置了模型才弹「本地校对 / AI 校对」选择框。AI 校对调用失败会给出可见提示，不会静默返回原文
 - 本地校对依据的误听表和中文词库只对中文成立：「转写语言」选成其他语言后，没配模型时点「校对」会提示去「校对配置」选模型，配了模型则在选择框里把「本地校对」置灰
+- 配音整批是**逐段串行的一次段一次请求**，扣的是用户自己 Key 上的额度，所以点「开始配音」之前先看确认页的段数与字数，并先听那一句——音色不对时第 2 段和第 20 段一样烧钱
+- 配音轨可能比原时间轴长（有段落被顺延），这是刻意不截断、不重叠的结果。拿这条轨对画面时**以配音轨为准重铺字幕**，别直接盖在原时间轴上；结果页那句「n 段配音比字幕槽位长」和「差 00:xx」就是给人判断这件事用的
 - 编译 Python ASR 二进制需要 PyInstaller，它已列在 `python-asr/requirements.txt` 里（`pnpm setup:asr` 一并装上）；`scripts/build-asr.mjs` 用的是 venv 里的解释器，所以必须先建好虚拟环境
 - API Key 的加密时机与退化路径：`settings.json` 里的历史明文在**首次读到设置**时就地换成密文（读到才迁，不是启动就迁——没打开设置页、也没跑过任何读配置的链路时，磁盘上那条仍是明文）；本机密钥库不可用时退回明文并在设置里标注，加密抛错也存明文，而不是把用户填的 Key 丢掉。换过电脑导致密文解不开时，设置里的状态、「测试连接」和开工前置校验给的是同一句「这台机器读不出已保存的 API Key…」，重新填一次并保存即恢复
 - 链接取内容的临时媒体**不是**下完就删：播放器整场都要拿它做逐句回放，删早了链路末尾只会剩一条「文件已被移动」的 toast（这是 1.0.5 修掉的回归）。站点 cookies 在提取出音频后立刻删，媒体留到「下一段素材开工」或「退出应用」；应用被强杀时这两处都走不到，下次启动由 24 小时清扫兜底。所以 /tmp 里短时间内看到上一份素材是正常的，不是泄漏

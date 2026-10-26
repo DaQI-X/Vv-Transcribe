@@ -5,11 +5,12 @@
  * - 上传参考稿比对（字级 diff，点击校对后分析差异 + 参考稿疑问）
  * - 校对（本地/ AI 两种方式；有参考稿以参考稿为准，行内 Popover 显示说明）
  * - 多格式字幕导出（SRT / TXT / JSON / Markdown）
+ * - 一键配音（逐段调配音接口，拼成一条对齐时间轴的音轨）
  * - 点击段落跳转到对应播放时间点
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Pencil, Download, FileText, X, ArrowLeft } from 'lucide-react'
+import { Pencil, Download, FileText, X, ArrowLeft, AudioLines } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
@@ -17,6 +18,7 @@ import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
 import { SegmentRow } from './SegmentRow'
 import { ProofreadModeDialog, type ProofreadMode } from './ProofreadModeDialog'
+import { TtsDialog } from './TtsDialog'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
 import { checkCorrectionReady, hasCorrectionModel, raiseReadinessBlock } from '@/utils/readiness'
@@ -112,6 +114,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
   const [loading, setLoading] = useState(false)
   const [proofreadMode, setProofreadMode] = useState<ProofreadMode>('local')
   const [modeDialogOpen, setModeDialogOpen] = useState(false)
+  const [voiceDialogOpen, setVoiceDialogOpen] = useState(false)
 
   useEffect(() => {
     if (activeRef.current) activeRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -444,6 +447,13 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             <Pencil size={14} />
             {loading ? (proofreadMode === 'local' ? '本地校对中…' : 'AI 校对中…') : '校对'}
           </button>
+          <button
+            onClick={() => setVoiceDialogOpen(true)}
+            disabled={loading}
+            className="transcript-editor__voice-btn"
+          >
+            <AudioLines size={14} /> 配音
+          </button>
           <Dropdown items={FORMAT_OPTIONS.map((opt) => ({ key: opt.key, label: opt.label, onClick: () => handleExport(opt.key) }))}>
             <button className="transcript-editor__export-btn">
               <Download size={14} />导出
@@ -487,6 +497,8 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
           localUnavailableReason={localUnavailableReason}
         />
       )}
+
+      {voiceDialogOpen && <TtsDialog onClose={() => setVoiceDialogOpen(false)} />}
     </div>
   )
 }

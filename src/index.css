@@ -1889,6 +1889,202 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-secondary);
 }
 
+/* 配音弹窗：这里的信息全是「要烧多少次调用、拿到了什么」的凭据，排版按信息密度排，不做装饰 */
+.voice-summary__counts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.voice-summary__counts strong {
+  color: var(--brand-blue);
+  font-weight: 600;
+}
+
+.voice-summary__cost,
+.voice-summary__config {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.voice-summary__config code {
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.voice-preview {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.voice-preview__input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: var(--font-sans);
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+}
+
+.voice-preview__input:focus {
+  border-color: var(--brand-blue);
+}
+
+.voice-preview__input:disabled {
+  opacity: 0.5;
+}
+
+.voice-preview__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.voice-preview__audio {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+}
+
+.voice-preview__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.voice-progress__bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.voice-progress__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand-blue);
+  transition: width 0.3s ease;
+}
+
+.voice-progress__stage {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.voice-progress__detail {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.voice-progress__note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.voice-result__audio {
+  width: 100%;
+  height: 36px;
+}
+
+.voice-result__stats {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.voice-result__stats li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.voice-result__stats strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* 顺延与估算不是错误，但会改变「这条轨能不能直接对回画面」，所以给一条中性警示 */
+.voice-result__stat--warn {
+  color: #b45309;
+}
+
+.voice-result__abort {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-page);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.voice-result__failures {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.voice-result__failures-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.voice-result__failure {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.voice-result__scope {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.voice-result__empty {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.voice-footer__actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* 测试连接结论：只有图标带语义色，边框/底色保持中性，避免界面花 */
 .settings-test-result {
   display: flex;
@@ -2103,6 +2299,32 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   background: rgba(27, 85, 245, 0.12);
 }
 .transcript-editor__ref-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 配音与校对同级：描边按钮，不进主 CTA 的渐变（导出才是这一排的主动作） */
+.transcript-editor__voice-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--brand-blue);
+  background: rgba(27, 85, 245, 0.06);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--brand-blue);
+  cursor: pointer;
+  transition: var(--app-transition);
+  font-family: var(--font-sans);
+}
+
+.transcript-editor__voice-btn:hover {
+  background: rgba(27, 85, 245, 0.12);
+}
+
+.transcript-editor__voice-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }

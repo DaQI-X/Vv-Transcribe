@@ -50,6 +50,14 @@ function getBinaryPath(binaryName: string): string {
   }
 }
 
+/**
+ * 需要直接 spawn ffmpeg 的调用方走这里拿路径
+ * （fluent-ffmpeg 的链式写法接不了几百路输入的复杂 filtergraph，但路径解析规则不该有第二份）。
+ */
+export function resolveFfmpegBinary(): string {
+  return getBinaryPath('ffmpeg')
+}
+
 // 延迟初始化，避免 app 未就绪时访问
 let ffmpegInitialized = false
 function ensureFfmpegPaths() {
