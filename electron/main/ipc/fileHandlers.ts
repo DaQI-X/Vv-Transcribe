@@ -2,11 +2,17 @@
  * 文件处理 IPC 处理器
  * 提供文件选择对话框、文件元数据读取、音频提取（FFmpeg）、临时文件清理等功能
  */
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { stat, writeFile } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { extractAudio, cleanupTemp, probeFile } from '../services/audioProcessor'
-import { downloadFromUrl } from '../services/urlDownloader'
+import {
+  cancelMediaDownload,
+  downloadMedia,
+  releaseMediaSession,
+  resolveMediaUrl,
+  saveMediaFileAs,
+} from '../services/urlDownloader'
 import { extractTextFromFile } from '../services/referenceParser'
 import { logger } from '../services/logger'
 
@@ -117,22 +123,71 @@ export function registerFileHandlers() {
     }
   })
 
-  ipcMain.handle('file:downloadFromUrl', async (_event, url: string) => {
-    logger.userAction('Download from URL started', { url })
+  /**
+   * 链接媒体分两段：先解析出标题/时长/清晰度，再由用户选「转写音频」还是「下载视频」。
+   * 拆成两段是因为下载前给不出体积与清晰度就得让用户点「开始转写」，下错了只能重下。
+   */
+  ipcMain.handle('file:resolveMedia', async (_event, url: string) => {
+    logger.userAction('Media resolve started', { url })
     try {
-      const result = await downloadFromUrl(url)
-      if (result.success) {
-        logger.userAction('Download from URL completed', { name: basename(result.filePath ?? ''), title: result.title })
-      } else {
-        logger.serviceError('FileHandlers', 'downloadFromUrl', new Error(result.error))
-      }
+      const result = await resolveMediaUrl(url)
+      if (!result.success) logger.serviceError('FileHandlers', 'resolveMedia', new Error(result.error))
       return result
     } catch (err) {
-      logger.serviceError('FileHandlers', 'downloadFromUrl', err)
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : '下载失败',
+      logger.serviceError('FileHandlers', 'resolveMedia', err)
+      return { success: false, error: err instanceof Error ? err.message : '链接解析失败' }
+    }
+  })
+
+  ipcMain.handle(
+    'file:downloadMedia',
+    async (
+      event,
+      payload: { sessionId: string; kind: 'audio' | 'video'; height?: number | null }
+    ) => {
+      logger.userAction('Media download started', { kind: payload.kind, height: payload.height ?? null })
+      const win = BrowserWindow.fromWebContents(event.sender)
+      try {
+        const result = await downloadMedia(
+          payload.sessionId,
+          payload.kind === 'audio' ? { kind: 'audio' } : { kind: 'video', height: payload.height ?? null },
+          (progress) => {
+            if (win && !win.isDestroyed()) win.webContents.send('file:mediaProgress', progress)
+          }
+        )
+        if (result.success) {
+          logger.userAction('Media download completed', {
+            name: basename(result.filePath ?? ''),
+            sizeBytes: result.fileSizeBytes ?? 0,
+          })
+        } else if (!result.canceled) {
+          logger.serviceError('FileHandlers', 'downloadMedia', new Error(result.error))
+        }
+        return result
+      } catch (err) {
+        logger.serviceError('FileHandlers', 'downloadMedia', err)
+        return { success: false, error: err instanceof Error ? err.message : '下载失败' }
       }
+    }
+  )
+
+  ipcMain.handle('file:cancelMediaDownload', async (_event, sessionId: string) => {
+    cancelMediaDownload(sessionId)
+    return { success: true }
+  })
+
+  /** 用完必须还：会话目录里是 cookies 和产物，泄漏一次就是几十 MB 到几 GB */
+  ipcMain.handle('file:releaseMediaSession', async (_event, sessionId: string) => {
+    await releaseMediaSession(sessionId)
+    return { success: true }
+  })
+
+  ipcMain.handle('file:saveMediaAs', async (_event, sessionId: string) => {
+    try {
+      return await saveMediaFileAs(sessionId)
+    } catch (err) {
+      logger.serviceError('FileHandlers', 'saveMediaAs', err)
+      return { success: false, error: err instanceof Error ? err.message : '保存失败' }
     }
   })
 

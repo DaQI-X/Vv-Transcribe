@@ -7,6 +7,7 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { extractAudio, cleanupTemp } from '../services/audioProcessor'
+import { dropMediaSessionCookies, releaseMediaSessionsExcept } from '../services/urlDownloader'
 import { runTranscription } from '../services/asr/asrManager'
 import { restartLocalEngine } from '../services/asrServiceManager'
 import { getASRConfig } from '../services/settingsService'
@@ -32,13 +33,29 @@ export function hasActiveTranscription(): boolean {
 export function registerASRHandlers() {
   ipcMain.handle(
     'asr:start',
-    async (event, filePath: string, options?: { language?: string }) => {
+    async (
+      event,
+      filePath: string,
+      options?: { language?: string; mediaSessionId?: string }
+    ) => {
       const jobId = randomUUID()
       const signal = new AbortController()
 
       activeJobs.set(jobId, { jobId, signal, tempDir: null })
 
       const win = BrowserWindow.fromWebContents(event.sender)
+
+      /**
+       * 链接转写的源文件躺在 urlDownloader 的会话目录里，那目录还装着浏览器 cookies。
+       * 提取出 wav 之后 cookies 就没用了，立刻删；但媒体不能跟着一起删——播放器整场都要拿它回放
+       * （一起删的后果：逐句回放在链路末尾变成一条「文件已被移动」的 toast）。
+       * 上一份素材的媒体在开工时回收，本次这份留到下次开工或应用退出，强杀留下的由启动清扫兜底。
+       */
+      const dropCookies = async () => {
+        if (options?.mediaSessionId) {
+          await dropMediaSessionCookies(options.mediaSessionId).catch(() => {})
+        }
+      }
 
       const sendProgress = (progress: number, segment?: ASRSegment, stage?: ASRStage, model?: ASRModelInfo) => {
         if (win && !win.isDestroyed()) {
@@ -49,9 +66,12 @@ export function registerASRHandlers() {
       try {
         console.log('[ASR] start job:', jobId, 'file:', basename(filePath))
         sendProgress(0)
+        // 界面一次只放一条转写：开工就把上一份素材的临时媒体回收掉，本次这份留着给播放器回放
+        releaseMediaSessionsExcept(options?.mediaSessionId ?? null)
 
         const extractResult = await extractAudio(filePath)
         console.log('[ASR] audio extracted for job:', jobId)
+        await dropCookies()
         const state = activeJobs.get(jobId)
         if (state) state.tempDir = extractResult.tempDir
 
@@ -78,6 +98,9 @@ export function registerASRHandlers() {
         return { jobId, success: true, segments: result.segments, provider: result.provider }
       } catch (err) {
         console.error('[ASR] job failed:', jobId, err)
+        // 提取阶段就失败、或中途被取消：cookies 一样要删，媒体留着（界面上的转写结果还在，
+        // 这份媒体会在下次开工或应用退出时被回收，不会一直摊在 /tmp）
+        await dropCookies()
         const state = activeJobs.get(jobId)
         if (state?.tempDir) {
           await cleanupTemp(state.tempDir).catch(() => {})

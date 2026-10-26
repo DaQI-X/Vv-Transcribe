@@ -1,10 +1,10 @@
 /**
  * 文件上传组件
- * 支持两种输入方式：本地文件上传（点击/拖拽）和 视频链接转写
- * Tab 切换两种模式，选择文件/输入链接后自动触发转写流程
+ * 支持两种输入方式：本地文件上传（点击/拖拽）和 视频链接（解析后可选「转写音频」或「下载视频」）
+ * Tab 切换两种模式；本地文件与音频下载完自动触发转写流程
  */
-import { useState, useCallback, useEffect } from 'react'
-import { Upload, Link2, Copy, Loader2 } from 'lucide-react'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { Upload, Link2, Copy, Loader2, AudioLines, Download, Ban } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
@@ -13,14 +13,92 @@ import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
 
 type UploadMode = 'file' | 'url'
 
+/** 链接这条链路的状态机：input（还没解析）→ resolving → ready（二选一）→ downloading */
+type UrlStage = 'input' | 'resolving' | 'ready' | 'downloading'
+
+/** 与 electron/preload/index.d.ts 的 MediaInfo 对齐；沿用本仓库惯例，渲染层自己声明形状 */
+interface MediaQualityOption {
+  height: number | null
+  label: string
+  approxBytes: number | null
+  streams: number
+}
+
+interface MediaInfo {
+  title: string
+  durationSeconds: number | null
+  uploader: string | null
+  isLive: boolean
+  audioApproxBytes: number | null
+  videoOptions: MediaQualityOption[]
+}
+
+interface MediaProgress {
+  sessionId: string
+  kind: 'audio' | 'video'
+  stage: 'downloading' | 'merging' | 'converting'
+  streamIndex: number
+  streamCount: number
+  percent: number | null
+  speed: string | null
+  eta: string | null
+}
+
+/** 体积：视频可能是几个 GB，只到 MB 的换算会把 3.4GB 写成 3481.6MB */
+function formatSize(bytes: number | null): string {
+  if (bytes === null) return '大小未知'
+  if (bytes < 1024) return `${bytes} B`
+  const mb = bytes / (1024 * 1024)
+  if (mb < 1024) return `${mb.toFixed(1)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds === null) return '时长未知'
+  const s = Math.round(seconds)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    : `${m}:${String(sec).padStart(2, '0')}`
+}
+
 export function FileUploader() {
   const { setFile, setStatus, setProgress, setStage, setModelInfo, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
   const [mode, setMode] = useState<UploadMode>('file')
   const [urlInput, setUrlInput] = useState('')
-  const [downloading, setDownloading] = useState(false)
-  const [downloadStatus, setDownloadStatus] = useState('')
+  const [urlStage, setUrlStage] = useState<UrlStage>('input')
+  const [media, setMedia] = useState<{ sessionId: string; info: MediaInfo } | null>(null)
+  const [mediaProgress, setMediaProgress] = useState<MediaProgress | null>(null)
+  const [pickedHeight, setPickedHeight] = useState<number | null>(null)
+  const [canceling, setCanceling] = useState(false)
+  /**
+   * 会话目录里是媒体 + 浏览器 cookies，主进程只在「还会话」时才删。
+   * ref 而不是 state：卸载清理要读到最新值，用 state 会拿到闭包里的旧值。
+   * handedOff 为真表示音频已经交给转写任务，那时由 asr:start 负责还。
+   */
+  const sessionRef = useRef<string | null>(null)
+  const handedOffRef = useRef(false)
+
+  const releaseSession = useCallback(() => {
+    const id = sessionRef.current
+    sessionRef.current = null
+    if (id && !handedOffRef.current) void api?.releaseMediaSession(id)
+    handedOffRef.current = false
+  }, [api])
+
+  // 换链接、切回本地文件、直接关掉页面：只要会话还在手上就得还，否则几十 MB 到几 GB 留在 /tmp
+  useEffect(() => {
+    return () => {
+      if (sessionRef.current && !handedOffRef.current) {
+        void api?.releaseMediaSession(sessionRef.current)
+      }
+      sessionRef.current = null
+    }
+  }, [api])
 
   useEffect(() => {
     if (api) {
@@ -29,7 +107,12 @@ export function FileUploader() {
     }
   }, [api])
 
-  const startTranscriptionProcess = useCallback(async (filePath: string, fileName: string, fileSize: number) => {
+  const startTranscriptionProcess = useCallback(async (
+    filePath: string,
+    fileName: string,
+    fileSize: number,
+    mediaSessionId?: string
+  ) => {
     frontendLogger.userAction('Start transcription process', { fileName, fileSize })
     if (!api) {
       frontendLogger.error('FileUploader', 'API is null')
@@ -94,7 +177,8 @@ export function FileUploader() {
       setAsrLanguage(language)
 
       frontendLogger.serviceCall('ASR', 'startTranscription', { fileName, language })
-      const result = await api.startTranscription(filePath, { language })
+      // 带上会话 id：主进程提取完音频就地还会话目录（里面还有 cookies），不用这边记着清
+      const result = await api.startTranscription(filePath, { language, mediaSessionId })
 
       if (!result.success) {
         unsubscribe()
@@ -196,18 +280,30 @@ export function FileUploader() {
     }
   }, [])
 
-  const handleSubmitUrl = useCallback(async () => {
+  /** 下载进度是事件推回来的（一个 4K 片在慢网里要跑几分钟），不订阅界面就像卡死 */
+  useEffect(() => {
+    if (urlStage !== 'downloading' || !api) return
+    const off = api.onMediaProgress((data) => {
+      if (data.sessionId !== sessionRef.current) return
+      setMediaProgress(data)
+    })
+    return off
+  }, [urlStage, api])
+
+  /** 解析：只拿标题/时长/清晰度，不落任何媒体。下错了档至少不用重下整片 */
+  const handleResolveUrl = useCallback(async () => {
     const url = urlInput.trim()
     if (!url || !api) return
-    frontendLogger.userAction('URL transcription submitted', { url })
-
-    setDownloading(true)
-    setDownloadStatus('正在解析链接...')
+    frontendLogger.userAction('URL resolved', { url })
+    releaseSession()
+    setMedia(null)
+    setMediaProgress(null)
+    setUrlStage('resolving')
 
     try {
-      const result = await api.downloadFromUrl(url)
-      if (!result.success) {
-        frontendLogger.error('FileUploader', 'Download failed', result.error)
+      const result = await api.resolveMedia(url)
+      if (!result.success || !result.sessionId || !result.info) {
+        setUrlStage('input')
         if (result.systemSettingsHint) {
           // 包内二进制被系统拦下执行（macOS 未授权）：给一键直达隐私设置的入口，别只让用户读文字
           toast.error(result.error || '链接解析失败', 8000, {
@@ -215,48 +311,142 @@ export function FileUploader() {
             onClick: () => { void api.openSystemSettings() },
           })
         } else {
-          // 链接取不到音频时，绝大多数情况的出路只有「换成本地文件」，把这条路直接给出来
+          // 链接解析不出来时，绝大多数情况的出路只有「换成本地文件」，把这条路直接给出来
           toast.error(result.error || '链接解析失败，请重试', 8000, {
             label: '改传本地文件',
             onClick: () => setMode('file'),
           })
         }
-        setDownloading(false)
-        setDownloadStatus('')
         return
       }
-
-      setDownloadStatus('正在获取文件信息...')
-      const metadata = await api.getFileMetadata(result.filePath!)
-      if (!metadata) {
-        toast.error('无法获取下载文件信息')
-        setDownloading(false)
-        setDownloadStatus('')
-        return
-      }
-
-      setDownloadStatus('')
-      setDownloading(false)
-      frontendLogger.info('FileUploader', 'Download completed', { title: result.title })
-
-      await startTranscriptionProcess(metadata.path, result.title || metadata.name, metadata.size)
+      sessionRef.current = result.sessionId
+      setMedia({ sessionId: result.sessionId, info: result.info })
+      setPickedHeight(result.info.videoOptions[0]?.height ?? null)
+      setUrlStage('ready')
     } catch (err) {
-      frontendLogger.error('FileUploader', 'URL download error', err instanceof Error ? err.message : '下载失败')
+      setUrlStage('input')
+      frontendLogger.error('FileUploader', 'Resolve error', err instanceof Error ? err.message : '解析失败')
       toast.error('链接解析失败，请重试', 8000, {
         label: '改传本地文件',
         onClick: () => setMode('file'),
       })
-      setDownloading(false)
-      setDownloadStatus('')
     }
-  }, [urlInput, api, startTranscriptionProcess])
+  }, [urlInput, api, releaseSession])
+
+  /** 转写音频：产物直接进现有转写链路，会话交给 asr:start 去还 */
+  const handleTranscribeAudio = useCallback(async () => {
+    if (!api || !media) return
+    setUrlStage('downloading')
+    setMediaProgress(null)
+    frontendLogger.userAction('Media download started', { kind: 'audio' })
+
+    const result = await api.downloadMedia(media.sessionId, 'audio')
+    if (!result.success || !result.filePath) {
+      setUrlStage('ready')
+      if (result.canceled) {
+        toast.info('已取消下载')
+      } else if (result.systemSettingsHint) {
+        toast.error(result.error || '下载失败', 8000, {
+          label: '打开隐私设置',
+          onClick: () => { void api.openSystemSettings() },
+        })
+      } else {
+        toast.error(result.error || '下载失败，请重试', 8000)
+      }
+      return
+    }
+
+    const metadata = await api.getFileMetadata(result.filePath)
+    if (!metadata) {
+      setUrlStage('ready')
+      toast.error('下载完成但读不到文件信息，请重试或改传本地文件', 8000)
+      return
+    }
+
+    handedOffRef.current = true
+    sessionRef.current = null
+    setUrlStage('input')
+    setMedia(null)
+    setMediaProgress(null)
+    await startTranscriptionProcess(
+      metadata.path,
+      media.info.title || metadata.name,
+      result.fileSizeBytes ?? metadata.size,
+      media.sessionId
+    )
+  }, [api, media, startTranscriptionProcess])
+
+  /** 下载视频：下满临时目录后才问存哪儿，免得用户目录里躺个半成品 */
+  const handleDownloadVideo = useCallback(async () => {
+    if (!api || !media) return
+    setUrlStage('downloading')
+    setMediaProgress(null)
+    frontendLogger.userAction('Media download started', { kind: 'video', height: pickedHeight })
+
+    const result = await api.downloadMedia(media.sessionId, 'video', pickedHeight)
+    if (!result.success || !result.filePath) {
+      setUrlStage('ready')
+      if (result.canceled) {
+        toast.info('已取消下载')
+      } else if (result.systemSettingsHint) {
+        toast.error(result.error || '下载失败', 8000, {
+          label: '打开隐私设置',
+          onClick: () => { void api.openSystemSettings() },
+        })
+      } else {
+        toast.error(result.error || '下载失败，请重试', 8000)
+      }
+      return
+    }
+
+    const saved = await api.saveMediaAs(media.sessionId)
+    // 存成功和取消这两条路，主进程自己已经把会话还了，这里只清 ref、不能再发一次释放；
+    // 只有 copyFile 失败那条它故意留着会话，界面已经退回输入态、没有重试入口，必须由下面还回去
+    if (saved.success || saved.canceled) sessionRef.current = null
+    else releaseSession()
+    setMedia(null)
+    setMediaProgress(null)
+    setUrlStage('input')
+    if (saved.success) {
+      const name = saved.savedPath?.split(/[\\/]/).pop() ?? '视频'
+      frontendLogger.userAction('Video saved', { name })
+      toast.success(`已保存 ${name}`)
+      setUrlInput('')
+    } else if (saved.canceled) {
+      toast.info('已取消保存，临时文件已清理')
+    } else {
+      toast.error(saved.error || '保存失败', 8000)
+    }
+  }, [api, media, pickedHeight, releaseSession])
+
+  const handleCancelDownload = useCallback(async () => {
+    if (!api || !sessionRef.current) return
+    setCanceling(true)
+    try {
+      await api.cancelMediaDownload(sessionRef.current)
+    } finally {
+      // 不在这里收尾：downloadMedia 以 canceled 结束时由上面两条链路统一回到「二选一」
+      setCanceling(false)
+    }
+  }, [api])
+
+  const resetUrlTab = useCallback(() => {
+    releaseSession()
+    setMedia(null)
+    setMediaProgress(null)
+    setUrlStage('input')
+  }, [releaseSession])
 
   return (
     <div className="upload_zone">
       <div className="upload-tabs">
         <button
           className={`upload-tab ${mode === 'file' ? 'active' : ''}`}
-          onClick={() => setMode('file')}
+          onClick={() => {
+            // 切走就把会话还掉：解析过但没下完的链接不该在 /tmp 里留着 cookies
+            resetUrlTab()
+            setMode('file')
+          }}
         >
           <Upload size={14} />
           <span>本地文件</span>
@@ -302,24 +492,121 @@ export function FileUploader() {
               placeholder="粘贴公开音视频链接（不需要登录的那种）"
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !downloading && handleSubmitUrl()}
-              disabled={downloading}
+              onKeyDown={(e) => e.key === 'Enter' && urlStage === 'input' && handleResolveUrl()}
+              disabled={urlStage === 'resolving' || urlStage === 'downloading'}
             />
-            <button className="url-paste-btn" onClick={handlePasteUrl} title="粘贴" disabled={downloading}>
+            <button
+              className="url-paste-btn"
+              onClick={handlePasteUrl}
+              title="粘贴"
+              disabled={urlStage === 'resolving' || urlStage === 'downloading'}
+            >
               <Copy size={16} />
             </button>
           </div>
-          <div className="upload-subtitle">
-            只能取公开视频。需要登录或会员的视频（抖音、B 站会员片、部分 YouTube）拿不到音频，
-            请先在本地下载好，再走「本地文件」上传
-          </div>
-          <button
-            className="url-submit-btn"
-            disabled={!urlInput.trim() || downloading}
-            onClick={handleSubmitUrl}
-          >
-            {downloading ? <><Loader2 size={14} className="animate-spin" /> {downloadStatus || '下载中...'}</> : '开始转写'}
-          </button>
+
+          {urlStage === 'ready' && media && (
+            <div className="media-card">
+              <div className="media-card__title" title={media.info.title}>
+                {media.info.title}
+              </div>
+              <div className="media-card__meta">
+                {formatDuration(media.info.durationSeconds)}
+                {media.info.uploader ? ` · ${media.info.uploader}` : ''}
+              </div>
+
+              <div className="media-card__choices">
+                <button className="media-choice-btn media-choice-btn--primary" onClick={handleTranscribeAudio}>
+                  <AudioLines size={14} />
+                  <span>转写音频</span>
+                  <span className="media-choice-btn__size">{formatSize(media.info.audioApproxBytes)}</span>
+                </button>
+
+                {media.info.videoOptions.length > 0 ? (
+                  <div className="media-card__video-row">
+                    <select
+                      className="settings-form-select media-card__quality"
+                      value={String(pickedHeight)}
+                      onChange={(e) => setPickedHeight(e.target.value === 'null' ? null : Number(e.target.value))}
+                    >
+                      {media.info.videoOptions.map((opt) => (
+                        <option key={String(opt.height)} value={String(opt.height)}>
+                          {opt.label} · {formatSize(opt.approxBytes)}
+                        </option>
+                      ))}
+                    </select>
+                    <button className="media-choice-btn" onClick={handleDownloadVideo}>
+                      <Download size={14} />
+                      <span>下载视频</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="media-card__note">站点没报画面档位，这条链接只能走「转写音频」</div>
+                )}
+              </div>
+
+              <div className="media-card__hint">
+                体积按站点自报估算，实际可能上下浮动；「转写音频」只取音频轨，站点 cookies 提取完音频就删，
+                这份临时音频留到退出应用时清理
+              </div>
+              <button className="media-card__reset" onClick={resetUrlTab}>
+                <Ban size={13} />
+                换个链接
+              </button>
+            </div>
+          )}
+
+          {urlStage === 'downloading' && (
+            <div className="media-progress">
+              <div className="media-progress__title">
+                <Loader2 size={14} className="animate-spin" />
+                {mediaProgress?.kind === 'video' ? '下载视频中' : '下载音频中'}
+                {mediaProgress && mediaProgress.streamCount > 1
+                  ? ` · 第 ${mediaProgress.streamIndex}/${mediaProgress.streamCount} 路`
+                  : ''}
+                {mediaProgress && mediaProgress.stage !== 'downloading'
+                  ? ` · ${mediaProgress.stage === 'merging' ? '合并音视频轨' : '转码中'}`
+                  : ''}
+              </div>
+              <div className="media-progress__bar">
+                <div
+                  className="media-progress__fill"
+                  style={{ width: `${Math.round(mediaProgress?.percent ?? 0)}%` }}
+                />
+              </div>
+              <div className="media-progress__detail">
+                {mediaProgress?.percent !== null && mediaProgress?.percent !== undefined
+                  ? `${Math.round(mediaProgress.percent)}%`
+                  : '站点没报总大小'}
+                {mediaProgress?.speed ? ` · ${mediaProgress.speed}` : ''}
+                {mediaProgress?.eta ? ` · 剩余 ${mediaProgress.eta}` : ''}
+              </div>
+              <button className="media-card__reset" onClick={handleCancelDownload} disabled={canceling}>
+                <Ban size={13} />
+                {canceling ? '取消中...' : '取消下载'}
+              </button>
+            </div>
+          )}
+
+          {urlStage !== 'ready' && urlStage !== 'downloading' && (
+            <>
+              <div className="upload-subtitle">
+                只能取公开视频。需要登录或会员的视频（抖音、B 站会员片、部分 YouTube）拿不到音频，
+                请先在本地下载好，再走「本地文件」上传
+              </div>
+              <button
+                className="url-submit-btn"
+                disabled={!urlInput.trim() || urlStage === 'resolving'}
+                onClick={handleResolveUrl}
+              >
+                {urlStage === 'resolving' ? (
+                  <><Loader2 size={14} className="animate-spin" /> 正在解析链接...</>
+                ) : (
+                  '解析链接'
+                )}
+              </button>
+            </>
+          )}
         </div>
       )}
 

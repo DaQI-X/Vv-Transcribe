@@ -4,7 +4,8 @@
 
 ## 功能特性
 
-- **文件导入**：拖拽或点选本地文件，音频+视频白名单共 31 项（14 种音频 + 17 种视频：MP3/WAV/M4A/FLAC/AIFF/AC3、MP4/MKV/MOV/AVI/WebM/FLV/WMV/TS/M2TS/MXF 等，含广电常见的 MXF 与磁带采集容器）；能否真正解出音轨由 ffprobe 判定。也可粘贴公开视频链接，由内置 yt-dlp 下载后转写（这版解析组件能在「设置 → 关于与更新」里直接更新，站点改规则不必重装应用）
+- **文件导入**：拖拽或点选本地文件，音频+视频白名单共 31 项（14 种音频 + 17 种视频：MP3/WAV/M4A/FLAC/AIFF/AC3、MP4/MKV/MOV/AVI/WebM/FLV/WMV/TS/M2TS/MXF 等，含广电常见的 MXF 与磁带采集容器）；能否真正解出音轨由 ffprobe 判定
+- **链接取内容**：粘贴公开视频链接后**先只解析元信息**（标题 / 时长 / 体积估算 / 清晰度档位），界面在中间态让用户二选一——「转写音频」只取音频轨转 MP3 后汇入同一条转写流，「下载视频」按选中的档位取画面与音频合并 MP4、下满后走系统「另存为」写到用户选的位置。取内容过程中界面给的是实测进度（第 n/2 路 / 合并音视频轨 / 转码中 + 速度与剩余时间），并留「取消下载」入口。合规口径写在界面上：只能取公开视频，需要登录或会员的（抖音、B 站会员片、部分 YouTube）拿不到音频，请先在本地下载好再走「本地文件」上传。内置的这版解析组件还能在「设置 → 关于与更新」里直接更新，站点改规则不必重装应用
 - **ASR 语音转写**：引擎由设置里的「转写模式」决定——默认「本地转写」（Python faster-whisper，音频不出本机），显式切到「云端优先」且填了 API Key 才走 OpenAI 兼容的 Whisper 接口，云端失败时回落本地。进度按 NDJSON 逐句流式上屏，可随时取消
 - **转写语言**：12 种语言可选（zh/en/ja/ko/th/vi/id/fr/de/es/ru/ar），本地与云端共用这一设置；刻意不提供「自动检测」
 - **参考稿比对**：上传播出稿（TXT/Markdown/SRT/DOCX/PDF）后与转写结果逐字 diff，差异高亮，还可用 AI 逐处解释
@@ -67,7 +68,7 @@ basic_one/
 │   │       ├── ai/                    #   AI 校对：types（Provider 接口）+ openaiCompatible
 │   │       │                          #     中文走误听表 + 词典 prompt，其他语言走通用 prompt
 │   │       ├── referenceParser.ts     #   参考稿解析：txt / md / srt / docx / pdf
-│   │       ├── urlDownloader.ts       #   链接转写：yt-dlp 取路径、把英文报错翻成「下一步做什么」
+│   │       ├── urlDownloader.ts       #   链接取内容：`-J` 解析元信息 + 会话表 + 音/视频两路 args + 进度与看门狗 + 另存为 + 临时目录回收
 │   │       ├── ytDlpUpdate.ts         #   链接解析组件的应用内更新：读清单→校验指纹→落盘→重探版本→失败退回
 │   │       ├── browserCookieFetcher.ts#   用 puppeteer-core 起一份空白临时配置取站点 cookies
 │   │       ├── connectionTestService.ts # 「测试连接」：分别探云端接口与本机引擎
@@ -165,15 +166,36 @@ basic_one/
       → 清理临时目录；asr:cancel 用 AbortController 中断，回 canceled 让界面退回初始态
     → TranscriptionStore → 播放器 + 编辑器
 
-链接转写：
-  FileUploader（链接 Tab）→ IPC file:downloadFromUrl
+链接取内容（解析与取内容是两步，界面在中间态让用户选「转写」还是「下载视频」）：
+  FileUploader（链接 Tab）→ IPC file:resolveMedia
     → browserCookieFetcher：puppeteer-core 起一份系统临时目录里的空白配置取站点 cookies
       （读不到就退回不带 cookies 的请求）
-    → urlDownloader：调内置 yt-dlp，默认 --impersonate chrome；探测到该二进制不支持
-      curl_cffi 时自动去掉这个 flag
+    → urlDownloader：先用内置 yt-dlp 跑一次 `-J` 只取元信息，不下载内容；默认 --impersonate chrome，
+      探测到该二进制不支持 curl_cffi 时自动去掉这个 flag。这一步 45 秒没返回就中断并报「站点 45 秒没有响应」
+    → buildMediaInfo 把 formats 拆成「只有画面 / 只有声音 / 画面声音打包在一起」三路，据此给出
+      「转写音频」的体积估算与可选清晰度档位（档位体积 = 该路画面 + 那一路音频；没有纯音频轨时按整片估）
+    → 直播场次在这里就被拒掉（取到的是无限流，既不能下载也不能转写）
+    → 会话（sessionId + 临时目录 + cookies + 公共参数）存进主进程 sessions 表，渲染层只拿到 id
+  用户选一条 → IPC file:downloadMedia（kind='audio' | 'video' + height）
+    → 音频：`-f bestaudio[ext=m4a]/bestaudio/best -x --audio-format mp3 --audio-quality 0`
+      视频：`-f bestvideo[height<=H]+bestaudio/best[height<=H]/best --merge-output-format mp4`
+      （不落盘字幕/封面，产物路径优先认 yt-dlp 自己打印的 Destination/Merger 行，扫目录只兜底）
+    → 主进程逐行读 yt-dlp 输出，经 IPC file:mediaProgress 推 `{ stage, streamIndex/streamCount, percent, speed, eta }`
+      到界面（下载中 / 第 n/2 路 / 合并音视频轨 / 转码中），百分比来自实测字节，不做假进度
+    → 兜底两条：45 秒拿不到元信息、180 秒 yt-dlp 完全没输出（站点限速或代理不稳）各自给人话报错；
+      180 秒这个数字改了文案也跟着改（报错里的秒数是从常量算出来的）
+    → 中途可 IPC file:cancelMediaDownload（SIGTERM），回 canceled，界面退回二选一、会话留着可以再点一次
+    → 音频直接汇入上面同一条转写流；视频下载完成后 IPC file:saveMediaAs 弹系统「另存为」，
+      复制目标位置后释放会话——**取消保存同样释放会话**（渲染层此刻已经丢了句柄，不还会话就是纯泄漏）
+    → 临时目录（媒体 + cookies）的四种还法，按「谁还会用这份文件」区分：
+        不再用这条链接（换链接 / 切回「本地文件」Tab / 组件卸载）→ IPC file:releaseMediaSession 立刻整目录删掉
+        「转写音频」→ 只删 cookies（asr:start 提取出 wav 之后 dropMediaSessionCookies），媒体留着给播放器
+                     逐句回放；下一段素材开工时 releaseMediaSessionsExcept 回收上一份，本次这份留到退出应用
+        退出应用 → before-quit 里 releaseAllMediaSessions 收尾（进程被强杀走不到这步，由下面这条兜底）
+        下次启动 → sweepStaleMediaTempDirs 回收 mtime 超过 24 小时且不在 sessions 里的 `transcribe-*`
+      取 cookies 那份无头浏览器临时配置目录由 browserCookieFetcher 自己删，不留在这张表里
     → 失败时把英文报错翻成「下一步该做什么」（站点风控 / 私有视频 / 无音轨 / 未授权执行），
       并提供「改传本地文件」一键切回本地 Tab
-    → 下载成功后汇入上面同一条转写流
 
 校对（两条独立通道，都只给建议，改动要逐条采纳）：
   TranscriptEditor 的「校对」按钮
@@ -196,7 +218,7 @@ basic_one/
 
 ### IPC 通道一览
 
-preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层拿不到 `ipcRenderer` 本身。下表是主进程注册的全部 41 条。
+preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层拿不到 `ipcRenderer` 本身。下表是主进程注册的全部 46 条（43 条 `ipcMain.handle` + 3 条主 → 渲染推送）。
 
 | 通道 | 方向 | 说明 |
 |------|------|------|
@@ -206,7 +228,12 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `file:probeAudio` | 渲染 → 主 | ffprobe 探测时长与音轨。转写链路由主进程内部直接调用，渲染层目前没有单独调它 |
 | `file:extractAudio` | 渲染 → 主 | FFmpeg 提取 16kHz WAV 到临时目录。同上，`asr:start` 内部自己调 |
 | `file:cleanupTemp` | 渲染 → 主 | 删除临时目录，任务结束/取消时主进程已自行清理 |
-| `file:downloadFromUrl` | 渲染 → 主 | 链接转写：yt-dlp（必要时先取站点 cookies） |
+| `file:resolveMedia` | 渲染 → 主 | 链接取内容第一步：跑一次 yt-dlp `-J` 只取元信息（需要时先起无头浏览器取 cookies），回标题/时长/清晰度档位/体积估算，并把会话存进主进程 `sessions` 表，渲染层只拿到 `sessionId` |
+| `file:downloadMedia` | 渲染 → 主 | 按会话取内容：`kind='audio'` 取音频轨转 mp3、`kind='video'` + `height` 取画面与音频合并 mp4；进度经 `file:mediaProgress` 推送 |
+| `file:mediaProgress` | 主 → 渲染 | 推 `{ sessionId, kind, stage, streamIndex, streamCount, percent, speed, eta }`，界面写「第 1/2 路 · 47% · 4.67MiB/s · 剩余 00:02」；`speed`/`eta` 用 yt-dlp 原样吐的字符串，不自己换算单位 |
+| `file:cancelMediaDownload` | 渲染 → 主 | SIGTERM 中断当前那次 yt-dlp，回 `canceled`；会话留着，界面退回二选一还能再点别的档位 |
+| `file:saveMediaAs` | 渲染 → 主 | 视频下满后弹系统「另存为」，`copyFile` 到用户选的位置（临时目录在 /tmp、目标盘可能是另一块卷，rename 会 EXDEV，所以是复制不是移动）。**存成功和取消都释放会话**——此时渲染层已经丢了句柄，不还会话就是纯泄漏；只有 `copyFile` 报错那条留着，由渲染层还 |
+| `file:releaseMediaSession` | 渲染 → 主 | 删这条链接的临时目录（媒体 + cookies）：换链接、切回「本地文件」Tab、组件卸载三条路都会触发 |
 | `file:readTextFile` | 渲染 → 主 | 读取参考稿并按格式解析成纯文本 |
 | `file:saveText` | 渲染 → 主 | 系统「另存为」面板写出 SRT / TXT / JSON / MD |
 | `ytDlp:getLocal` | 渲染 → 主 | 本机生效的链接解析组件：版本号 + 来源档位 + 实际字节数（要 spawn 一次 `--version`，只在打开「关于与更新」时做） |
@@ -409,4 +436,5 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 - 本地校对依据的误听表和中文词库只对中文成立：「转写语言」选成其他语言后，没配模型时点「校对」会提示去「校对配置」选模型，配了模型则在选择框里把「本地校对」置灰
 - 编译 Python ASR 二进制需要 PyInstaller，它已列在 `python-asr/requirements.txt` 里（`pnpm setup:asr` 一并装上）；`scripts/build-asr.mjs` 用的是 venv 里的解释器，所以必须先建好虚拟环境
 - API Key 的加密时机与退化路径：`settings.json` 里的历史明文在**首次读到设置**时就地换成密文（读到才迁，不是启动就迁——没打开设置页、也没跑过任何读配置的链路时，磁盘上那条仍是明文）；本机密钥库不可用时退回明文并在设置里标注，加密抛错也存明文，而不是把用户填的 Key 丢掉。换过电脑导致密文解不开时，设置里的状态、「测试连接」和开工前置校验给的是同一句「这台机器读不出已保存的 API Key…」，重新填一次并保存即恢复
+- 链接取内容的临时媒体**不是**下完就删：播放器整场都要拿它做逐句回放，删早了链路末尾只会剩一条「文件已被移动」的 toast（这是 1.0.5 修掉的回归）。站点 cookies 在提取出音频后立刻删，媒体留到「下一段素材开工」或「退出应用」；应用被强杀时这两处都走不到，下次启动由 24 小时清扫兜底。所以 /tmp 里短时间内看到上一份素材是正常的，不是泄漏
 - 端口 8000 是本机引擎的约定端口。应用不会复用一个「应答者身份不明」的服务，因此手动起的 `python main.py` 不会被采信；反过来，构建或清理时不要用 `pkill -f vv-asr-server` 之类的通配杀进程，容易连别的工作一起打掉

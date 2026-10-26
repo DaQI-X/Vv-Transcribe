@@ -399,6 +399,13 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
     return (
       <div className="transcript-editor__empty">
         <span className="transcript-editor__empty-text">暂无转写内容</span>
+        {/* 空状态原来只有一句话，「返回首页」在下面的正文分支里——一句人声都没有的素材跑完就卡在这 */}
+        {onGoHome && (
+          <button onClick={onGoHome} className="transcript-editor__back-btn" title="返回首页">
+            <ArrowLeft size={14} />
+            <span>返回首页</span>
+          </button>
+        )}
       </div>
     )
   }

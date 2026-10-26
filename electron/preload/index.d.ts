@@ -21,13 +21,54 @@ export interface ExtractAudioResult {
   error?: string
 }
 
-export interface DownloadFromUrlResult {
+/** 一档可下载的清晰度。height=null 表示「站点给到的最高清晰度」 */
+export interface MediaQualityOption {
+  height: number | null
+  label: string
+  /** 站点自报的估算体积；取不到是 null，界面要显示「大小未知」而不是编一个数 */
+  approxBytes: number | null
+  /** 1=站点给带音轨的整片；2=视频轨与音频轨分开下再合并（进度会走两遍） */
+  streams: number
+}
+
+export interface MediaInfo {
+  title: string
+  durationSeconds: number | null
+  uploader: string | null
+  isLive: boolean
+  audioApproxBytes: number | null
+  /** 空数组＝这条链接只有音频，没有可下载的画面 */
+  videoOptions: MediaQualityOption[]
+}
+
+export interface ResolveMediaResult {
   success: boolean
-  filePath?: string
-  tempDir?: string
-  title?: string
+  /** 后续下载/另存为/释放都要带上它：会话独占一个临时目录 */
+  sessionId?: string
+  info?: MediaInfo
   error?: string
   systemSettingsHint?: boolean
+}
+
+export interface MediaDownloadResult {
+  success: boolean
+  filePath?: string
+  fileSizeBytes?: number
+  canceled?: boolean
+  error?: string
+  systemSettingsHint?: boolean
+}
+
+export interface MediaProgress {
+  sessionId: string
+  kind: 'audio' | 'video'
+  stage: 'downloading' | 'merging' | 'converting'
+  streamIndex: number
+  streamCount: number
+  percent: number | null
+  /** yt-dlp 原样吐出的字符串（"1.23MiB/s" / "00:09"），不做二次换算 */
+  speed: string | null
+  eta: string | null
 }
 
 export interface ProbeAudioResult {
@@ -64,7 +105,22 @@ export interface ElectronAPI {
   extractAudio: (filePath: string) => Promise<ExtractAudioResult>
   cleanupTemp: (tempDir: string) => Promise<void>
   probeAudio: (filePath: string) => Promise<ProbeAudioResult>
-  downloadFromUrl: (url: string) => Promise<DownloadFromUrlResult>
+  /** 解析链接：只拿标题/时长/清晰度，不落媒体。成功后返回 sessionId，后续步骤都靠它 */
+  resolveMedia: (url: string) => Promise<ResolveMediaResult>
+  /** 拿解析好的会话去下载。audio 的产物直接进转写；video 下完再走 saveMediaAs */
+  downloadMedia: (
+    sessionId: string,
+    kind: 'audio' | 'video',
+    height?: number | null
+  ) => Promise<MediaDownloadResult>
+  cancelMediaDownload: (sessionId: string) => Promise<{ success: boolean }>
+  /** 临时目录归会话管：不释放就等于把 cookies 和几十 MB 媒体留在 /tmp 里 */
+  releaseMediaSession: (sessionId: string) => Promise<{ success: boolean }>
+  saveMediaAs: (
+    sessionId: string
+  ) => Promise<{ success: boolean; savedPath?: string; canceled?: boolean; error?: string }>
+  /** 订阅下载进度，返回取消订阅的函数（与 onTranscriptionProgress 同一写法） */
+  onMediaProgress: (callback: (data: MediaProgress) => void) => () => void
   selectTextFile: () => Promise<string | null>
   readTextFile: (filePath: string) => Promise<string | null>
   saveTextFile: (

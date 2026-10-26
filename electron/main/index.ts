@@ -9,6 +9,7 @@ import { registerAllHandlers } from './ipc'
 import { startASRService, stopASRService, getASRServiceStatus } from './services/asrServiceManager'
 import { initDictionary } from './services/dictionaryService'
 import { logger } from './services/logger'
+import { releaseAllMediaSessions, sweepStaleMediaTempDirs } from './services/urlDownloader'
 
 // 忽略 EPIPE 错误（stdout 管道断开，常见于开发服务器重启）
 process.on('SIGPIPE', () => {})
@@ -144,6 +145,14 @@ app.whenReady().then(async () => {
   createWindow()
   logger.info('App', 'Main window created')
 
+  // 会话目录只活在内存里：上次进程被强杀/崩溃，那些 transcribe-* 目录（媒体 + 浏览器 cookies）没人删。
+  // 后台扫一遍清掉一天前的，不阻塞开屏；新会话的目录 mtime 是当下，不会被自己扫掉。
+  sweepStaleMediaTempDirs()
+    .then((n) => {
+      if (n > 0) logger.info('App', 'Swept stale media temp dirs', { removed: n })
+    })
+    .catch((e) => logger.warn('App', 'Media temp sweep failed', e?.message))
+
   // 异步初始化前置服务（词典 + ASR），完成后标记就绪
   logger.info('App', 'Initializing services...')
   const asrTask = startASRService()
@@ -178,6 +187,9 @@ app.on('before-quit', async (e) => {
   isQuitting = true
   logger.info('App', 'Application quitting...')
   e.preventDefault()
+  // 链接转写的那份临时媒体是播放器一路在用的，只能等到这里才没人用；被强杀时走不到这步，
+  // 由下次启动的 sweepStaleMediaTempDirs 兜底
+  await releaseAllMediaSessions().catch(() => {})
   await stopASRService()
   logger.info('App', 'ASR service stopped')
   app.exit()

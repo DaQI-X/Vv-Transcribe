@@ -464,6 +464,167 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 /* ============================================
+ * 链接解析结果卡：二选一（转写音频 / 下载视频）+ 下载进度
+ * ============================================ */
+.media-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 480px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-page);
+}
+
+.media-card__title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: center;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.media-card__meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.media-card__choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.media-card__video-row {
+  display: flex;
+  gap: 8px;
+}
+
+/* 清晰度直接复用 settings-form-select 的外观，这里只让它占满剩余宽度 */
+.media-card__quality {
+  flex: 1;
+  min-width: 0;
+}
+
+.media-choice-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 16px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+
+.media-choice-btn:hover {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+.media-choice-btn--primary {
+  border-color: var(--brand-blue);
+  background: var(--brand-blue);
+  color: #fff;
+}
+
+.media-choice-btn--primary:hover {
+  background: var(--brand-blue-hover);
+  border-color: var(--brand-blue-hover);
+  color: #fff;
+}
+
+.media-choice-btn__size {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.media-card__note,
+.media-card__hint {
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.media-card__reset {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.media-card__reset:hover:not(:disabled) {
+  color: var(--brand-blue);
+}
+
+.media-card__reset:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.media-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 480px;
+}
+
+.media-progress__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.media-progress__bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-color);
+  overflow: hidden;
+}
+
+.media-progress__fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--brand-blue);
+  transition: width 0.3s ease;
+}
+
+.media-progress__detail {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ============================================
  * 上传/处理/失败状态卡片
  * ============================================ */
 .status-container {
@@ -1215,8 +1376,10 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .transcript-editor__empty {
   display: flex;
   height: 100%;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   border-radius: 16px;
   border: 1px dashed var(--border-color);
   background: var(--bg-card);
@@ -2675,6 +2838,21 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 :root[data-theme="dark"] .url-submit-btn:hover {
   background: var(--brand-blue-hover);
+}
+
+/* 深色下卡面反相：外层 url-input-zone 是 bg-page，内层就回到 bg-card 才分得出层次 */
+:root[data-theme="dark"] .media-card {
+  background: var(--bg-card);
+}
+
+:root[data-theme="dark"] .media-choice-btn {
+  background: var(--bg-page);
+}
+
+:root[data-theme="dark"] .media-choice-btn--primary,
+:root[data-theme="dark"] .media-choice-btn--primary:hover {
+  background: var(--brand-blue);
+  color: #fff;
 }
 
 :root[data-theme="dark"] .feature_highlights {

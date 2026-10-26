@@ -5,6 +5,18 @@
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
+/** 与 index.d.ts 的 MediaProgress 对齐：主进程逐行解析 yt-dlp 的进度后推回渲染层 */
+interface MediaProgressEvent {
+  sessionId: string
+  kind: 'audio' | 'video'
+  stage: 'downloading' | 'merging' | 'converting'
+  streamIndex: number
+  streamCount: number
+  percent: number | null
+  speed: string | null
+  eta: string | null
+}
+
 const api = {
   getDroppedFilePath: (file: File) => webUtils.getPathForFile(file),
   selectFile: () => ipcRenderer.invoke('dialog:selectFile'),
@@ -12,7 +24,21 @@ const api = {
   extractAudio: (filePath: string) => ipcRenderer.invoke('file:extractAudio', filePath),
   cleanupTemp: (tempDir: string) => ipcRenderer.invoke('file:cleanupTemp', tempDir),
   probeAudio: (filePath: string) => ipcRenderer.invoke('file:probeAudio', filePath),
-  downloadFromUrl: (url: string) => ipcRenderer.invoke('file:downloadFromUrl', url),
+  resolveMedia: (url: string) => ipcRenderer.invoke('file:resolveMedia', url),
+  downloadMedia: (sessionId: string, kind: 'audio' | 'video', height?: number | null) =>
+    ipcRenderer.invoke('file:downloadMedia', { sessionId, kind, height }),
+  cancelMediaDownload: (sessionId: string) =>
+    ipcRenderer.invoke('file:cancelMediaDownload', sessionId),
+  releaseMediaSession: (sessionId: string) => ipcRenderer.invoke('file:releaseMediaSession', sessionId),
+  saveMediaAs: (sessionId: string) => ipcRenderer.invoke('file:saveMediaAs', sessionId),
+  // 下载要跑几分钟，invoke 只能给最后的结果；进度必须像转写那样推回来，界面才不会像卡死
+  onMediaProgress: (callback: (data: MediaProgressEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, data: MediaProgressEvent) => callback(data)
+    ipcRenderer.on('file:mediaProgress', listener)
+    return () => {
+      ipcRenderer.removeListener('file:mediaProgress', listener)
+    }
+  },
   selectTextFile: () => ipcRenderer.invoke('dialog:selectTextFile'),
   readTextFile: (filePath: string) => ipcRenderer.invoke('file:readTextFile', filePath),
   saveTextFile: (suggestedName: string, content: string) =>
