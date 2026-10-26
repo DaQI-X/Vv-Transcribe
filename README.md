@@ -33,7 +33,7 @@
 | 音频处理 | FFmpeg（fluent-ffmpeg + @ffmpeg-installer / @ffprobe-installer） |
 | ASR 转写 | Python faster-whisper（本地，FastAPI + NDJSON 流式）/ OpenAI 兼容 Whisper 接口（云端） |
 | 校对 | 本地规则校对（误听表 + chinese-xinhua 词库 + 参考稿 diff）/ OpenAI 兼容大模型接口 |
-| 配音（TTS） | OpenAI 兼容音频接口 `POST {apiBase}/v1/audio/speech`（一次一句）+ FFmpeg 铺轴拼接（`adelay` 定位、分组 `amix normalize=0` 混成一条，`libmp3lame` 192k 输出） |
+| 配音（TTS） | OpenAI 兼容音频接口 `POST {apiBase}/v1/audio/speech`（一次一句）+ FFmpeg 铺轴拼接（每段先解成 44.1k 单声道 PCM 量准长度，再按时轴垫静音 `concat` 串成一条，`libmp3lame` 192k 输出） |
 | 文本比对 | diff 库 + 自写段落对齐（`segmentDiff` / `textAlignment`） |
 | 参考稿解析 | mammoth（.docx）、pdf-parse（.pdf）、自写 SRT/Markdown 解析 |
 | 链接转写 | yt-dlp（随包内置，可在应用内更新）+ puppeteer-core 取站点 cookies |
@@ -70,7 +70,7 @@ basic_one/
 │   │       ├── dictionaryService.ts   #   中文词典加载 / 查询 / GitHub 更新
 │   │       ├── ai/                    #   AI 校对：types（Provider 接口）+ openaiCompatible
 │   │       │                          #     中文走误听表 + 词典 prompt，其他语言走通用 prompt
-│   │       ├── ttsService.ts          #   配音：逐段合成落盘 + ffprobe 读真实时长 + 铺轴（溢出顺延）+ 一次 ffmpeg 拼成整轨
+│   │       ├── ttsService.ts          #   配音：逐段合成落盘 + 解码量准时长 + 铺轴（溢出顺延）+ 静音垫 concat 拼成整轨（命令行超预算时分块）
 │   │       ├── referenceParser.ts     #   参考稿解析：txt / md / srt / docx / pdf
 │   │       ├── urlDownloader.ts       #   链接取内容：`-J` 解析元信息 + 会话表 + 音/视频两路 args + 进度与看门狗 + 另存为 + 临时目录回收
 │   │       ├── ytDlpUpdate.ts         #   链接解析组件的应用内更新：读清单→校验指纹→落盘→重探版本→失败退回
@@ -222,7 +222,7 @@ basic_one/
 配音（一次调用只合成一句，整条稿子串行跑完再拼成一条轨；字幕与时间轴一个字都不改）：
   TranscriptEditor 的「配音」按钮 → TtsDialog 三段走
     确认：段数 / 字数 + 在用的模型与音色 + 「试听一句」（默认取第一段，可改文本）
-      → IPC tts:preview → POST {apiBase}/v1/audio/speech（response_format=mp3）→ 落盘 → ffprobe 读真实时长
+      → IPC tts:preview → POST {apiBase}/v1/audio/speech（response_format=mp3）→ 落盘 → ffprobe 读时长（只给这一句的显示用）
       接口地址与 Key 沿用校对那一套，模型与音色是另两个独立值：音频接口吃的是配音模型 id，
         拿 chat 模型去调必然被拒，所以开工前置校验单独查这两项，缺任何一项都不发起整批调用
     进行中：IPC tts:synthesize 一次带走全部段落（时间轴只有渲染层这一份，主进程按 jobId 记账）
@@ -231,10 +231,15 @@ basic_one/
       → 空段落跳过不调接口；单段 60 秒超时；连续 3 段失败熔断停下整批（原因与「用户点了取消」分开报）
       → 「取消」只停后面的段，正在飞的那段等它回来，已经合成的照样拼成一条轨
     铺轴与拼接：每段落点 = max(该段字幕起点, 上一段配音终点)，配音比字幕槽位长就顺延、整条往后推
-      （不截断也不重叠混音；某段读不到时长就退回按字幕槽位估长，并在结果里标明有几段是估的）
-      → 一次 ffmpeg：`adelay` 定位 → 每 64 路一组 `amix normalize=0`（多于 64 段再汇总一次，
-        免得 filtergraph 顶到 Windows 的命令行长度上限；graph 写进文件用 `-filter_complex_script` 传）
-      → `libmp3lame -b:a 192k` 出一条 `voice-track.mp3`
+      （不截断也不重叠混音；某段解出来一个采样都没有才退回按字幕槽位估长，并在结果里标明有几段是估的）
+      → 每段先单独解成 44.1k 单声道 PCM：时长用自己的样本数量，不用 ffprobe 报的 mp3 容器长度
+        （那是按码率估的、含 LAME 前后填充——实测 0.5 秒的片段报成 0.549 秒，串联拼接会一段一段把它累起来）
+      → 再按时轴拼：段前垫 `anullsrc` 静音、一路一路 `concat` 串起来。不用 `adelay`+`amix`：
+        包进安装包的 win32-x64 / darwin-x64 那两个 ffmpeg 是 2018-12 的构建，`adelay` 没有 all 选项、
+        `amix` 没有 normalize，那张图在这两个平台上直接退码 1（mac arm64 的 4.4 能跑，所以只在 Mac 上试过就等于没试）
+      → 一次 ffmpeg 只背「每段一个 `-i 路径`」，按 24000 字符切块（Windows CreateProcess 上限 32767）；
+        多块时先各落一个无损 WAV、最后一轮只把块串起来编码。graph 写进文件用 `-filter_complex_script` 传
+      → `libmp3lame -b:a 192k` 出一条 `voice-track.mp3`（整条只在最后重编码一次，不 mp3→mp3 来回掉质量）
     结果：配音轨时长与体积、原时间轴到几点、这条比它长多少、几段被顺延、成功/失败/跳过清单
       → 「保存配音轨」IPC tts:saveTrack：系统「另存为」+ copyFile（另存出去的副本不跟着临时目录删）
       → 关弹窗 IPC tts:releaseBatch 当场删掉这批临时目录；没另存出去的产物就到此为止
@@ -275,9 +280,9 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `ai:analyzeReference` | 渲染 → 主 | 让模型通读参考稿找自身问题 |
 | `proofread:local` | 渲染 → 主 | 本地校对：误听表 + 词库 + 参考稿 diff，全程不读 API Key |
 | `proofread:explain` | 渲染 → 主 | 差异的规则解释（同上，不需要 Key） |
-| `tts:preview` | 渲染 → 主 | 配音试听一句：`POST {apiBase}/v1/audio/speech` 拿 mp3 落进临时目录，回 `{ clip: { filePath, bytes, duration }, error }`；`duration` 是 ffprobe 读出来的真实时长，读不到也不谎报。整批之前先花这一次钱，端点/模型/音色任何一样不对都在这一步暴露 |
+| `tts:preview` | 渲染 → 主 | 配音试听一句：`POST {apiBase}/v1/audio/speech` 拿 mp3 落进临时目录，回 `{ clip: { filePath, bytes, duration }, error }`；`duration` 是 ffprobe 读出来的时长（mp3 的容器估算，只够给这一句显示用，铺轴不认它），读不到也不谎报。整批之前先花这一次钱，端点/模型/音色任何一样不对都在这一步暴露 |
 | `tts:release` | 渲染 → 主 | 删掉刚才那句试听的产物（试听框换内容、关弹窗时调用） |
-| `tts:synthesize` | 渲染 → 主 | 整条稿子配音：段落（含时间轴）由渲染层一次传来，主进程不存第二份时间轴、也不用界面报回来的路径。逐段**串行**（并发只会换来 429），空段落直接跳过不调接口，单段 60 秒超时，连续 3 段失败熔断停下整批；跑完用一次 ffmpeg 拼成整轨。回 `{ jobId, track, clipCount, failures, skipped, canceled, abortedReason, error }`——`abortedReason` 只写熔断原因，与「用户自己点了取消」分开报；拼接失败时前面的账目照样带回去，不会抹成「一段都没成」 |
+| `tts:synthesize` | 渲染 → 主 | 整条稿子配音：段落（含时间轴）由渲染层一次传来，主进程不存第二份时间轴、也不用界面报回来的路径。逐段**串行**（并发只会换来 429），空段落直接跳过不调接口，单段 60 秒超时，连续 3 段失败熔断停下整批；跑完按时间轴铺成整轨（每段先解成 PCM 量准长度，再垫静音 `concat`，命令行超字符预算时分块）。回 `{ jobId, track, clipCount, failures, skipped, canceled, abortedReason, error }`——`abortedReason` 只写熔断原因，与「用户自己点了取消」分开报；拼接失败时前面的账目照样带回去，不会抹成「一段都没成」 |
 | `tts:progress` | 主 → 渲染 | 推 `{ jobId, stage, index, total, segmentId, note }`，`stage` 五态：`synthesizing` / `skipped` / `failed` / `assembling` / `done`。界面写的是真实段号（「已合成 7 / 12 段」），不做假百分比 |
 | `tts:cancel` | 渲染 → 主 | 置取消标志：只停**后面**的段，正在飞的那段等它回来；已经合成的照样拼成一条轨，不白跑 |
 | `tts:saveTrack` | 渲染 → 主 | 弹系统「另存为」（默认名 `voice-track.mp3`、MP3 过滤），`copyFile` 到用户选的位置，回 `{ success, canceled, name, error }`。取消不算失败也不释放这批——界面还留着结果态让人再点一次 |

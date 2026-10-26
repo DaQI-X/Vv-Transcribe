@@ -393,7 +393,7 @@ export function TtsDialog({ onClose }: { onClose: () => void }) {
                     {result.track.estimatedCount > 0 && (
                       <li className="voice-result__stat--warn">
                         <AlertTriangle size={13} />
-                        {result.track.estimatedCount} 段没读到返回时长，落点按字幕槽位估算
+                        {result.track.estimatedCount} 段解出来是空音频（一个采样都没有），落点按字幕槽位估算
                       </li>
                     )}
                     <li>成功 {result.clipCount} 段{result.skipped.length > 0 && ` · 空段落跳过 ${result.skipped.length} 段`}</li>

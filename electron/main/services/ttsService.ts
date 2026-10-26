@@ -2,10 +2,11 @@
  * 配音（TTS）服务
  *
  * 只做一件事：把一段文本交给用户在设置里配好的 OpenAI 兼容音频接口
- * （`POST {apiBase}/v1/audio/speech`），拿回音频落盘，并顺手用 ffprobe 读出它的真实时长。
+ * （`POST {apiBase}/v1/audio/speech`），拿回音频落盘，并顺手用 ffprobe 读出它的时长。
  *
- * 时长是这里必须的返回值，不是顺便：接口不返回时间信息，而「这段配音会不会压到下一条字幕的
- * 起点」只能靠实测时长判断，批量合成前必须拿得到。
+ * 这个时长只给「试听完那句有多长」用；铺轴不认它。接口不返回时间信息，而 ffprobe 对 mp3 报的是
+ * 按码率估的容器长度（含 LAME 前后填充），实测 0.5 秒的片段会报成 0.549 秒——拼整轨时改用自己的
+ * PCM 解码样本数，见 toMeasuredPcm。
  *
  * 三条踩过坑的口径写在这里：
  * - 接口地址与 Key 跟校对共用，模型和音色**不共用**（chat 模型调音频接口会被直接拒）。
@@ -16,7 +17,7 @@
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
-import { mkdir, rm, writeFile, stat } from 'node:fs/promises'
+import { mkdir, rm, writeFile, stat, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { probeFile, resolveFfmpegBinary } from './audioProcessor'
@@ -356,16 +357,21 @@ export interface VoiceTrack {
 }
 
 /**
- * 一次 amix 最多挂多少路输入。
- * 几百段字幕全塞进一个 amix 在语法上没问题（上限 32767），但 filtergraph 字符串会长到
- * 撞 Windows 的 32KB 命令行上限，所以图写文件（-filter_complex_script）+ 分组混音：
- * 分组之间不重叠，normalize=0 是「按样本相加」，加 silence 等于没加，音量不会分层衰减。
+ * 拼一次 ffmpeg 允许挂多少路输入，按命令行的字符数算，不按段数。
+ * 真正的上限是操作系统的命令行长度（Windows CreateProcess 数的是 32767 个 UTF-16 字符，
+ * macOS 是 1MB 的 ARG_MAX），段数估不准它——路径长短都算在里面。24000 相对 32767 留了约四分之一，
+ * 给固定参数、输出路径和转义（300 段实测最长一条命令行 24398 字符）。
  */
-const MIX_GROUP_SIZE = 64
+const FFMPEG_ARG_BUDGET_CHARS = 24_000
+
+/** 间隙小于这么多样本（约 0.2 ms）就不垫静音了：为几微秒生成一路静音不值得 */
+const MIN_SILENCE_SAMPLES = 10
 
 interface Placement {
   clip: TTSClip
   placedAt: number
+  /** 这一段在时间轴上占多长（解码出来是 0 个采样时按字幕槽位估） */
+  length: number
   pushed: boolean
   estimated: boolean
 }
@@ -382,10 +388,56 @@ function planPlacements(clips: TTSClip[]): { placements: Placement[]; totalDurat
     const estimated = !(clip.duration > 0)
     const length = estimated ? Math.max(0, clip.endTime - clip.startTime) : clip.duration
     const placedAt = Math.max(clip.startTime, cursor)
-    placements.push({ clip, placedAt, pushed: placedAt - clip.startTime > 0.01, estimated })
+    placements.push({ clip, placedAt, length, pushed: placedAt - clip.startTime > 0.01, estimated })
     cursor = placedAt + length
   }
   return { placements, totalDuration: cursor }
+}
+
+/** 铺轴的最小单位：一路配音 + 它前面该有的静音垫（垫按样本数记，秒只是换算出来的显示值） */
+interface TimelineUnit {
+  filePath: string
+  /** 这一路 `-i 路径` 在命令行上占的字符数 */
+  argChars: number
+  silenceSamples: number
+}
+
+/**
+ * 把排布结果摊成「静音、配音、静音、配音……」的串联序列。
+ * 排布本身保证不重叠，所以串联就是精确语义——不能用 amix：包进安装包的
+ * win32-x64 / darwin-x64 那两个 ffmpeg 是 2018-12 的构建，`adelay` 还没有 all 选项、
+ * `amix` 还没有 normalize（关掉之前是硬按 1/N 衰减），那张图在两个平台上直接退码 1。
+ */
+function buildTimelineUnits(placements: Placement[]): TimelineUnit[] {
+  const units: TimelineUnit[] = []
+  let consumed = 0
+  for (const placement of placements) {
+    units.push({
+      filePath: placement.clip.filePath,
+      argChars: placement.clip.filePath.length + 4,
+      silenceSamples: Math.max(0, Math.round((placement.placedAt - consumed) * PCM_SAMPLE_RATE)),
+    })
+    consumed = placement.placedAt + placement.length
+  }
+  return units
+}
+
+/** 按命令行字符预算切块；静音垫跟着它后面那一路走，不会被切到上一块末尾 */
+function packChunks(units: TimelineUnit[]): TimelineUnit[][] {
+  const chunks: TimelineUnit[][] = []
+  let current: TimelineUnit[] = []
+  let chars = 0
+  for (const unit of units) {
+    if (current.length > 0 && chars + unit.argChars > FFMPEG_ARG_BUDGET_CHARS) {
+      chunks.push(current)
+      current = []
+      chars = 0
+    }
+    current.push(unit)
+    chars += unit.argChars
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
 }
 
 /** 直接 spawn：几百路输入 + 复杂图，fluent-ffmpeg 的链式写法接不住这个形状 */
@@ -408,65 +460,123 @@ function runFfmpeg(args: string[]): Promise<void> {
   })
 }
 
+/** 拼轨统一的音频参数：44.1k 单声道 s16，concat 只认同一种参数 */
+const PCM_SAMPLE_RATE = 44100
+const PCM_CHAIN = `aformat=sample_rates=${PCM_SAMPLE_RATE}:channel_layouts=mono:sample_fmts=s16`
+
+/**
+ * 渲染一块的 filtergraph。静音走图内的 anullsrc（不占命令行输入，命令行里就只剩每段一个 `-i 路径`），
+ * 配音直接取 `[i:a]`（进来了就已经是统一参数的 PCM）。只有一路时不用 concat，anull 直送到 [out]。
+ */
+function renderChunkGraph(units: TimelineUnit[], outLabel: string): string {
+  const lines: string[] = []
+  const labels: string[] = []
+  units.forEach((unit, i) => {
+    if (unit.silenceSamples >= MIN_SILENCE_SAMPLES) {
+      const label = `[s${labels.length}]`
+      // 按样本数换算成秒（6 位小数），误差 ≤1 个样本；直接写秒会把毫秒级的抖动累到整条上
+      lines.push(
+        `anullsrc=r=${PCM_SAMPLE_RATE}:cl=mono,atrim=end=${(unit.silenceSamples / PCM_SAMPLE_RATE).toFixed(6)},${PCM_CHAIN}${label}`
+      )
+      labels.push(label)
+    }
+    const label = `[c${i}]`
+    lines.push(`[${i}:a]${PCM_CHAIN}${label}`)
+    labels.push(label)
+  })
+  const joined = labels.join('')
+  lines.push(
+    labels.length === 1 ? `${joined}anull${outLabel}` : `${joined}concat=n=${labels.length}:v=0:a=1${outLabel}`
+  )
+  return lines.join(';\n')
+}
+
+/** 跑一块：几百路的图写进文件用 -filter_complex_script 交给它，命令行只背输入清单 */
+async function runFfmpegChunk(
+  units: TimelineUnit[],
+  tempDir: string,
+  graphName: string,
+  outputPath: string,
+  encodeArgs: string[]
+): Promise<void> {
+  const args: string[] = []
+  for (const unit of units) args.push('-i', unit.filePath)
+  const graphPath = join(tempDir, graphName)
+  await writeFile(graphPath, renderChunkGraph(units, '[out]'))
+  await runFfmpeg([...args, '-filter_complex_script', graphPath, '-map', '[out]', ...encodeArgs, outputPath])
+}
+
+/** 从 WAV 里读 data 块的字节数，换算成精确秒数——不经过 ffprobe 的容器估算 */
+function pcmSeconds(wav: Buffer): number {
+  let offset = 12 // 跳过 RIFF/WAVE 与第一个 fmt 块头
+  while (offset + 8 <= wav.length) {
+    const id = wav.toString('latin1', offset, offset + 4)
+    const size = wav.readUInt32LE(offset + 4)
+    if (id === 'data') return Math.floor(size / 2) / PCM_SAMPLE_RATE
+    offset += 8 + size + (size % 2)
+  }
+  return 0
+}
+
+/**
+ * 一段配音解成统一参数的 PCM，并用解出来的样本数当它的时长。
+ * 为什么不能用 ffprobe 报的 mp3 时长：那是按码率估的容器长度，含 LAME 的前后填充，解码时会被丢掉
+ * ——实测 0.5 秒的片段报成 0.549 秒。每段的落点都是从上一段的长度推出来的，这几十毫秒会一段一段
+ * 累起来（300 段就是十几秒），所以铺轴用的时长必须自己数解码出来的采样。
+ */
+async function toMeasuredPcm(clip: TTSClip, index: number, tempDir: string): Promise<TTSClip> {
+  const wavPath = join(tempDir, `voice-pcm-${String(index).padStart(4, '0')}.wav`)
+  await runFfmpeg([
+    '-i',
+    clip.filePath,
+    '-vn',
+    '-ac',
+    '1',
+    '-ar',
+    String(PCM_SAMPLE_RATE),
+    '-c:a',
+    'pcm_s16le',
+    wavPath,
+  ])
+  return { ...clip, filePath: wavPath, duration: pcmSeconds(await readFile(wavPath)) }
+}
+
 /**
  * 把逐段成品拼成一条对齐时间轴的配音轨。
- * 输出 mp3：源片段本来就是 mp3，重编码一次统一采样率即可，剪辑软件都吃。
+ * 每段先归一到 44.1k 单声道 PCM，再按时轴垫静音串起来，整条只在最后重编码一次 mp3
+ * （剪辑软件都吃，也不会 mp3 → mp3 来回掉质量）。
+ * 超出命令行字符预算时先分块落无损 WAV、最后只把块串起来——多一道无损封装，不多一次有损转码。
  */
 async function assembleVoiceTrack(clips: TTSClip[], tempDir: string): Promise<VoiceTrack> {
   if (clips.length === 0) throw new Error('一段都没合成成功，没有可以拼起来的音频')
 
-  const { placements, totalDuration } = planPlacements(clips)
-  const graph: string[] = []
-  const args: string[] = []
-
-  placements.forEach((placement, i) => {
-    args.push('-i', placement.clip.filePath)
-    const ms = Math.round(placement.placedAt * 1000)
-    graph.push(
-      `[${i}:a]aformat=sample_rates=44100:channel_layouts=mono,adelay=delays=${ms}:all=1[a${i}]`
-    )
-  })
-
-  // 先按 MIX_GROUP_SIZE 切组，组的输出标签取决于「一共几组」：
-  // 只有一组时它本身就是 [out]，多组时各组先落成 [mG]、末尾再汇总一次。
-  // 原来写成「单组也标 [m0]、只有多组才补 [out]」，几段一小批时 [out] 根本不存在，ffmpeg 直接报错。
-  const groups: number[][] = []
-  for (let start = 0; start < placements.length; start += MIX_GROUP_SIZE) {
-    groups.push(Array.from({ length: Math.min(MIX_GROUP_SIZE, placements.length - start) }, (_, offset) => start + offset))
+  const measured: TTSClip[] = []
+  for (let index = 0; index < clips.length; index++) {
+    measured.push(await toMeasuredPcm(clips[index], index, tempDir))
   }
 
-  const mixGroup = (labels: string, outLabel: string, inputs: number) => {
-    graph.push(
-      `${labels}${inputs === 1 ? 'anull' : `amix=inputs=${inputs}:duration=longest:dropout_transition=0:normalize=0`}${outLabel}`
-    )
-  }
-
-  const groupOutLabels: string[] = []
-  groups.forEach((indices, g) => {
-    const outLabel = groups.length === 1 ? '[out]' : `[m${g}]`
-    mixGroup(indices.map((i) => `[a${i}]`).join(''), outLabel, indices.length)
-    groupOutLabels.push(outLabel)
-  })
-  if (groupOutLabels.length > 1) {
-    mixGroup(groupOutLabels.join(''), '[out]', groupOutLabels.length)
-  }
-
-  const graphPath = join(tempDir, 'filtergraph.txt')
-  await writeFile(graphPath, graph.join(';\n'))
+  const { placements, totalDuration } = planPlacements(measured)
+  const chunks = packChunks(buildTimelineUnits(placements))
   const filePath = join(tempDir, 'voice-track.mp3')
+  const mp3Args = ['-c:a', 'libmp3lame', '-b:a', '192k']
 
-  await runFfmpeg([
-    ...args,
-    '-filter_complex_script',
-    graphPath,
-    '-map',
-    '[out]',
-    '-c:a',
-    'libmp3lame',
-    '-b:a',
-    '192k',
-    filePath,
-  ])
+  if (chunks.length === 1) {
+    await runFfmpegChunk(chunks[0], tempDir, 'filtergraph.txt', filePath, mp3Args)
+  } else {
+    const chunkWavs: string[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const wavPath = join(tempDir, `voice-chunk-${String(i).padStart(3, '0')}.wav`)
+      await runFfmpegChunk(chunks[i], tempDir, `filtergraph-${i}.txt`, wavPath, ['-c:a', 'pcm_s16le'])
+      chunkWavs.push(wavPath)
+    }
+    await runFfmpegChunk(
+      chunkWavs.map((wav) => ({ filePath: wav, argChars: wav.length + 4, silenceSamples: 0 })),
+      tempDir,
+      'filtergraph-final.txt',
+      filePath,
+      mp3Args
+    )
+  }
 
   const { duration } = await probeFile(filePath)
   const info = await stat(filePath)
@@ -476,6 +586,7 @@ async function assembleVoiceTrack(clips: TTSClip[], tempDir: string): Promise<Vo
 
   logger.info('TTS', 'Voice track assembled', {
     segments: placements.length,
+    chunks: chunks.length,
     pushedCount,
     estimatedCount,
     trackDuration: Number(duration.toFixed(2)),
@@ -501,7 +612,7 @@ async function assembleVoiceTrack(clips: TTSClip[], tempDir: string): Promise<Vo
 
 /**
  * 拼轨并登记。跟 synthesizeSegments 分成两个调用点是因为进度要能单独报「开始拼接」——
- * 几百段的 amix 要跑一阵，界面那时候不能还写着「第 137/137 段」。
+ * 几百段的图要跑一阵，界面那时候不能还写着「第 137/137 段」。
  */
 export async function composeVoiceTrack(jobId: string, clips: TTSClip[]): Promise<VoiceTrack> {
   const job = batchJobs.get(jobId)
