@@ -179,13 +179,14 @@ jobs:
         with:
           path: artifacts
 
-      # tag 注解正文（首行标题之后的部分）就是给人读的发布说明。
+      # tag 注解全文就是给人读的发布说明。这里必须用 %(contents)，不能用 %(contents:body)：
+      # 后者会跳过注解首行，而首行是那句版本摘要（v1.0.5 的 Release 就是这么丢了导语的）。
       # 轻量标签没有注解对象，此时导出空文件，发布说明只剩自动生成的 changelog。
       - name: Export tag annotation as release notes
         run: |
           git fetch --force --no-tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" || true
           if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}" 2>/dev/null)" = tag ]; then
-            git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
+            git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' > release-notes.md
           else
             : > release-notes.md
             echo "::warning::取不到 ${GITHUB_REF_NAME} 的 tag 注解（轻量标签或拉取失败），发布说明只用自动生成的 changelog"
