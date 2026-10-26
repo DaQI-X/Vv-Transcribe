@@ -44,13 +44,36 @@ function parseArgs() {
   return args
 }
 
-async function get(url, headers) {
+/**
+ * 取上游。三条规矩都是 CI 上真红过一次换来的：
+ * - api.github.com 不带 token 是「每 IP 每小时 60 次」，Actions 的 runner 共用出口 IP，
+ *   被别的仓库用完就会 403 —— 这一步就红过一次。所以有 GITHUB_TOKEN 就带上（按仓库计数，5000/时）。
+ * - 5xx / 429 是瞬时抖动，重试两次；重试也挂才红，否则一次网络打个嗝就挡住民包版。
+ * - 失败必须把响应体截一段打出来：只有状态码的话，日志里没有 admin 权限的人（和下一次的我）查不到原因。
+ */
+async function get(url, headers, attempt = 1) {
   const res = await fetch(url, {
     redirect: 'follow',
     signal: AbortSignal.timeout(60_000),
-    headers: { 'User-Agent': 'vv-transcribe-manifest-check', ...headers },
+    headers: {
+      'User-Agent': 'vv-transcribe-manifest-check',
+      ...(url.startsWith('https://api.github.com/') && process.env.GITHUB_TOKEN
+        ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` }
+        : {}),
+      ...headers,
+    },
+  }).catch((err) => {
+    fail(`请求 ${url} 时连接失败：${err instanceof Error ? err.message : String(err)}`)
   })
-  if (!res.ok) fail(`请求失败 ${res.status} ${res.statusText}: ${url}`)
+  if (!res.ok) {
+    const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240)
+    if (attempt < 3 && (res.status === 429 || res.status >= 500)) {
+      console.warn(`[yt-dlp-manifest] ${res.status} ${url} —— 第 ${attempt} 次重试`)
+      await new Promise((r) => setTimeout(r, attempt * 3000))
+      return get(url, headers, attempt + 1)
+    }
+    fail(`请求失败 ${res.status} ${res.statusText}: ${url}\n  响应体: ${body || '(空)'}`)
+  }
   return res
 }
 

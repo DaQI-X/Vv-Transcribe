@@ -88,6 +88,10 @@ jobs:
       # 不用等「Fetch bundled yt-dlp」——那时三个平台都已装完 Python 与依赖了。
       # 走官方域名而不是 YTDLP_MIRROR：这一步的职责就是核对官方产物，镜像同时给资产和 sums 时自证不了清白。
       - name: Verify yt-dlp manifest
+        # 带 jobs token 是为了躲开 api.github.com 的「每 IP 每小时 60 次」：
+        # runner 出口 IP 是共享的，2026-10-26 的 macOS x64 就是被这个 403 红掉的（另两平台同一步绿）。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/yt-dlp-manifest.mjs
 
       - name: Install Rosetta (macOS x64 only)
