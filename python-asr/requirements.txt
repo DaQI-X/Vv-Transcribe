@@ -5,3 +5,25 @@ uvicorn==0.32.0
 faster-whisper==1.2.1
 python-multipart==0.0.12
 pyinstaller==6.22.3
+
+# 传递依赖里「会被 PyInstaller 打进 ASR 二进制」的那批也钉上：带原生代码的 wheel + HTTP 层 starlette。
+# 纯 Python 的（click / anyio / tqdm / filelock / idna …）不钉 —— 它们同样能被投毒，但逐条钉的话每次升级都要
+# 重算三平台 wheel 矩阵，摩擦抵不过收益。版本号不是随手挑的：2026-10-26 用 pip 自己的解析器按 CI 的 Python 3.12
+# 逐平台 dry-run 取的「今天本来就会装到的那个」，所以钉完不改变任何平台实际装到的东西，只是把它冻住。
+# 重算命令（三平台各跑一次；注意 pip 的 marker 按「当前这台机器」求值，所以要验 x86_64 那支得先去掉 marker、
+# 再换一整套 --platform macosx_*_x86_64 / --platform macosx_*_universal2）：
+#   pip install --dry-run --ignore-installed --only-binary=:all: --python-version 312 --implementation cp \
+#     --abi cp312 --abi abi3 --abi none [--platform win_amd64 --platform any] -r python-asr/requirements.txt
+# 只有 onnxruntime 必须按平台分叉：1.24 起不再发 macOS Intel 的 wheel，所以 x86_64 mac 只能停在 1.23.2。
+# 若将来加 Linux 构建，这两行 marker 都不会命中，onnxruntime 会退回「装当时最新版」，要另补一行。
+ctranslate2==4.8.4
+tokenizers==0.23.3
+numpy==2.5.4
+av==19.0.2
+pydantic-core==2.50.1
+hf-xet==1.7.0
+PyYAML==6.0.3
+huggingface-hub==2.3.0
+starlette==0.38.6
+onnxruntime==1.31.0; sys_platform == "win32" or (sys_platform == "darwin" and platform_machine == "arm64")
+onnxruntime==1.23.2; sys_platform == "darwin" and platform_machine == "x86_64"
