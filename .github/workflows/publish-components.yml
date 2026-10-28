@@ -2,10 +2,14 @@ name: Publish components
 
 # 本地配音组件的发布流程（#234）：把 CI 构建出来的引擎二进制传到某个 Release 上，并产出 components-manifest.json。
 #
-# 为什么是 workflow_dispatch 而不是自动跑：
+# 为什么是人工指名而不是自动跑（两种触发方式都遵守这条）：
 # - 这些资产是「应用内按需下载」的信任来源，传错一次就会被用户机器长期缓存，版本号还得跟着清单走；
 # - 引擎二进制只能来自某一次具体的构建（PyInstaller 不可交叉编译），所以必须人工指名 run-id。
 #   「最近一次成功」那种隐式取法会让清单里的指纹对应到一次没人看过的构建上。
+# - tag 那条触发（components/vX.Y.Z.run.<run-id>）把 run-id 写进 tag 名，指名这件事一点没放松，
+#   只是不再要求点表单的人有 API token：2026-10-28 发 1.0.6 时本机只有 SSH（无 gh、无 PAT），
+#   workflow_dispatch 匿名 curl 触发不了，资产链就断在「Release 有了、引擎传不上去」那一步。
+#   推 tag 与点 Run workflow 是同一种权力（都要仓库写权限），换的只是凭证形态。
 #
 # 为什么上传发生在 CI 而不是本地：
 # - 三平台里 Windows x64 与 macOS x64 本来只有 CI 能产，开发机只有一份本机架构；
@@ -30,6 +34,12 @@ on:
       runId:
         description: 'TTS 引擎二进制来自哪一次 Build 工作流的 run-id'
         required: true
+  push:
+    # 与表单那两个输入完全同义，只是把值写进 tag 名，让只有 SSH 的人也能触发：
+    # components/v1.0.6.run.40712345678 → tag=v1.0.6、run-id=40712345678。
+    # build.yml 的 tags: ['v*'] 匹配的是 tag 名本身，components/... 不在它前面，不会被误触发。
+    tags:
+      - 'components/v*'
 
 permissions:
   contents: read
@@ -45,14 +55,38 @@ jobs:
     # 只有这一步需要写：上传资产与读 Release 都用这个 jobs token
     permissions:
       contents: write
-    # dispatch 的两个输入走 env 而不是直接插进 run 脚本：表单里填什么都是字符串，
-    # 拼进 shell 就是脚本注入的入口。下面那步 Validate 负责把形状卡死，剩下的步骤只引用变量。
+    # 两种触发给的都是自由字符串，直接拼进 run 脚本就是脚本注入的入口。
+    # 所以原始输入只在这一步读（下面 Resolve），归一成 TAG / RUN_ID 两个环境变量，
+    # 再由 Validate 把形状卡死；之后的步骤只引用这两个变量，不再碰 inputs / github.ref。
     env:
-      TAG: ${{ inputs.tag }}
-      RUN_ID: ${{ inputs.runId }}
+      DISPATCH_TAG: ${{ inputs.tag }}
+      DISPATCH_RUN_ID: ${{ inputs.runId }}
+      REF_NAME: ${{ github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve trigger inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_TAG:-}" ]; then
+            tag="$DISPATCH_TAG"
+            run_id="${DISPATCH_RUN_ID:-}"
+            echo "触发来源：workflow_dispatch 表单"
+          else
+            spec="${REF_NAME#components/}"
+            if [[ "$spec" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)\.run\.([0-9]+)$ ]]; then
+              tag="${BASH_REMATCH[1]}"
+              run_id="${BASH_REMATCH[2]}"
+              echo "触发来源：push tag ${REF_NAME}"
+            else
+              echo "::error::tag 名要写成 components/vX.Y.Z.run.<build run-id>（收到 ${REF_NAME}）"
+              exit 1
+            fi
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "RUN_ID=$run_id" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v4
