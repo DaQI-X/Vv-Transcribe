@@ -76,6 +76,12 @@ const PROGRESS_INTERVAL_MS = 200
 
 const NETWORK_HINT = '连不上组件清单（多为国内直连 GitHub 过慢或被拦所致），可开启网络加速后重试'
 
+/**
+ * 404 不该套进 NETWORK_HINT：那是「连不上」，而 404 是服务器把话答清楚了——这一版没有这份清单。
+ * 挂加速再试还是 404，所以这一位还会让引擎那行收起下载按钮（见 manifestAbsent）。
+ */
+const MANIFEST_ABSENT_HINT = '这一版还没有发布组件清单（404），本版没有对应的下载包'
+
 /** binary＝落点是一个文件；archive＝落点是一个目录（解包来的，或逐文件取来的，见下面 upstream） */
 export type ComponentKind = 'binary' | 'archive'
 
@@ -282,6 +288,13 @@ class MissingAssetError extends Error {}
  * 那两位不该被洗成「还没查过」。它不代替点「检查清单」：那份缓存不能反映远端刚发布的新版。
  */
 let lastManifest: unknown | null = null
+
+/**
+ * 两个入口都答 404 时记下「这一版没有清单这份文件」。它和 lastManifest 仍是两位：
+ * 后者说「查到了什么」，这一位说「查过、服务器答的是没有」。靠清单找包的只有引擎那一条，
+ * 钉了 HF 指纹的两份模型不读清单，所以这一位牵连不到它们——VITS 在清单 404 的那一版照样下得动。
+ */
+let manifestAbsent = false
 
 function installedFile(): string {
   return join(componentsDir(), 'installed.json')
@@ -509,6 +522,7 @@ async function fetchManifest(): Promise<unknown> {
     try {
       const raw = await fetchJson(url)
       lastManifest = raw
+      manifestAbsent = false
       return raw
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -518,6 +532,9 @@ async function fetchManifest(): Promise<unknown> {
     }
   }
   const allNetwork = failures.every((message) => NETWORK_ERROR_RE.test(message))
+  // 404 单独一支：重试不会让它变成 200，而界面需要一个能收起下载按钮的凭据（见 manifestAbsent）
+  manifestAbsent = failures.length > 0 && failures.every((message) => /返回\s*404/.test(message))
+  if (manifestAbsent) throw new Error(MANIFEST_ABSENT_HINT)
   const detail = failures.length === 1 ? failures[0] : `两个入口分别：${failures.join(' / ')}`
   if (failures.length === 1 && !allNetwork) throw new Error(detail)
   throw new Error(`${allNetwork ? NETWORK_HINT : '组件清单读取失败'}（${detail}）`)
@@ -535,8 +552,9 @@ async function entryFor(spec: ComponentSpec): Promise<AssetEntry> {
 
 /**
  * 从会话缓存里取本机这条，给不联网的那份状态用。
- * 四种结果要分清楚：代码里钉了上游 → 不依赖清单，直接报版本与体积；
+ * 五种结果要分清楚：代码里钉了上游 → 不依赖清单，直接报版本与体积；
  * 本版压根没有来源（false）→ 按钮按下并说清「本版没有钉下载指纹」；
+ * 两个入口都答 404（false）→ 这一版没有清单这份文件，收起按钮，别再留一条点了必报 404 的路；
  * 没缓存（null）→ 界面提示去点「检查清单」；
  * 缓存里没这台机器的条目（false）→ 按钮按下并说明这个平台没有对应组件；
  * 其余结构不合规矩的清单（我们本来就在 checkComponents 里报过一次）在这里按 null 处理，
@@ -545,6 +563,7 @@ async function entryFor(spec: ComponentSpec): Promise<AssetEntry> {
 function cachedRemote(spec: ComponentSpec): { entry: AssetEntry | null; inManifest: boolean | null } {
   if (spec.upstream) return { entry: upstreamEntry(spec.upstream), inManifest: true }
   if (!spec.manifestKey) return { entry: null, inManifest: false }
+  if (manifestAbsent) return { entry: null, inManifest: false }
   if (lastManifest === null) return { entry: null, inManifest: null }
   try {
     return { entry: entryFrom(lastManifest, spec), inManifest: true }
@@ -558,7 +577,7 @@ function cachedRemote(spec: ComponentSpec): { entry: AssetEntry | null; inManife
 async function buildState(
   spec: ComponentSpec,
   remote: AssetEntry | null,
-  /** 只有「清单读到了、但本机这条没有」才传 false；null＝还没读清单 */
+  /** 清单读到了但本机这条没有 / 本版压根没有来源 / 清单两个入口都 404 → false；null＝还没读过清单 */
   inManifest?: boolean | null
 ): Promise<ComponentState> {
   const target = spec.target()

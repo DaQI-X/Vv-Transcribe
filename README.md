@@ -141,8 +141,10 @@ basic_one/
 ├── .github/workflows/publish-components.yml # 手工触发（workflow_dispatch，填 build 的 runId）：把三个平台的
 │                                      #   sidecar 传成 Release 资产并生成 components-manifest.json。
 │                                      #   ⚠ 这份清单目前还不在 main 上（仓库里没有 components-manifest.json）：
-│                                      #     点「检查组件」会报「检查清单失败：…」，引擎那一行只停在「还没和清单对过」，
-│                                      #     装不了引擎；模型那一档不读清单（指纹钉在代码里），照常能下
+│                                      #     点「检查清单」会报「这一版还没有发布组件清单（404），本版没有对应的下载包」，
+│                                      #     引擎那一行收起下载按钮、同说这句（2026-10-28 #251：404 是服务器答清楚了
+│                                      #     「这份文件不在」，留一颗点了只会 404 的按钮比没有按钮更坏）；
+│                                      #     模型那一档不读清单（指纹钉在代码里），照常能下
 ├── electron-builder.cjs               # 打包配置 + afterPack（ASR 架构、yt-dlp 是否进包）
 ├── vite.config.ts                     # React + Tailwind + vite-plugin-electron
 └── package.json                       # version 与全部脚本
@@ -365,7 +367,7 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `tts:localRestart` | 渲染 → 主 | 「重启本地配音引擎」：先回收躺在 8010 上的上一代再重开，换引擎失败、端口被占、启动失败后的重试都走这条。只认**已保存**的配置，不接受界面传值（设置页「点保存才生效」的口径不能在这儿破例），已保存档位不是本地时直接回 `{ ok: false, error }` 说明「本地配音引擎没在使用中，无需启动」。同一时刻只允许一次启动/重启，连点会被合并 |
 | `tts:localStop` | 渲染 → 主 | 停掉本地引擎且不重开（下一次配音由 `ensure` 懒启动，界面不用管）。存在的理由很具体：「按需组件」那栏要删/换那几个文件，而引擎配音完不会自己退，没这个入口同会话里永远动不了组件。有一批正在逐段合成时**拒绝**停（那会让剩下的段落全失败），回 `{ ok, stopped, error }` |
 | `component:list` | 渲染 → 主 | 「设置 → 关于与更新 → 按需组件」打开就读的磁盘快照：每个组件的在场情况、已装版本、占用体积、要不要下载、下载多大，**不联网** |
-| `component:check` | 渲染 → 主 | 取自家组件清单对版本（`components-manifest.json`，两条读法：raw.githubusercontent 直连 → api.github.com contents）。国内直连可能要十几秒，界面得有「检查中...」；取不到清单不等于「已是最新」，会如实报错 |
+| `component:check` | 渲染 → 主 | 取自家组件清单对版本（`components-manifest.json`，两条读法：raw.githubusercontent 直连 → api.github.com contents）。国内直连可能要十几秒，界面得有「检查中...」；取不到清单不等于「已是最新」，会如实报错。两类失败分开说：连不上（网络/超时）只报「读不到、可开加速重试」，下载按钮留着；两个入口都答 404 就顺手记下「这一版没发布清单」，靠清单找包的那个组件（引擎）下一行改说「这个版本没有发布对应的下载包」并收起按钮，钉了上游指纹的两份模型不受牵连 |
 | `component:install` | 渲染 → 主 | 下载并装上一个组件（id 之外的东西全在主进程决定：从哪读、落到哪、要不要解压），进度经 `component:progress` 推回界面。同一组件重复发起会复用前一份任务并接上同一条进度流，连点不会产生两条下载。落点 `userData/components/` |
 | `component:cancel` / `component:remove` | 渲染 → 主 | 取消正在跑的下载 / 删掉已装组件。这个组件没在下载时 `cancel` 直接回错误，不谎报「已取消」 |
 | `component:busy` | 渲染 → 主 | 回 `{ engineRunning, synthesizing }`：这两种占用分开报——引擎进程还活着有「停止本地配音引擎」可点，一批正在逐段合成则只能等它跑完或去配音页取消，因为在这里停引擎会让剩下的段落全失败 |
