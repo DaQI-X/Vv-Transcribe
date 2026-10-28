@@ -37,6 +37,7 @@ on:
   push:
     # 与表单那两个输入完全同义，只是把值写进 tag 名，让只有 SSH 的人也能触发：
     # components/v1.0.6.run.40712345678 → tag=v1.0.6、run-id=40712345678。
+    # 断了要重跑就在末尾加一段 .r2（同一次构建、同一个 run-id），因为同名 tag 推第二次不会再生效。
     # build.yml 的 tags: ['v*'] 匹配的是 tag 名本身，components/... 不在它前面，不会被误触发。
     tags:
       - 'components/v*'
@@ -76,12 +77,14 @@ jobs:
             echo "触发来源：workflow_dispatch 表单"
           else
             spec="${REF_NAME#components/}"
-            if [[ "$spec" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)\.run\.([0-9]+)$ ]]; then
+            # 末尾那段可选的 .rN 是给重试用的：同一个 tag 名推第二次不会再生效，要让它再生效就得挪或删
+            # 远端那个 tag——那是破坏性操作。所以断在半路就换个后缀重推，run-id 指的还是同一次构建。
+            if [[ "$spec" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)\.run\.([0-9]+)(\.r[0-9]+)?$ ]]; then
               tag="${BASH_REMATCH[1]}"
               run_id="${BASH_REMATCH[2]}"
               echo "触发来源：push tag ${REF_NAME}"
             else
-              echo "::error::tag 名要写成 components/vX.Y.Z.run.<build run-id>（收到 ${REF_NAME}）"
+              echo "::error::tag 名要写成 components/vX.Y.Z.run.<build run-id>（重跑同一次构建就再补一段 .r2；收到 ${REF_NAME}）"
               exit 1
             fi
           fi
@@ -112,8 +115,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,draft,assets \
-            --jq '"Release " + .tagName + " (draft=" + (.draft|tostring) + "), 现有资产 " + (.assets | length | tostring) + " 个"'
+          # 字段名是 isDraft 不是 draft：gh 先校验 --json 的字段名，写错整步 exit 1
+          # （2026-10-28 这个流程第一次跑就挂在这上面，而挂的原因当时根本看不到）。
+          # 所以失败原因要落进 ::error:: 注解——原始日志匿名是 403，但 job 页面的注解公开可读，
+          # 只有写进注解，下一个只有 SSH 的人（也就是今晚的我们）才知道该修什么。
+          if ! out=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,assets \
+            --jq '"Release " + .tagName + " (draft=" + (.isDraft|tostring) + "), 现有资产 " + (.assets | length | tostring) + " 个"' 2>/tmp/gh.err); then
+            echo "::error::gh release view ${TAG} 失败：$(tr '\n' ' ' < /tmp/gh.err)"
+            exit 1
+          fi
+          echo "$out"
 
       - name: Download TTS binaries
         uses: actions/download-artifact@v4
@@ -183,9 +194,14 @@ jobs:
           # 清单也一起挂上：它本来只作为 workflow artifact 交回，而匿名是取不到 artifact 的
           # （本机构建链只有 SSH、没有 token），对账与复核都需要一份公开可读的副本。
           # 应用读的还是 main 里那份文件——多一个资产不改变信任模型，只是让「谁来复核」都取得到。
-          gh release upload "$TAG" dist-components/* components-manifest.json --clobber --repo "$GITHUB_REPOSITORY"
+          # 失败原因同样落进注解：原始日志匿名 403，只有注解是公开可读的（理由见上面 Check 那步）。
+          if ! gh release upload "$TAG" dist-components/* components-manifest.json --clobber --repo "$GITHUB_REPOSITORY" 2>/tmp/upload.err; then
+            echo "::error::gh release upload ${TAG} 失败：$(tr '\n' ' ' < /tmp/upload.err)"
+            exit 1
+          fi
+          # 下面这行只是把资产列出来看一眼，字段名写错也不该把已经传成功的发布判成失败
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[] | .name + "  " + (.size|tostring) + "  " + (.state // "?")'
+            --jq '.assets[] | .name + "  " + (.size|tostring) + "  " + (.state // "?")' || true
 
       # 这一步才是对账：GitHub 上传时自己算的 digest 与清单里的 sha256 必须逐条相同。
       # 放在上传之后是因为「我们本机算的指纹」只能自证，跨不过「资产在路上被换过」这一类问题。
