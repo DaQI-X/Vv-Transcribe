@@ -4,6 +4,8 @@ name: Build
 # - Windows x64：唯一无法在 macOS 本地构建的平台，由 CI 免费提供（ASR .exe + NSIS 安装包）
 # - macOS arm64：原生回归验证
 # - macOS x64：在 arm64 runner 上经 Rosetta + universal2 Python 构建（GitHub 已退役 Intel runner）
+# 镜像选 macos-15：macos-14 已被 GitHub 标 deprecated（actions/runner-images#13518），
+# 2026-10-28 两个 macos-14 job 排队 15 分钟零步骤被取消（runner 拿不到），Windows 同期绿。
 # afterPack 会校验 ASR 二进制架构，架构不匹配时构建直接失败（防止 error -86 / EBADARCH）。
 
 on:
@@ -48,7 +50,7 @@ jobs:
             ttsArtifactPath: python-tts/dist-x64/vv-tts-server.exe
             ttsArtifactName: vv-tts-server-windows-x64
           - label: macOS arm64
-            os: macos-14
+            os: macos-15
             arch: arm64
             electronArgs: --mac --arm64
             needsRosetta: false
@@ -61,7 +63,7 @@ jobs:
             ttsArtifactPath: python-tts/dist-arm64/vv-tts-server
             ttsArtifactName: vv-tts-server-macos-arm64
           - label: macOS x64 (Rosetta)
-            os: macos-14
+            os: macos-15
             arch: x64
             electronArgs: --mac --x64
             needsRosetta: true
