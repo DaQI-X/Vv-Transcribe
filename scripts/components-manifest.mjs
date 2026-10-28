@@ -116,6 +116,8 @@ function warn(msg) {
   console.warn(`[components-manifest] ${msg}`)
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 function parseArgs() {
   const args = {
     build: false,
@@ -480,6 +482,87 @@ async function getJson(url, attempt = 1) {
   return res.json()
 }
 
+/**
+ * 清单与 Release API 上真实存在的资产逐条比，只分类不打印、不退出，方便单测这一层。
+ * status 三种：
+ *   ok      —— digest 与清单一致。这才是「独立复核过」。
+ *   pending —— GitHub 还没把 state 翻成 uploaded，或还没填 digest。刚发布那几十秒这是正常状态，
+ *              不是清单坏了；但也绝不能记成「核对过了」。
+ *   bad     —— 资产不在、体积对不上、指纹对不上：这些多等都不会自己变好。
+ */
+function compareWithRelease(manifest, release) {
+  const byName = new Map((release.assets || []).map((a) => [a.name, a]))
+  const rows = []
+  for (const [id, item] of Object.entries(manifest.components)) {
+    for (const [key, asset] of Object.entries(item.assets)) {
+      const where = `${id}/${key}`
+      const live = byName.get(asset.name)
+      if (!live) {
+        rows.push({ where, status: 'bad', detail: `Release ${manifest.tag} 里没有资产 ${asset.name}` })
+        continue
+      }
+      if (live.state !== 'uploaded') {
+        rows.push({ where, status: 'pending', detail: `资产状态还是 ${live.state}（没传完），下载会 404 或拿到半份` })
+        continue
+      }
+      if (live.size !== asset.bytes) {
+        rows.push({ where, status: 'bad', detail: `清单 bytes ${asset.bytes} ≠ GitHub 记的 size ${live.size}` })
+        continue
+      }
+      // digest 是 GitHub 上传时自己算的，不依赖我们这台机器，所以它才算「独立复核」
+      const digest = typeof live.digest === 'string' ? live.digest.replace(/^sha256:/, '') : null
+      if (digest === null) {
+        rows.push({ where, status: 'pending', detail: 'Release API 还没给这条资产的 digest（GitHub 在传完之后才填）' })
+        continue
+      }
+      if (digest !== asset.sha256) {
+        rows.push({
+          where,
+          status: 'bad',
+          detail: `清单 ${asset.sha256} ≠ GitHub digest ${digest} —— 资产被换过，或清单填错了`,
+        })
+        continue
+      }
+      rows.push({
+        where,
+        status: 'ok',
+        detail: `与 GitHub 的 digest 一致，${(live.size / 1e6).toFixed(1)}MB，已下载 ${live.download_count ?? 0} 次`,
+      })
+    }
+  }
+  return rows
+}
+
+/**
+ * 对账最多看 6 轮、每轮之间等 20 秒。理由：build.yml 的 release job 现在紧挨着「创建 Release」
+ * 那一步跑，而 state 与 digest 都是 GitHub 事后异步填的——这一刻没落定不代表清单坏。
+ * 但「没落定」也不等于「核对过」：旧写法对 digest 缺席只 warn 一句就放绿，这一步就会变成
+ * 什么都没核的绿色，而它存在的唯一理由就是拿 GitHub 自己算的指纹复核。
+ * 所以看完 6 轮仍没落定的那些，一律按 bad 交给调用方判失败。
+ */
+async function reconcile(manifest, getRelease, { attempts = 6, waitMs = 20_000 } = {}) {
+  let rows = []
+  let used = 0
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    used = attempt
+    rows = compareWithRelease(manifest, await getRelease())
+    const pending = rows.filter((row) => row.status === 'pending').length
+    if (pending === 0) break
+    if (attempt < attempts) {
+      console.log(`  … ${pending} 条资产的 state/digest 还没由 GitHub 填好，第 ${attempt}/${attempts} 轮，等 ${waitMs / 1000} 秒`)
+      await sleep(waitMs)
+    }
+  }
+  return {
+    used,
+    rows: rows.map((row) =>
+      row.status === 'pending'
+        ? { ...row, status: 'bad', detail: `${row.detail} —— 看了 ${used} 轮 ×${waitMs / 1000} 秒还是这样，宁可乐也不放绿` }
+        : row
+    ),
+  }
+}
+
 async function check(offline, manifestPath, manifestGiven) {
   if (!existsSync(manifestPath)) {
     if (manifestGiven) fail(`指定的清单文件不存在：${manifestPath}`)
@@ -513,47 +596,30 @@ async function check(offline, manifestPath, manifestGiven) {
     return
   }
 
-  const release = await getJson(`https://api.github.com/repos/${REPO}/releases/tags/${manifest.tag}`)
-  const byName = new Map((release.assets || []).map((a) => [a.name, a]))
-  if (release.draft === true) fail(`Release ${manifest.tag} 还是草稿，应用按永久直链下载会 404——先发布这个 Release`)
-  let bad = 0
-  for (const [id, item] of Object.entries(manifest.components)) {
-    for (const [key, asset] of Object.entries(item.assets)) {
-      const where = `${id}/${key}`
-      const live = byName.get(asset.name)
-      if (!live) {
-        console.error(`  ✗ ${where}: Release ${manifest.tag} 里没有资产 ${asset.name}`)
-        bad++
-        continue
-      }
-      if (live.state !== 'uploaded') {
-        console.error(`  ✗ ${where}: 资产状态是 ${live.state}（没传完），下载会 404 或拿到半份`)
-        bad++
-        continue
-      }
-      if (live.size !== asset.bytes) {
-        console.error(`  ✗ ${where}: 清单 bytes ${asset.bytes} ≠ GitHub 记的 size ${live.size}`)
-        bad++
-        continue
-      }
-      // digest 是 GitHub 上传时自己算的，不依赖我们这台机器，所以它才算「独立复核」
-      const digest = typeof live.digest === 'string' ? live.digest.replace(/^sha256:/, '') : null
-      if (digest === null) {
-        warn(`${where}: 这个 Release API 没给 digest（GitHub 只在资产传完后填），本次跳过这一条`)
-        continue
-      }
-      if (digest !== asset.sha256) {
-        console.error(`  ✗ ${where}: 清单 ${asset.sha256} ≠ GitHub digest ${digest} —— 资产被换过，或清单填错了`)
-        bad++
-        continue
-      }
-      console.log(`  ✓ ${where} 与 GitHub 的 digest 一致，${(live.size / 1e6).toFixed(1)}MB，已下载 ${live.download_count ?? 0} 次`)
-    }
+  const { rows, used } = await reconcile(manifest, async () => {
+    const release = await getJson(`https://api.github.com/repos/${REPO}/releases/tags/${manifest.tag}`)
+    if (release.draft === true) fail(`Release ${manifest.tag} 还是草稿，应用按永久直链下载会 404——先发布这个 Release`)
+    return release
+  })
+  for (const row of rows) {
+    if (row.status === 'ok') console.log(`  ✓ ${row.where}: ${row.detail}`)
+    else console.error(`  ✗ ${row.where}: ${row.detail}`)
   }
-  if (bad > 0) fail(`${bad} 条对不上。这份清单是应用内按需下载的唯一信任来源，不一致就是拒绝构建的理由`)
-  console.log(`[components-manifest] ${manifest.tag} 的资产与清单全部一致（下载地址前缀 ${RELEASE_BASE}）`)
+  const bad = rows.filter((row) => row.status === 'bad')
+  if (bad.length > 0) {
+    fail(`${bad.length} 条对不上。这份清单是应用内按需下载的唯一信任来源，不一致就是拒绝构建的理由`)
+  }
+  console.log(
+    `[components-manifest] ${manifest.tag} 的 ${rows.length} 条资产与清单全部一致（看了 ${used} 轮；下载地址前缀 ${RELEASE_BASE}）`
+  )
 }
 
-const args = parseArgs()
-if (args.build) await build(args)
-else await check(args.offline, args.manifest, args.manifestGiven)
+// 直接被 node 跑时才走命令行；被 import 进来（单测 reconcile 这两层）时只导出函数，不许顺手退出进程。
+const isCli = process.argv[1] === fileURLToPath(import.meta.url)
+if (isCli) {
+  const args = parseArgs()
+  if (args.build) await build(args)
+  else await check(args.offline, args.manifest, args.manifestGiven)
+}
+
+export { compareWithRelease, reconcile }
