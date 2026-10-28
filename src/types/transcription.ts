@@ -22,4 +22,4 @@ export type TranscriptionStatus =
   | 'error'
   | 'cancelled'
 
-export type ExportFormat = 'srt' | 'txt' | 'json' | 'md'
+export type ExportFormat = 'srt' | 'vtt' | 'tsv' | 'txt' | 'json' | 'md'

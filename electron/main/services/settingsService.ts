@@ -3,7 +3,7 @@
  * 管理应用的 ASR 和 AI 配置项，以 JSON 文件形式持久化到 userData 目录
  * 支持内存缓存，避免重复读取磁盘
  *
- * API Key 单独说：磁盘上那份 settings.json 里的两把 Key 走系统的 safeStorage（macOS Keychain /
+ * API Key 单独说：磁盘上那份 settings.json 里的三把 Key 走系统的 safeStorage（macOS Keychain /
  * Windows DPAPI）加密后写入，值形如 `v1:<base64>`。没有前缀的按历史明文处理——首次读到且本机
  * 能加密就就地换掉。safeStorage 不可用时退回明文并让界面说清楚（见 getSettingsView 的
  * keyEncryptionAvailable）。明文不进渲染进程：给界面的一律是脱敏视图，只有主进程拿得到解密结果。
@@ -11,6 +11,8 @@
 import { app, safeStorage } from 'electron'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { logger } from './logger'
+import { normalizeLocalTtsEngine, type LocalTtsEngineId } from './localTtsEngine'
 
 export interface AppSettings {
   asrProvider: string
@@ -30,17 +32,37 @@ export interface AppSettings {
   aiApiBase: string
   aiModel: string
   /**
-   * 配音（TTS）用的模型与音色，与 aiModel 分开存：`/v1/audio/speech` 要的是配音模型 id
-   * （OpenAI 形如 tts-1），拿 chat 模型去调必然 400；两者共用上面那套 apiBase 与 Key。
-   * 只有配了音的服务商能用，界面不能承诺通用。
+   * 配音（TTS）的一整套配置，与校对分开存。
+   * 分开是因为端点不同：`/v1/audio/speech` 收的是配音模型 id（OpenAI 形如 tts-1），拿 chat
+   * 模型去调必然 400；而且只做对话的服务商根本没有这个端点，配音常常要指到另一家网关去，
+   * 所以接口地址与 Key 也能单独填——留空表示沿用上面那套（见 getTTSConfig）。
    */
-  aiTtsModel: string
-  aiTtsVoice: string
+  ttsApiBase: string
+  ttsApiKey: string
+  ttsModel: string
+  ttsVoice: string
+  /**
+   * 配音用云端接口还是本机引擎：'cloud' | 'local'。
+   * 默认云端，是老配置的既有行为——本地档没有 Key、没有模型名，把默认翻过来等于让所有
+   * 已经配好云端的人凭空失去配音。
+   */
+  ttsEngine: string
+  /**
+   * 本地档的引擎 id（sherpa-onnx-vits-zh-ll / kokoro-multi-lang-v1_1）。
+   * 与 ttsModel 分开存：ttsModel 只喂云端接口，这里的值会被直接拼成模型目录名，
+   * 混用会让用户填的云端模型名变成下载目标（同 asrLocalModel 的理由）。
+   */
+  ttsLocalEngine: string
+  /**
+   * 本地档的音色是 sid 编号（字符串写法），和云端那档的音色名各存各的：
+   * 换引擎不该把另一档的选择冲掉，否则用户切回来看到的是「音色没了」。
+   */
+  ttsLocalVoice: string
 }
 
-/** 两把密钥的字段名；脱敏视图与保存语义都按这两个键走 */
-type SecretField = 'asrApiKey' | 'aiApiKey'
-const SECRET_FIELDS: SecretField[] = ['asrApiKey', 'aiApiKey']
+/** 密钥字段的字段名；脱敏视图与保存语义都按这几个键走 */
+type SecretField = 'asrApiKey' | 'aiApiKey' | 'ttsApiKey'
+const SECRET_FIELDS: SecretField[] = ['asrApiKey', 'aiApiKey', 'ttsApiKey']
 
 /**
  * 密文在 JSON 里的写法。加前缀是为了「能不能解密」和「是不是新版格式」能分开判断：
@@ -55,6 +77,7 @@ export type SecretStatus = 'none' | 'encrypted' | 'plaintext' | 'unreadable'
 export type SettingsView = Omit<AppSettings, SecretField> & {
   asrKeyStatus: SecretStatus
   aiKeyStatus: SecretStatus
+  ttsKeyStatus: SecretStatus
   keyEncryptionAvailable: boolean
 }
 
@@ -69,8 +92,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   aiApiKey: '',
   aiApiBase: '',
   aiModel: '',
-  aiTtsModel: '',
-  aiTtsVoice: '',
+  ttsApiBase: '',
+  ttsApiKey: '',
+  ttsModel: '',
+  ttsVoice: '',
+  ttsEngine: 'cloud',
+  // 空串＝还没选过，取值时落回中文默认档（见 normalizeLocalTtsEngine）
+  ttsLocalEngine: '',
+  // 空串同上：VITS 与 Kokoro 的 sid0 都是各自那档里推荐的那个音色
+  ttsLocalVoice: '',
 }
 
 /**
@@ -170,23 +200,52 @@ async function migratePlainKeys(raw: AppSettings): Promise<void> {
   await writeRaw(sealed)
 }
 
+/**
+ * 1.0.5 及之前，配音取值寄存在校对名下（`aiTtsModel` / `aiTtsVoice`）。这里一次性搬到 `tts*`。
+ * 只在新键为空时接管，且不管有没有接管都把旧键从磁盘上抹掉——留着会出现「用户把配音模型清空、
+ * 下次启动旧值又复活」这种自己解不开的事；静默丢掉用户填过的音色则更糟。
+ */
+function adoptLegacyTtsFields(raw: AppSettings, parsed: Record<string, unknown>): boolean {
+  let sawLegacy = false
+  const pairs: Array<[string, keyof AppSettings]> = [
+    ['aiTtsModel', 'ttsModel'],
+    ['aiTtsVoice', 'ttsVoice'],
+  ]
+  for (const [legacyKey, targetKey] of pairs) {
+    const legacyValue = typeof parsed[legacyKey] === 'string' ? (parsed[legacyKey] as string) : ''
+    if (!legacyValue) continue
+    sawLegacy = true
+    if (!raw[targetKey]) raw[targetKey] = legacyValue
+  }
+  return sawLegacy
+}
+
 async function readCache(): Promise<SettingsCache> {
   if (cache) return cache
   let raw: AppSettings
+  let legacyAdopted = false
   try {
     const text = await readFile(getSettingsPath(), 'utf-8')
-    const parsed = JSON.parse(text) as Partial<AppSettings>
-    raw = { ...DEFAULT_SETTINGS, ...parsed }
+    const parsed = JSON.parse(text) as Record<string, unknown>
+    // 逐项按 DEFAULT_SETTINGS 收，而不是整份展开：界面上多带的状态位、手改出来的非字符串值、
+    // 以及下面要搬走的旧键，都不该原样留在配置里
+    raw = { ...DEFAULT_SETTINGS }
+    for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof AppSettings>) {
+      const value = parsed[key]
+      if (typeof value === 'string') raw[key] = value
+    }
+    legacyAdopted = adoptLegacyTtsFields(raw, parsed)
   } catch {
     raw = { ...DEFAULT_SETTINGS }
   }
   cache = buildCache(raw)
-  if (cache.migrated) {
-    try {
-      await migratePlainKeys(raw)
-    } catch {
-      // 迁移写盘失败不影响这次能不能用：保持明文继续干活，下次启动再试
-    }
+  try {
+    if (legacyAdopted) await writeRaw(raw)
+    if (cache.migrated) await migratePlainKeys(raw)
+  } catch (e) {
+    // 迁移写盘失败不影响这次能不能用：内存里已经是迁移后的值，照常干活，下次启动再试。
+    // 但必须留痕——磁盘上会继续留着旧字段、历史明文 Key，而这只有翻日志的人才知道。
+    logger.warn('Settings', 'Migrating settings on disk failed', e instanceof Error ? e.message : String(e))
   }
   return cache
 }
@@ -197,14 +256,15 @@ export async function loadSettings(): Promise<AppSettings> {
   return { ...current.plain }
 }
 
-/** 给界面的脱敏视图：两把 Key 只剩状态，值一个字符都不出主进程 */
+/** 给界面的脱敏视图：几把 Key 在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」 */
 export async function getSettingsView(): Promise<SettingsView> {
   const current = await readCache()
-  const { asrApiKey: _asr, aiApiKey: _ai, ...rest } = current.raw
+  const { asrApiKey: _asr, aiApiKey: _ai, ttsApiKey: _tts, ...rest } = current.raw
   return {
     ...rest,
     asrKeyStatus: current.status.asrApiKey,
     aiKeyStatus: current.status.aiApiKey,
+    ttsKeyStatus: current.status.ttsApiKey,
     keyEncryptionAvailable: encryptionAvailable(),
   }
 }
@@ -274,22 +334,57 @@ export async function getAIConfig(): Promise<{ apiKey: string; apiBase: string; 
 }
 
 /**
- * 配音（TTS）配置。接口地址与 Key 与校对共用，模型和音色不共用：
- * `/v1/audio/speech` 收的是配音模型 id，拿 chat 模型去调必然 400，所以这里只读 aiTtsModel/aiTtsVoice。
- * 两个新字段留空时**不做回落**——填 tts-1 还是 CosyVoice 由服务商决定，静默替用户猜一个
- * 只会把「配置没填」变成一条看不出所以然的 404/400，宁可让调用方报「还没填」。
+ * 配音用哪一档。界面上的「配音引擎」与这里必须是同一组值；认不出的值落回云端，
+ * 因为那是 1.0.5 以来唯一的一档——手改 settings.json 改出一个怪值，不该让配音凭空换了个后端。
+ */
+export type TtsEngineMode = 'cloud' | 'local'
+
+export function normalizeTtsEngine(raw: unknown): TtsEngineMode {
+  return raw === 'local' ? 'local' : 'cloud'
+}
+
+/**
+ * 本地档的音色取值。
+ * 空 → '0'（推荐档）；已经是编号字符串 → 原样；别的（例如从云端那档残留的 `alloy`）也原样带过去，
+ * 让 ttsService 的校验报出「音色得是编号」——在这儿悄悄换成 0，用户会以为自己的选择生效了，
+ * 听到的却是另一个人的声音。
+ */
+function normalizeLocalVoice(raw: string): string {
+  const trimmed = (raw || '').trim()
+  return trimmed || '0'
+}
+
+/**
+ * 配音（TTS）配置。
+ * 云端档：接口地址与 Key 是「留空＝沿用校对那套」——多数人是同一个网关既发对话又发声，
+ * 让他们重贴一次 Key 只会有人在这儿留个空、然后撞上 401。只做对话的服务商没有音频端点，
+ * 这时把配音指到另一家、单独填一把 Key 才是正路，所以这两项也允许独立填。
+ * 模型和音色**不回落**——`/v1/audio/speech` 收的是配音模型 id，拿 chat 模型去调必然 400；
+ * 而填 tts-1 还是 CosyVoice 由服务商决定，静默替用户猜一个只会把「配置没填」
+ * 变成一条看不出所以然的 404/400，宁可让调用方报「还没填」。
+ * 本地档：Key、接口地址、模型名三样都不参与（`voice` 这时是 sid），
+ * 所以这里回的是一个「按档取过值」的配置，而不是把六个字段原样摊给调用方——
+ * 每个调用点自己判断哪档该问哪些字段，就是 #220/#227 那种「判松判严都拦错人」的源头。
  */
 export async function getTTSConfig(): Promise<{
+  engine: TtsEngineMode
   apiKey: string
   apiBase: string
   model: string
   voice: string
+  localEngine: LocalTtsEngineId
 }> {
   const settings = await loadSettings()
+  const engine = normalizeTtsEngine(settings.ttsEngine)
   return {
-    apiKey: settings.aiApiKey,
-    apiBase: normalizeApiBase(settings.aiApiBase) || 'https://api.openai.com',
-    model: settings.aiTtsModel,
-    voice: settings.aiTtsVoice,
+    engine,
+    apiKey: settings.ttsApiKey || settings.aiApiKey,
+    apiBase:
+      normalizeApiBase(settings.ttsApiBase) ||
+      normalizeApiBase(settings.aiApiBase) ||
+      'https://api.openai.com',
+    model: settings.ttsModel,
+    voice: engine === 'local' ? normalizeLocalVoice(settings.ttsLocalVoice) : settings.ttsVoice,
+    localEngine: normalizeLocalTtsEngine(settings.ttsLocalEngine),
   }
 }

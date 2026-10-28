@@ -1,17 +1,18 @@
 /**
  * 文件上传组件
  * 支持两种输入方式：本地文件上传（点击/拖拽）和 视频链接（解析后可选「转写音频」或「下载视频」）
- * Tab 切换两种模式；本地文件与音频下载完自动触发转写流程
+ * 顶部 tab 与字幕配音共用（见 StudioTabs），当前 tab 存在 useVoiceStudioStore 里；
+ * 本地文件与音频下载完自动触发转写流程
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Upload, Link2, Copy, Loader2, AudioLines, Download, Ban } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
+import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { frontendLogger } from '@/utils/logger'
 import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
-
-type UploadMode = 'file' | 'url'
+import { StudioTabs } from './StudioTabs'
 
 /** 链接这条链路的状态机：input（还没解析）→ resolving → ready（二选一）→ downloading */
 type UrlStage = 'input' | 'resolving' | 'ready' | 'downloading'
@@ -65,10 +66,13 @@ function formatDuration(seconds: number | null): string {
 }
 
 export function FileUploader() {
-  const { setFile, setStatus, setProgress, setStage, setModelInfo, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
+  const { setFile, setStatus, setProgress, setStage, setModelInfo, setJobId, setAsrProvider, setAsrLanguage, addSegment, setSegments, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
   const [isDragging, setIsDragging] = useState(false)
-  const [mode, setMode] = useState<UploadMode>('file')
+  const tab = useVoiceStudioStore((s) => s.tab)
+  const setTab = useVoiceStudioStore((s) => s.setTab)
+  /** 上传面板只吃 file/url 两态；tab 走到 voice 时这块根本不渲染 */
+  const mode: 'file' | 'url' = tab === 'url' ? 'url' : 'file'
   const [urlInput, setUrlInput] = useState('')
   const [urlStage, setUrlStage] = useState<UrlStage>('input')
   const [media, setMedia] = useState<{ sessionId: string; info: MediaInfo } | null>(null)
@@ -194,6 +198,25 @@ export function FileUploader() {
       }
 
       setJobId(result.jobId)
+      /**
+       * 段落是一条条从 asr:progress 推进 store 的，但只有本地引擎会逐段推；
+       * 云端一次请求拿整份结果，进度只有 2/10/80/100 这几个点，result.segments 是段落唯一的去处。
+       * 只在 store 还空着的时候整份写入——本地流式路径下用户可能已经在改前面那段，不该被盖掉。
+       */
+      if (result.segments?.length && useTranscriptionStore.getState().segments.length === 0) {
+        setSegments(
+          result.segments.map((seg) => ({
+            id: `${seg.startTime}-${seg.endTime}`,
+            startTime: seg.startTime,
+            endTime: seg.endTime,
+            text: seg.text,
+            originalText: seg.text,
+            isEdited: false,
+            isCorrected: false,
+            confidence: seg.confidence,
+          }))
+        )
+      }
       if (result.provider) {
         setAsrProvider(result.provider)
         frontendLogger.info('FileUploader', 'ASR provider set', { provider: result.provider })
@@ -202,7 +225,7 @@ export function FileUploader() {
       frontendLogger.error('FileUploader', 'Transcription error', err instanceof Error ? err.message : '转写失败')
       setError(err instanceof Error ? err.message : '转写失败')
     }
-  }, [api, setFile, setStatus, setProgress, setJobId, setAsrProvider, setAsrLanguage, addSegment, setError, setUnsubscribeProgress, reset])
+  }, [api, setFile, setStatus, setProgress, setJobId, setAsrProvider, setAsrLanguage, addSegment, setSegments, setError, setUnsubscribeProgress, reset])
 
   const handleSelectFile = useCallback(async () => {
     frontendLogger.userAction('File selection dialog opened')
@@ -314,7 +337,7 @@ export function FileUploader() {
           // 链接解析不出来时，绝大多数情况的出路只有「换成本地文件」，把这条路直接给出来
           toast.error(result.error || '链接解析失败，请重试', 8000, {
             label: '改传本地文件',
-            onClick: () => setMode('file'),
+            onClick: () => setTab('file'),
           })
         }
         return
@@ -328,7 +351,7 @@ export function FileUploader() {
       frontendLogger.error('FileUploader', 'Resolve error', err instanceof Error ? err.message : '解析失败')
       toast.error('链接解析失败，请重试', 8000, {
         label: '改传本地文件',
-        onClick: () => setMode('file'),
+        onClick: () => setTab('file'),
       })
     }
   }, [urlInput, api, releaseSession])
@@ -437,28 +460,15 @@ export function FileUploader() {
     setUrlStage('input')
   }, [releaseSession])
 
+  // 从「音视频链接」切走就把会话还掉：解析过但没下完的链接不该在 /tmp 里留着 cookies。
+  // tab 现在由共用的顶部 tab 条控制（切到「字幕配音」是整块卸载，由上面那个卸载清理兜着）。
+  useEffect(() => {
+    if (tab !== 'url') resetUrlTab()
+  }, [tab, resetUrlTab])
+
   return (
     <div className="upload_zone">
-      <div className="upload-tabs">
-        <button
-          className={`upload-tab ${mode === 'file' ? 'active' : ''}`}
-          onClick={() => {
-            // 切走就把会话还掉：解析过但没下完的链接不该在 /tmp 里留着 cookies
-            resetUrlTab()
-            setMode('file')
-          }}
-        >
-          <Upload size={14} />
-          <span>本地文件</span>
-        </button>
-        <button
-          className={`upload-tab ${mode === 'url' ? 'active' : ''}`}
-          onClick={() => setMode('url')}
-        >
-          <Link2 size={14} />
-          <span>音视频链接</span>
-        </button>
-      </div>
+      <StudioTabs />
 
       {mode === 'file' ? (
         <div

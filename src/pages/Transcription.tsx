@@ -1,7 +1,8 @@
 /**
  * 转写主页面
- * 根据文件状态切换三种视图：上传区 → 处理状态 → 结果展示（播放器 + 编辑器）
- * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 校对配置）
+ * 顶部 tab 决定看哪一块：字幕配音是一整个页面（工作台），其余按文件状态切换三种视图：
+ * 上传区 → 处理状态 → 结果展示（播放器 + 编辑器）
+ * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 校对配置 / 配音配置）
  */
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Settings } from 'lucide-react'
@@ -10,6 +11,7 @@ import { FileUploader } from '@/components/transcription/FileUploader'
 import { UploadStatus } from '@/components/transcription/UploadStatus'
 import { TranscriptEditor } from '@/components/transcription/TranscriptEditor'
 import { AudioPlayer } from '@/components/transcription/AudioPlayer'
+import { VoiceStudio } from '@/components/transcription/VoiceStudio'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { ToastContainer, toast } from '@/components/ui/Toast'
 import { Dropdown } from '@/components/ui/Dropdown'
@@ -17,12 +19,14 @@ import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
+import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import logoIcon from '@/assets/mac/logo_1024.png'
 
 const SETTINGS_MENU = [
   { key: 'asr', label: '转写配置' },
   { key: 'ai', label: '校对配置' },
+  { key: 'tts', label: '配音配置' },
   { key: 'theme', label: '主题' },
   { key: 'about', label: '关于与更新' },
 ]
@@ -35,6 +39,8 @@ export function Transcription() {
   const closeSettings = useSettingsModalStore((s) => s.close)
   const [appVersion, setAppVersion] = useState('')
   const { fileName, status, reset } = useTranscriptionStore()
+  // 顶部 tab 也存在 store 里：配音跑起来是分钟级的后台任务，状态跟着组件走会丢
+  const tab = useVoiceStudioStore((s) => s.tab)
 
   useEffect(() => {
     const api = getElectronAPI()
@@ -85,6 +91,8 @@ export function Transcription() {
   }, [])
 
   const handleGoHome = useCallback(() => {
+    // 稿子要被清空了，从这份稿子长出来的配音产物也就没有归属，当场回收
+    useVoiceStudioStore.getState().backToUpload()
     reset()
     usePlayerStore.getState().reset()
     useReferenceStore.getState().clearReference()
@@ -119,7 +127,9 @@ export function Transcription() {
       </header>
 
       <main style={{ flex: 1, overflow: 'hidden' }}>
-        {!hasFile ? (
+        {tab === 'voice' ? (
+          <VoiceStudio />
+        ) : !hasFile ? (
           <FileUploader />
         ) : showStatusView ? (
           <UploadStatus />

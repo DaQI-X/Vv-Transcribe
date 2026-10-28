@@ -8,10 +8,24 @@
  *
  * 测试用的是表单里的当前值，不读已保存设置、也不写盘 —— 用户应当在「没点保存」的情况下
  * 就能验证刚填的这组配置。
+ *
+ * 云端那几条腿都靠真发请求；本地配音那一腿是「起引擎 + 真合成一句」（见 testLocalTTS）：
+ * 它没有接口可探，而且「服务能收请求」和「模型能出声」之间还隔着解包与惰性加载两步。
  */
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { rm } from 'node:fs/promises'
 import { logger } from './logger'
-import { normalizeApiBase } from './settingsService'
+import { normalizeApiBase, normalizeTtsEngine } from './settingsService'
 import { getLocalEngineDetail } from './asrServiceManager'
+import {
+  componentsSizeHint,
+  getLocalTtsStatus,
+  normalizeLocalTtsEngine,
+  parseLocalTtsSid,
+  synthesizeLocally,
+} from './localTtsEngine'
 import { DEFAULT_PROMPT } from './ai/openaiCompatible'
 
 export type TestLevel = 'pass' | 'warn' | 'fail'
@@ -38,7 +52,27 @@ export interface AITestValues {
   model: string
 }
 
+export interface TTSTestValues {
+  /**
+   * 配音引擎档（'cloud' | 'local'）。不传按云端处理——界面表单在用户还没点保存时也要能测，
+   * 所以这一档必须跟着表单走，不能读已保存设置（那样测的就不是他刚选的那个组合了）。
+   */
+  engine?: string
+  /** 本地档要用哪个引擎（如 sherpa-onnx-vits-zh-ll / kokoro-multi-lang-v1_1），同样来自表单当前值 */
+  localEngine?: string
+  apiBase: string
+  apiKey: string
+  model: string
+  voice: string
+}
+
 const TEST_TIMEOUT_MS = 30_000
+
+/**
+ * 配音这一腿单独放宽到 60 秒，与 ttsService 里真实合成的超时对齐。
+ * 共用 30 秒会出现「自检报超时、批量配音却跑得通」的分歧，那种结论比不测更误导。
+ */
+const TTS_TEST_TIMEOUT_MS = 60_000
 
 /** HTTP 状态码 → 用户能照着做的解释。键是常见错误码，其余走兜底文案 */
 const STATUS_HINTS: Record<number, string> = {
@@ -74,7 +108,7 @@ function connectFail(err: unknown): TestOutcome {
 
   let hint: string
   if (e.name === 'AbortError' || code.includes('TIMEOUT')) {
-    hint = '连接或等响应超时（30 秒）。地址可能指向了一个不会响应请求的服务，或者网络被拦截'
+    hint = '连接或等响应超时（转写、校对最长等 30 秒，配音等 60 秒）。地址可能指向了一个不会响应请求的服务，或者网络被拦截'
   } else if (code.includes('ENOTFOUND') || code.includes('EAI_AGAIN')) {
     hint = '域名解析失败。API Base 可能写错了；如果是海外服务，需要开代理或 VPN 后再试'
   } else if (code.includes('ECONNREFUSED')) {
@@ -98,6 +132,11 @@ function connectFail(err: unknown): TestOutcome {
 /** 亚秒级请求显示成「0.0 秒」会像坏了，这种情况下直接给毫秒 */
 function formatLatency(ms: number): string {
   return ms < 1000 ? `${Math.max(10, Math.round(ms / 10) * 10)} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`
+}
+
+/** 自检产物的体积：两档共用一句话，0 字节在上面已经被拦成失败了 */
+function audioSize(bytes: number): string {
+  return `${Math.max(1, Math.round(bytes / 1024))} KB 音频`
 }
 
 /** 校验地址是否可作为请求前缀；返回 null 表示通过，否则返回该改什么 */
@@ -333,5 +372,134 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
     level: 'pass',
     title: 'AI 校对可用',
     message: `${originNote}耗时 ${formatLatency(latencyMs)}，输出格式正确，示例句里的同音错字也改对了`,
+  }
+}
+
+/** 自检只合成这一句，成本压到最低；句子本身没有含义，不考察音色好不好听 */
+const TTS_PROBE_TEXT = '这是一次配音接口自检。'
+
+/**
+ * 本地配音自检：真起引擎、真合成一句。
+ * 为什么不满足于「组件在不在场」：模型齐了也可能起不来（端口被上一代占着、二进制和这台机器不匹配），
+ * 首次启动还多一道解包——这些只有真跑一次才暴露得出来，跟云端那腿「必须真发一次请求」是同一个理由。
+ * 本地档不花钱、不走网络，所以这里可以放开手真合成，不用像云端那样先确认段数。
+ */
+async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestOutcome> {
+  const engine = normalizeLocalTtsEngine(rawEngine)
+  const status = getLocalTtsStatus(engine)
+  if (!status.binaryPresent || !status.modelPresent) {
+    return {
+      level: 'fail',
+      title: '本地配音组件还没下载',
+      message: `还缺${status.binaryPresent ? '模型' : '引擎二进制'}：${componentsSizeHint(engine)}。请在「设置 → 配音配置」里下载本地配音组件后再测`,
+    }
+  }
+
+  const sid = parseLocalTtsSid(rawVoice)
+  if (sid === null) {
+    return {
+      level: 'fail',
+      title: '还测不了',
+      message: `本地配音的音色是一个编号（如 0），当前是「${(rawVoice || '').trim() || '空'}」。请在「设置 → 配音配置 → 本地音色」里选一个`,
+    }
+  }
+
+  // 目录名带 transcribe- 前缀：万一 rm 没跑到（进程被强杀），启动清扫也能兜住
+  const probeDir = join(tmpdir(), `transcribe-tts-probe-${randomUUID()}`)
+  const started = Date.now()
+  try {
+    const clip = await synthesizeLocally(TTS_PROBE_TEXT, engine, sid, 1, probeDir)
+    const latencyMs = Date.now() - started
+    logger.info('ConnTest', 'local tts probe done', { engine, sid, latencyMs, bytes: clip.bytes })
+    // 时长读不出来时不报「0.0 秒」：那看起来像坏了，而真实情况只是引擎没回 X-Vv-Duration
+    const sizeNote = clip.duration > 0 ? `${clip.duration.toFixed(1)} 秒、${audioSize(clip.bytes)}` : audioSize(clip.bytes)
+    return {
+      level: 'pass',
+      title: '本地配音可用',
+      message: `耗时 ${formatLatency(latencyMs)}，用「${engine} · 音色 ${sid}」合成出 ${sizeNote}（首次启动含引擎解包，之后会快很多）。本地档不花钱、不走网络`,
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.warn('ConnTest', 'local tts probe failed', { engine, sid, message })
+    return { level: 'fail', title: '本地配音跑不通', message }
+  } finally {
+    await rm(probeDir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/**
+ * 配音接口自检：真发一次合成请求，请求体与 ttsService 干活时完全一致。
+ * 为什么必须真调：模型名和音色 id 是这两项最容易填错的地方，而兼容网关常常对任意模型名都照常
+ * 返回 200——探活全绿，等用户在批量配音点了「开始」才撞上 400，烧的是他自己 Key 上的额度。
+ * 本地档走 testLocalTTS：那三样（地址/Key/模型）根本不参与，按云端那套问只会把能用的人拦在门外。
+ */
+export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome> {
+  if (normalizeTtsEngine(values.engine) === 'local') {
+    return testLocalTTS(values.localEngine, values.voice)
+  }
+
+  const base = normalizeApiBase(values.apiBase)
+  const baseProblem = invalidBase(base)
+  if (baseProblem) return { level: 'fail', title: '还测不了', message: baseProblem }
+  if (!values.apiKey.trim()) {
+    return { level: 'fail', title: '还测不了', message: '配音需要 API Key 才能调用' }
+  }
+
+  // 与 getTTSConfig 同一个口径：模型和音色不替用户猜，空着就是没配
+  const model = values.model.trim()
+  const voice = values.voice.trim()
+  if (!model || !voice) {
+    return {
+      level: 'fail',
+      title: '还测不了',
+      message: `配音${model ? '音色' : '模型'}还没填。音频接口收的是配音模型 id 与音色 id（如 tts-1 / alloy），拿校对的 chat 模型去调会被直接拒`,
+    }
+  }
+
+  const started = Date.now()
+  let response: Response
+  try {
+    response = await fetch(`${base}/v1/audio/speech`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${values.apiKey.trim()}`,
+      },
+      body: JSON.stringify({ model, input: TTS_PROBE_TEXT, voice, response_format: 'mp3' }),
+      signal: AbortSignal.timeout(TTS_TEST_TIMEOUT_MS),
+    })
+  } catch (err) {
+    return connectFail(err)
+  }
+
+  const latencyMs = Date.now() - started
+  if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''))
+
+  // 200 但 body 是 JSON 的网关确实存在（真实配音链路也验这一条），不验就等于把错误当成功
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('json')) {
+    const body = (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 200)
+    return {
+      level: 'fail',
+      title: '接口 200 但没给音频',
+      message: `返回的是 JSON${body ? `：${body}` : ''}。这家的音频接口大概率不是 OpenAI 标准的 /v1/audio/speech`,
+    }
+  }
+
+  const audio = await response.arrayBuffer().catch(() => null)
+  const bytes = audio?.byteLength ?? 0
+  if (bytes === 0) {
+    return {
+      level: 'fail',
+      title: '接口没返回音频',
+      message: `耗时 ${formatLatency(latencyMs)}，body 是 0 字节。模型名或音色 id 很可能不被这家支持，以服务商文档为准`,
+    }
+  }
+
+  logger.info('ConnTest', 'tts probe done', { model, voice, latencyMs, bytes })
+  return {
+    level: 'pass',
+    title: '配音接口可用',
+    message: `耗时 ${formatLatency(latencyMs)}，用「${model} · ${voice}」合成出 ${audioSize(bytes)}。本次只合成一句，按字符计费的接口上这是最小的一笔`,
   }
 }

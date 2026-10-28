@@ -1,14 +1,15 @@
 /**
  * 设置弹窗组件
- * 提供两个配置 Tab：
+ * 提供四个配置 Tab：
  * - 转写配置（asr）：转写模式（本地/云端）、API Base、API Key、模型
- * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、配音模型与音色、本地词典版本与更新
+ * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
+ * - 配音配置（tts）：接口地址、API Key（两者留空＝沿用校对那套）、配音模型、配音音色
  * 设置通过 IPC 持久化到 userData/settings.json
  *
  * 保存只在点「保存设置」时发生，且保存后不关窗，方便紧接着点「测试连接」；
  * 有未保存修改时关闭会先二次确认，切 Tab 不再重新拉取磁盘值，避免静默丢掉刚填的内容。
  *
- * 两把 API Key 与其他字段不同：主进程只回状态不回值，所以输入框不回显、留空＝不修改、
+ * 三把 API Key 与其他字段不同：主进程只回状态不回值，所以输入框不回显、留空＝不修改、
  * 清除要走「清除已保存的 Key」按钮（点保存才生效）。
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
@@ -32,6 +33,7 @@ import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useThemeStore } from '@/stores/useThemeStore'
 import { ASR_LANGUAGE_OPTIONS } from '@/utils/asrLanguage'
+import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import type { KeyStatus } from '@/utils/readiness'
 
 interface SettingsValues {
@@ -46,9 +48,14 @@ interface SettingsValues {
   aiApiKey: string
   aiApiBase: string
   aiModel: string
-  /** 配音用的模型与音色：接口地址与 Key 沿用上面的，但这两个值不能和校对模型混用 */
-  aiTtsModel: string
-  aiTtsVoice: string
+  /**
+   * 配音（TTS）一整套。接口地址与 Key 留空＝沿用上面校对那套（主进程按同一口径回落），
+   * 模型与音色不能和校对模型混用：音频接口吃的是配音模型 id。
+   */
+  ttsApiBase: string
+  ttsApiKey: string
+  ttsModel: string
+  ttsVoice: string
 }
 
 /** 与主进程 connectionTestService 的 TestOutcome 对应 */
@@ -69,8 +76,10 @@ const DEFAULT_VALUES: SettingsValues = {
   aiApiKey: '',
   aiApiBase: '',
   aiModel: '',
-  aiTtsModel: '',
-  aiTtsVoice: '',
+  ttsApiBase: '',
+  ttsApiKey: '',
+  ttsModel: '',
+  ttsVoice: '',
 }
 
 /**
@@ -89,16 +98,12 @@ const CONTACT_EMAIL = 'hi@vvscribe.com'
 
 /**
  * 校对服务商用到的端点与默认模型；主进程会在 apiBase 拼 /v1/chat/completions。
- * ttsModel/ttsVoice 是配音那一腿的取值，只有确实提供 `/v1/audio/speech` 的才填：
- * OpenAI 用的是它文档里的 tts-1 + alloy；其余服务商我们**没有实测过它们有没有这个端点**，
- * 所以不预填、也不替用户猜——留空＝切换服务商时**不动**用户已填的配音配置（很多人走聚合网关，
- * 那家的音色 id 是自定义的，被下拉框一键清掉比不清更容易让人丢配置）。
+ * 这里**不再带配音取值**：配音现在有自己的一整套配置（可以指到另一家网关），
+ * 换校对服务商时顺手改写配音模型/音色属于跨 Tab 的隐式动作，用户不会预期，
+ * 也很难解释「我只改了服务商，配音怎么又不能用了」。配音两项见下面的输入框与占位。
  */
-const AI_PROVIDER_PRESETS: Record<
-  string,
-  { apiBase: string; model: string; ttsModel?: string; ttsVoice?: string }
-> = {
-  openai: { apiBase: 'https://api.openai.com', model: 'gpt-4o-mini', ttsModel: 'tts-1', ttsVoice: 'alloy' },
+const AI_PROVIDER_PRESETS: Record<string, { apiBase: string; model: string }> = {
+  openai: { apiBase: 'https://api.openai.com', model: 'gpt-4o-mini' },
   deepseek: { apiBase: 'https://api.deepseek.com', model: 'deepseek-chat' },
   qwen: { apiBase: 'https://dashscope.aliyuncs.com/compatible-mode', model: 'qwen-plus' },
 }
@@ -106,6 +111,7 @@ const AI_PROVIDER_PRESETS: Record<
 const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
   ai: '校对配置',
+  tts: '配音配置',
   theme: '主题',
   about: '关于与更新',
 }
@@ -324,18 +330,24 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const [appVersion, setAppVersion] = useState('')
   const [checking, setChecking] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
-  const [testingKind, setTestingKind] = useState<'asr' | 'ai' | null>(null)
-  const [testResults, setTestResults] = useState<{ asr?: TestOutcome; ai?: TestOutcome }>({})
-  /** 两把 Key 的磁盘状态（值从不过 IPC）+ 这台机器能不能加密 */
+  const [testingKind, setTestingKind] = useState<'asr' | 'ai' | 'tts' | null>(null)
+  const [testResults, setTestResults] = useState<{
+    asr?: TestOutcome
+    ai?: TestOutcome
+    tts?: TestOutcome
+  }>({})
+  /** 三把 Key 的磁盘状态（值从不过 IPC）+ 这台机器能不能加密 */
   const [keyStates, setKeyStates] = useState<{
     asr: KeyStatus
     ai: KeyStatus
+    tts: KeyStatus
     encryptable: boolean
-  }>({ asr: 'none', ai: 'none', encryptable: true })
-  const [pendingKeyClear, setPendingKeyClear] = useState<{ asr: boolean; ai: boolean }>({
-    asr: false,
-    ai: false,
-  })
+  }>({ asr: 'none', ai: 'none', tts: 'none', encryptable: true })
+  const [pendingKeyClear, setPendingKeyClear] = useState<{
+    asr: boolean
+    ai: boolean
+    tts: boolean
+  }>({ asr: false, ai: false, tts: false })
   const [restarting, setRestarting] = useState(false)
   const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocal | null>(null)
   const [ytDlpRemote, setYtDlpRemote] = useState<YtDlpCheckResult['remote'] | null>(null)
@@ -352,7 +364,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const isDirty =
     tab === 'theme'
       ? themeValue !== theme
-      : JSON.stringify(values) !== snapshot || pendingKeyClear.asr || pendingKeyClear.ai
+      : JSON.stringify(values) !== snapshot ||
+        pendingKeyClear.asr ||
+        pendingKeyClear.ai ||
+        pendingKeyClear.tts
 
   /**
    * 这次保存会不会重启本地引擎。档位变了必重启，而重启要等 PyInstaller 起进程 + /health 应答
@@ -367,22 +382,33 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   })()
 
   /** 改过哪一组就作废那一组的测试结论：留着上一次填法测出来的绿色会误导 */
-  const invalidateTest = (kind: 'asr' | 'ai') => {
+  const invalidateTest = (kind: 'asr' | 'ai' | 'tts') => {
     setTestResults((prev) => (prev[kind] === undefined ? prev : { ...prev, [kind]: undefined }))
   }
 
+  /** 字段前缀决定它属于哪一组的自检；配音单独一组，别再算成校对 */
+  const kindOfField = (field: string): 'asr' | 'ai' | 'tts' =>
+    field.startsWith('asr') ? 'asr' : field.startsWith('tts') ? 'tts' : 'ai'
+
   const updateField = (field: keyof SettingsValues, value: string) => {
     setValues((prev) => ({ ...prev, [field]: value }))
-    invalidateTest(field.startsWith('asr') ? 'asr' : 'ai')
+    invalidateTest(kindOfField(field))
   }
 
   /** 在输入框里打字＝要替换，之前点的「清除」作废 */
-  const updateKeyField = (kind: 'asr' | 'ai', field: 'asrApiKey' | 'aiApiKey', value: string) => {
+  const updateKeyField = (
+    kind: 'asr' | 'ai' | 'tts',
+    field: 'asrApiKey' | 'aiApiKey' | 'ttsApiKey',
+    value: string
+  ) => {
     if (value) setPendingKeyClear((prev) => (prev[kind] ? { ...prev, [kind]: false } : prev))
     updateField(field, value)
   }
 
-  const clearKeyField = (kind: 'asr' | 'ai', field: 'asrApiKey' | 'aiApiKey') => {
+  const clearKeyField = (
+    kind: 'asr' | 'ai' | 'tts',
+    field: 'asrApiKey' | 'aiApiKey' | 'ttsApiKey'
+  ) => {
     setPendingKeyClear((prev) => ({ ...prev, [kind]: true }))
     updateField(field, '')
   }
@@ -393,15 +419,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     setValues((prev) => ({
       ...prev,
       aiProvider: provider,
-      ...(preset
-        ? {
-            aiApiBase: preset.apiBase,
-            aiModel: preset.model,
-            // 配音取值只有「这家确实有这个端点」才填，没给就保持用户原来的，不清空
-            ...(preset.ttsModel ? { aiTtsModel: preset.ttsModel } : {}),
-            ...(preset.ttsVoice ? { aiTtsVoice: preset.ttsVoice } : {}),
-          }
-        : {}),
+      ...(preset ? { aiApiBase: preset.apiBase, aiModel: preset.model } : {}),
     }))
     invalidateTest('ai')
   }
@@ -422,7 +440,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       setHydrated(false)
       setConfirmDiscard(false)
       setTestResults({})
-      setPendingKeyClear({ asr: false, ai: false })
+      setPendingKeyClear({ asr: false, ai: false, tts: false })
       return
     }
     if (hydrated || !api) return
@@ -431,11 +449,18 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       try {
         const saved = await api.getSettings()
         if (saved && Object.keys(saved).length > 0) {
-          // 密钥字段在返回值里只有状态，两个 Key 输入框永远从空开始（留空＝不修改）
-          loaded = { ...DEFAULT_VALUES, ...saved, asrApiKey: '', aiApiKey: '' } as SettingsValues
+          // 密钥字段在返回值里只有状态，三个 Key 输入框永远从空开始（留空＝不修改）
+          loaded = {
+            ...DEFAULT_VALUES,
+            ...saved,
+            asrApiKey: '',
+            aiApiKey: '',
+            ttsApiKey: '',
+          } as SettingsValues
           setKeyStates({
             asr: toKeyStatus(saved.asrKeyStatus),
             ai: toKeyStatus(saved.aiKeyStatus),
+            tts: toKeyStatus(saved.ttsKeyStatus),
             encryptable: saved.keyEncryptionAvailable !== false,
           })
         }
@@ -482,8 +507,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     setSaving(true)
     try {
       const payload: Record<string, unknown> = { ...values }
-      for (const kind of ['asr', 'ai'] as const) {
-        const field = kind === 'asr' ? 'asrApiKey' : 'aiApiKey'
+      for (const kind of ['asr', 'ai', 'tts'] as const) {
+        const field = kind === 'asr' ? 'asrApiKey' : kind === 'ai' ? 'aiApiKey' : 'ttsApiKey'
         const typed = values[field].trim()
         // 三态：有字＝替换、点了清除＝null、都没有＝整个键不发送，磁盘上那把保持原样
         if (typed) payload[field] = typed
@@ -496,14 +521,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         ...values,
         asrApiKey: '',
         aiApiKey: '',
+        ttsApiKey: '',
       }
       setValues(nextValues)
       setSnapshot(JSON.stringify(nextValues))
-      setPendingKeyClear({ asr: false, ai: false })
+      setPendingKeyClear({ asr: false, ai: false, tts: false })
       if (result?.settings)
         setKeyStates({
           asr: toKeyStatus(result.settings.asrKeyStatus),
           ai: toKeyStatus(result.settings.aiKeyStatus),
+          tts: toKeyStatus(result.settings.ttsKeyStatus),
           encryptable: result.settings.keyEncryptionAvailable !== false,
         })
       if (tab === 'theme') setTheme(themeValue as 'light' | 'dark')
@@ -534,7 +561,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const testingRef = useRef(false)
   const restartingRef = useRef(false)
 
-  const handleTestConnection = async (kind: 'asr' | 'ai') => {
+  const handleTestConnection = async (kind: 'asr' | 'ai' | 'tts') => {
     if (!api || testingRef.current) return
     testingRef.current = true
     setTestingKind(kind)
@@ -547,7 +574,14 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
               apiKey: values.asrApiKey,
               model: values.asrModel,
             }
-          : { apiBase: values.aiApiBase, apiKey: values.aiApiKey, model: values.aiModel }
+          : kind === 'tts'
+            ? {
+                apiBase: values.ttsApiBase,
+                apiKey: values.ttsApiKey,
+                model: values.ttsModel,
+                voice: values.ttsVoice,
+              }
+            : { apiBase: values.aiApiBase, apiKey: values.aiApiKey, model: values.aiModel }
       const result = await api.testConnection(kind, payload)
       setTestResults((prev) => ({ ...prev, [kind]: result }))
     } catch {
@@ -962,33 +996,6 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 />
               </div>
               <div className="settings-form-group">
-                <label className="settings-form-label">配音模型</label>
-                <input
-                  className="settings-form-input"
-                  value={values.aiTtsModel}
-                  onChange={(e) => updateField('aiTtsModel', e.target.value)}
-                  placeholder="tts-1"
-                />
-                <span className="settings-form-hint">
-                  配音走 OpenAI 标准的音频接口，与上面的「模型」不是同一个值：这里要填服务商文档里的
-                  <b>配音模型</b>（如 tts-1、tts-1-hd、CosyVoice 类），填 chat 模型会直接被拒。
-                  只有提供该端点的服务商能用（只做对话的服务商通常没有，以服务商文档为准），接口地址和 Key 仍沿用上面那套
-                </span>
-              </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">配音音色</label>
-                <input
-                  className="settings-form-input"
-                  value={values.aiTtsVoice}
-                  onChange={(e) => updateField('aiTtsVoice', e.target.value)}
-                  placeholder="alloy"
-                />
-                <span className="settings-form-hint">
-                  音色 id 各家格式不同（OpenAI 是 alloy / onyx 这类短名，有的网关要求带模型前缀），
-                  照服务商文档原样填。整条配音用同一个音色，暂不支持逐段换音色
-                </span>
-              </div>
-              <div className="settings-form-group">
                 <label className="settings-form-label">配置自检</label>
                 <button
                   type="button"
@@ -1021,6 +1028,84 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     {dictUpdating ? '检查中...' : '检查更新'}
                   </button>
                 </div>
+              </div>
+            </>
+          )}
+
+          {tab === 'tts' && (
+            <>
+              <div className="settings-form-group">
+                <label className="settings-form-label">API Base URL</label>
+                <input
+                  className="settings-form-input"
+                  value={values.ttsApiBase}
+                  onChange={(e) => updateField('ttsApiBase', e.target.value)}
+                  placeholder="留空＝沿用「校对配置」的地址"
+                />
+                <span className="settings-form-hint">
+                  填了就用这条地址，请求会打在 {"{地址}"}/v1/audio/speech 上。配音和校对可以是两家不同的网关
+                  ——校对那家不一定有音频接口，这里留空只是省事。
+                </span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">API Key</label>
+                <ApiKeyField
+                  value={values.ttsApiKey}
+                  status={keyStates.tts}
+                  encryptable={keyStates.encryptable}
+                  cleared={pendingKeyClear.tts}
+                  emptyHint={
+                    keyStates.ai === 'none'
+                      ? '还没填。配音需要一把 Key：在这里填，或者去「校对配置」填一把供两边共用'
+                      : '留空＝沿用「校对配置」里已保存的那把 Key'
+                  }
+                  onChange={(v) => updateKeyField('tts', 'ttsApiKey', v)}
+                  onClear={() => clearKeyField('tts', 'ttsApiKey')}
+                />
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">配音模型</label>
+                <input
+                  className="settings-form-input"
+                  value={values.ttsModel}
+                  onChange={(e) => updateField('ttsModel', e.target.value)}
+                  placeholder="tts-1"
+                />
+                <span className="settings-form-hint">
+                  音频接口的模型 id，和上面的校对模型是两回事——把校对模型填在这里会得到一句
+                  「模型不存在」。留空时配音不会启动。
+                </span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">配音音色</label>
+                <input
+                  className="settings-form-input"
+                  value={values.ttsVoice}
+                  onChange={(e) => updateField('ttsVoice', e.target.value)}
+                  placeholder="alloy"
+                />
+                <span className="settings-form-hint">
+                  OpenAI 兼容接口的音色有 alloy、echo、fable、onyx、nova、shimmer
+                  六种，中文听感上 onyx 偏沉、nova 偏亮，可以先各试一句再定。换网关时以对方给的音色名为准。
+                </span>
+              </div>
+              <div className="settings-form-group">
+                <label className="settings-form-label">配置自检</label>
+                <button
+                  type="button"
+                  onClick={() => handleTestConnection('tts')}
+                  disabled={testingKind !== null}
+                  className="settings-modal__dict-update-btn"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                >
+                  <Plug size={12} />
+                  {testingKind === 'tts' ? '检查中...' : '测试连接'}
+                </button>
+                <span className="settings-form-hint">
+                  按上面填写的值合成一句话（约 10 个字），确认这把 Key、这个模型、这个音色能出音频，不需要先保存；
+                  地址和 Key 留空时用的是已保存的那套。本次只合成一句，按字符计费的接口上这是最小的一笔。
+                </span>
+                {testResults.tts && <TestResultView result={testResults.tts} />}
               </div>
             </>
           )}
@@ -1106,6 +1191,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   不动安装包里的内置版本，失败会自动退回原来的
                 </span>
               </div>
+
+              <ComponentsSection />
 
               <div className="settings-form-group">
                 <label className="settings-form-label">运行日志</label>

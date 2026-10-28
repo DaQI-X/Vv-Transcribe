@@ -1,0 +1,35 @@
+# 本地配音（TTS）sidecar 的依赖，全部钉死精确版本（同 python-asr/requirements.txt 的理由：
+# CI 每次构建装「当时最新版」的话，上游坏版本或被投毒的版本会在我们一行代码没改的情况下
+# 被 PyInstaller 打进二进制。升级请显式改这里。）
+#
+# 与 ASR 那份对齐的部分：fastapi / uvicorn / pyinstaller 用的是同一批已在三平台 CI 上验证过的版本号，
+# 两边共用一个 venv 也不会打架。
+fastapi==0.115.0
+uvicorn==0.32.0
+pyinstaller==6.22.3
+
+# sherpa-onnx 是引擎本体（纯 Python 的封装），它只声明一个依赖：sherpa-onnx-core==<同号>。
+# 真正的 C++ 库和 onnxruntime 都躺在 core 那个 wheel 里，所以下面两行必须同号，
+# 否则 2.0.1 的 py 层会去接一个别的版本的 .so/.dll。
+sherpa-onnx==2.0.1
+sherpa-onnx-core==2.0.1
+
+# 这里没有 numpy，是有意的：ASR 那份要读 WAV 采样所以离不开它，TTS 只需要把 float 序列写成 16bit PCM。
+# 2026-10-28 本机实测 8 秒音频 numpy 2.9ms / array() 13.8ms，3 分钟音频 208ms——
+# 相对同一段约 25 秒的合成时间可以忽略，换来的是 sidecar 少背一个约 25MB 的原生依赖和一个要钉的版本号。
+# 要加回来的话记得同时改下面的 dry-run 复核。
+
+# 传递依赖里「会被 PyInstaller 打进二进制」且带原生代码 / 反序列化面的那批也钉上。
+# 纯 Python 的（click / anyio / h11 / idna / annotated-types / typing-extensions / typing-inspection）不钉 ——
+# 逐条钉的话每次升级都要重算三平台 wheel 矩阵，摩擦抵不过收益。
+pydantic-core==2.50.1
+starlette==0.38.6
+
+# 三平台 dry-run 复核（2026-10-28 本机跑的，三个平台解析出的集合完全一致，所以本文件不需要 marker 分叉；
+# 注意 ASR 那份里 onnxruntime 要按平台分叉，这里不用 —— sherpa-onnx-core 自己带了 runtime，
+# 而且它发的是 py3-none 的按架构 wheel）：
+#   pip install --dry-run --ignore-installed --only-binary=:all: --python-version 312 --implementation cp \
+#     --abi cp312 --abi abi3 --abi none [--platform macosx_11_0_arm64 | --platform macosx_10_15_x86_64 | --platform win_amd64] \
+#     --platform any -r python-tts/requirements.txt
+# mac 的 x86_64 只能用 macosx_10_15_x86_64 这个 tag 去验：sherpa-onnx 的 Intel wheel 就是从 10.15 起步的，
+# 用更低的 deployment target（如 10_13）会得到「from versions: none」，看起来像上游没发其实是我们问错了架构。

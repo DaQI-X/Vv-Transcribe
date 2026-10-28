@@ -1269,6 +1269,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   white-space: nowrap;
 }
 
+/* 返回按钮：转写结果页表头与字幕配音页共用这一套，两处外观不允许漂移 */
 .transcript-editor__back-btn {
   display: flex;
   align-items: center;
@@ -1281,7 +1282,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
   font-family: var(--font-sans);
 }
 
@@ -1732,6 +1733,11 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .settings-modal__cancel-btn {
+  /* Tailwind preflight 把 svg 变成 display:block：不显式排成一行，图标就会孤零零挂在文字上面 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 8px 20px;
   border-radius: 10px;
   border: 1px solid var(--border-color);
@@ -1749,6 +1755,10 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .settings-modal__save-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 8px 20px;
   border-radius: 10px;
   border: none;
@@ -1792,6 +1802,57 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .settings-modal__dict-update-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 按需组件：一组件一行，状态行 + 说明 + 进度 + 动作，纵向排开，避免一行里挤下三种信息 */
+.vv-component-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.vv-component-row__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vv-component-row__name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.vv-component-row__meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.vv-component-row__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.vv-component-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vv-component-progress .media-progress__bar {
+  flex: 1;
+  height: 4px;
+}
+
+.vv-component-progress__text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 /* 关闭确认条：提示靠左、两个按钮仍贴右，沿用 footer 的 flex 布局 */
@@ -1889,29 +1950,169 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-secondary);
 }
 
-/* 配音弹窗：这里的信息全是「要烧多少次调用、拿到了什么」的凭据，排版按信息密度排，不做装饰 */
-.voice-summary__counts {
+/* ============================================
+ * 字幕配音工作台（页面）
+ *
+ * 布局抄结果页：整页撑满窗口高度，两列各自内部滚动，不做嵌套滚动。
+ * 左列管输入和参数，右列只有一个状态位（待开始 / 合成中 / 完成）。
+ * ============================================ */
+.voice-studio {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: var(--text-primary);
+  flex-direction: column;
+  height: calc(100vh - 80px);
+  padding: 24px;
+  gap: 16px;
+  overflow: hidden;
+  animation: fadeInUp 0.4s ease-out;
 }
 
-.voice-summary__counts strong {
-  color: var(--brand-blue);
-  font-weight: 600;
+/* 配音页只有一个返回入口，不再套首页那枚灰底药丸：
+ * 药丸自带的 margin-bottom:16px 会叠上这里的 gap:16px，抬头到内容之间凭空多出一段空。
+ * 靠左由 .voice-studio 的 padding 决定，按钮本身按内容收缩，不要铺满一整行。 */
+.voice-studio__back {
+  display: flex;
+  width: fit-content;
 }
 
-.voice-summary__cost,
-.voice-summary__config {
-  margin: 8px 0 0;
+.voice-studio__grid {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 16px;
+}
+
+.voice-studio__panel {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background: var(--bg-card);
+  overflow-y: auto;
+}
+
+.voice-studio__label {
   font-size: 12px;
-  line-height: 1.7;
+  font-weight: 600;
   color: var(--text-secondary);
 }
 
-.voice-summary__config code {
+.voice-studio__sources {
+  display: flex;
+  gap: 8px;
+}
+
+/* 来源二选做成小 chip：它和顶部 tab 不是一级，不该抢同一个视觉层级 */
+.voice-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.voice-source:hover:not(:disabled) {
+  border-color: var(--brand-blue);
+  color: var(--text-primary);
+}
+
+.voice-source.active {
+  border-color: var(--brand-blue);
+  background: var(--brand-teal-light);
+  color: var(--brand-blue);
+}
+
+.voice-source:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.voice-source__count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.voice-source.active .voice-source__count {
+  color: var(--brand-blue);
+}
+
+.voice-studio__input {
+  flex: 1;
+  min-height: 140px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: var(--font-sans);
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+}
+
+.voice-studio__input:focus {
+  border-color: var(--brand-blue);
+}
+
+.voice-studio__input:disabled {
+  opacity: 0.6;
+}
+
+/* 从转写带入是只读的：段落归转写页管，这里只报数 */
+.voice-studio__readonly {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-page);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.voice-studio__hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.voice-studio__fields {
+  display: flex;
+  gap: 12px;
+}
+
+.voice-studio__field {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.voice-studio__config {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.voice-studio__config code {
   padding: 1px 6px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -1920,86 +2121,141 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   font-size: 11px;
 }
 
-.voice-preview {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-color);
-}
-
-.voice-preview__input {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1.5px solid var(--border-color);
-  border-radius: 10px;
-  background: var(--bg-page);
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.6;
+.voice-studio__link {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--brand-blue);
+  cursor: pointer;
   font-family: var(--font-sans);
-  outline: none;
-  resize: vertical;
-  transition: border-color 0.2s ease;
 }
 
-.voice-preview__input:focus {
-  border-color: var(--brand-blue);
+.voice-studio__link:hover {
+  text-decoration: underline;
 }
 
-.voice-preview__input:disabled {
-  opacity: 0.5;
-}
-
-.voice-preview__row {
+.voice-studio__preview {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 10px;
 }
+
+/* 弹窗里那套按钮是按 flex:1 平分宽度的；这里和试听音频条并排，按文字撑开就好，
+   否则「试听第一句」会被挤成两行，图标孤零零挂在上面 */
+.voice-studio__preview .settings-modal__cancel-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 花多少钱写在按钮上面：一次调用一次钱，点下去之前必须看得见次数 */
+.voice-studio__cost {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.voice-studio__cost strong {
+  color: var(--brand-blue);
+  font-weight: 600;
+}
+
+.voice-studio__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 10px;
+  background: var(--brand-blue);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background 0.2s ease;
+}
+
+.voice-studio__cta:hover:not(:disabled) {
+  background: var(--brand-blue-hover);
+}
+
+.voice-studio__cta:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.voice-studio__placeholder {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.voice-studio__result {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.voice-studio__result-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.voice-studio__tally {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.voice-studio__note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* 合成中复用转写的 processing 视觉，但状态页那张卡是「整页居中」的绝对定位 + 固定 620x360。
+   工作台里它只是右列的一块，所以只拆外壳，动画与排版原样保留。 */
+.voice-studio .status-card {
+  position: static;
+  top: auto;
+  left: auto;
+  transform: none;
+  width: 100%;
+  height: auto;
+  min-height: 340px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.voice-studio .status-card--processing {
+  padding-top: 0;
+}
+
+/* 下面两组沿用配音弹窗时代的产物样式，页面直接复用：试听播放器 + 一条轨的账目 */
 
 .voice-preview__audio {
   flex: 1;
   min-width: 0;
   height: 32px;
-}
-
-.voice-preview__hint {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-muted);
-}
-
-.voice-progress__bar {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--bg-page);
-  border: 1px solid var(--border-color);
-  overflow: hidden;
-}
-
-.voice-progress__fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--brand-blue);
-  transition: width 0.3s ease;
-}
-
-.voice-progress__stage {
-  margin: 12px 0 0;
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-.voice-progress__detail {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.voice-progress__note {
-  margin: 12px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
 }
 
 .voice-result__audio {

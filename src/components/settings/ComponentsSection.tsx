@@ -1,0 +1,333 @@
+/**
+ * 设置 → 关于与更新里的「按需组件」栏
+ *
+ * 装的是本地配音的引擎二进制与两份模型。它们不进安装包（合计 500MB 以上，
+ * 而大部分用户根本不用本地配音），所以这一栏存在的意义就是把「缺了怎么补上」这件事
+ * 放在用户已经知道的地方——和「链接解析组件」并排，不再新开一个 Tab。
+ *
+ * 三条口径跟着主进程走，界面自己不发明：
+ * - 组件名、说明、能装哪些，全在 services/componentService.ts 的 SPECS 白名单里；
+ *   界面只印 id/title/hint，未知 id 到不了主进程。
+ * - 版本号与下载体积只在点过「检查清单」之后才有；没检查过时那三位是 null，
+ *   界面就说「还没和清单对过」，不拿 0 冒充已知。
+ * - 下载体积的分母可能是 0（清单没写 bytes），这时只显示已下载的字节数，不给假百分比。
+ */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Download, RefreshCw, Square, Trash2 } from 'lucide-react'
+import { toast } from '@/components/ui/Toast'
+import { getElectronAPI } from '@/hooks/useElectronAPI'
+import type { ComponentPhase, ComponentProgress, ComponentResult, ComponentState } from '@/types/component'
+
+/** 阶段名按主进程真正在做的事分三种说；「下载中 30%」套在解压上是骗人 */
+const PHASE_LABEL: Record<ComponentPhase, string> = {
+  download: '下载中',
+  extract: '解压中',
+  verify: '校验中',
+}
+
+const ACTION_LABEL: Record<ComponentState['action'], string> = {
+  install: '下载',
+  update: '更新',
+  repair: '重新下载',
+  none: '',
+}
+
+/** 字节数只显示实测值，和关于页其余地方同一口径 */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)}GB`
+  return bytes >= 1e6
+    ? `${(bytes / 1e6).toFixed(1)}MB`
+    : `${Math.max(1, Math.round(bytes / 1e3))}KB`
+}
+
+/**
+ * 一行状态：已装的说版本和占用，没装的说要多大；清单取不到下载包时不能给「可下载」的错觉。
+ * inManifest=false 有两种成因——清单里没本机这个平台，或这一版压根没发布这个组件（只发引擎、模型留下版），
+ * 界面上没有能区分两者的字段，所以文案只说成立的那一半：现在拿不到包。
+ */
+function describe(s: ComponentState): string {
+  if (!s.installed) {
+    return s.inManifest === false
+      ? '这个版本没有发布对应的下载包'
+      : s.remoteBytes !== null
+        ? `未安装，下载约 ${formatBytes(s.remoteBytes)}`
+        : '未安装'
+  }
+  const size = `占用 ${formatBytes(s.bytes)}`
+  if (s.localVersion === null) return `已在组件目录里（无版本记录），${size}`
+  if (s.inManifest === null) return `v${s.localVersion}，${size}（还没和清单对过）`
+  if (s.inManifest === false) return `v${s.localVersion}，${size}（清单里没有它的下载包）`
+  return s.action === 'none'
+    ? `v${s.localVersion}，${size}，已是清单上的最新`
+    : `v${s.localVersion}，${size}；清单上是 v${s.remoteVersion}`
+}
+
+export function ComponentsSection() {
+  const [states, setStates] = useState<ComponentState[] | null>(null)
+  const [checking, setChecking] = useState(false)
+  /** id → 在跑的阶段进度；不在这里就说明没在下载 */
+  const [progress, setProgress] = useState<Record<string, ComponentProgress>>({})
+  /** 正在等结果的组件，按动作记，避免下载/删除按钮在 await 期间还能再点一次 */
+  const [pending, setPending] = useState<Record<string, 'install' | 'remove' | 'cancel'>>({})
+  const [busy, setBusy] = useState<{ engineRunning: boolean; synthesizing: boolean } | null>(null)
+  const [stopping, setStopping] = useState(false)
+  const api = getElectronAPI()
+  /** 卸载时进度流要能退订，否则设置窗关了事件还在往已销毁的组件上 setState */
+  const mounted = useRef(true)
+
+  const applyState = useCallback((next: ComponentState | undefined) => {
+    if (!next) return
+    setStates((prev) => (prev ? prev.map((s) => (s.id === next.id ? next : s)) : prev))
+  }, [])
+
+  const refresh = useCallback(async () => {
+    if (!api) return
+    const [list, busyNow] = await Promise.all([api.listComponents(), api.getComponentBusy()])
+    if (!mounted.current) return
+    setStates(list)
+    setBusy(busyNow)
+  }, [api])
+
+  useEffect(() => {
+    mounted.current = true
+    if (!api) return
+    void refresh()
+    const unsubscribe = api.onComponentProgress?.((p) => {
+      if (mounted.current) setProgress((prev) => ({ ...prev, [p.id]: p }))
+    })
+    return () => {
+      mounted.current = false
+      unsubscribe?.()
+    }
+  }, [api, refresh])
+
+  /** 失败一律走 toast；看着像系统拦住了写入/执行时，顺手给一个能点的「打开隐私设置」 */
+  const reportFailure = useCallback((result: ComponentResult) => {
+    const message = result.error || '操作失败'
+    if (result.systemSettingsHint) {
+      toast.error(
+        message,
+        10000,
+        api ? { label: '打开隐私设置', onClick: () => void api.openSystemSettings() } : undefined
+      )
+    } else {
+      toast.error(message, 10000)
+    }
+  }, [api])
+
+  const setTaskPending = (id: string, kind: 'install' | 'remove' | 'cancel' | null) => {
+    setPending((prev) => {
+      const next = { ...prev }
+      if (kind) next[id] = kind
+      else delete next[id]
+      return next
+    })
+  }
+
+  const handleCheck = async () => {
+    if (!api || checking) return
+    setChecking(true)
+    try {
+      const result = await api.checkComponents()
+      if (!mounted.current) return
+      setStates(result.components)
+      if (!result.ok) {
+        // 清单读不通时组件列表仍是有用的那一份，所以只报原因，不假装磁盘也坏了
+        toast.error(`检查清单失败：${result.error || '未知原因'}`, 10000)
+      } else {
+        toast.success('已和组件清单对过版本')
+      }
+    } catch (err) {
+      toast.error(`检查清单失败：${err instanceof Error ? err.message : String(err)}`, 10000)
+    } finally {
+      if (mounted.current) setChecking(false)
+    }
+  }
+
+  const handleInstall = async (id: string) => {
+    if (!api) return
+    setTaskPending(id, 'install')
+    setProgress((prev) => ({ ...prev, [id]: { id, phase: 'download', done: 0, total: 0 } }))
+    try {
+      const result = await api.installComponent(id)
+      if (!mounted.current) return
+      if (result.ok) {
+        applyState(result.state)
+        toast.success('组件已装上，可以直接用了')
+      } else {
+        reportFailure(result)
+      }
+    } catch (err) {
+      toast.error(`下载组件失败：${err instanceof Error ? err.message : String(err)}`, 10000)
+    } finally {
+      if (mounted.current) {
+        setTaskPending(id, null)
+        setProgress((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        // 中途取消/断流留下的那份半成品不一定改得动磁盘状态，收尾再读一次磁盘为准
+        void refresh()
+      }
+    }
+  }
+
+  const handleCancel = async (id: string) => {
+    if (!api || pending[id] === 'cancel') return
+    setTaskPending(id, 'cancel')
+    try {
+      const result = await api.cancelComponentInstall(id)
+      if (!result.ok && mounted.current) toast.info(result.error || '这个组件现在没有在下载')
+    } finally {
+      if (mounted.current) setTaskPending(id, null)
+    }
+  }
+
+  const handleRemove = async (id: string) => {
+    if (!api) return
+    setTaskPending(id, 'remove')
+    try {
+      const result = await api.removeComponent(id)
+      if (!mounted.current) return
+      if (result.ok) {
+        applyState(result.state)
+        toast.success('已删除，磁盘空间已释放')
+      } else {
+        reportFailure(result)
+      }
+    } catch (err) {
+      toast.error(`删除组件失败：${err instanceof Error ? err.message : String(err)}`, 10000)
+    } finally {
+      if (mounted.current) setTaskPending(id, null)
+    }
+  }
+
+  /** 引擎不会在配完音后自己退，所以「先停引擎」这颗按钮必须在这儿——没有它，同一会话里组件永远动不了 */
+  const handleStopEngine = async () => {
+    if (!api || stopping) return
+    setStopping(true)
+    try {
+      const result = await api.stopLocalVoiceEngine()
+      if (!mounted.current) return
+      if (result.ok) toast.success(result.stopped ? '本地配音引擎已停止' : '本地配音引擎本来就没在跑')
+      else toast.error(result.error || '停止本地配音引擎失败', 10000)
+      // 停没停成以主进程为准，界面不自记一份「我觉得它停了」
+      void refresh()
+    } catch (err) {
+      toast.error(`停止本地配音引擎失败：${err instanceof Error ? err.message : String(err)}`, 10000)
+    } finally {
+      if (mounted.current) setStopping(false)
+    }
+  }
+
+  const totalBytes = (states ?? []).reduce((sum, s) => sum + s.bytes, 0)
+  const anyInstalling = Object.keys(pending).some((id) => pending[id] === 'install')
+
+  return (
+    <div className="settings-form-group">
+      <label className="settings-form-label">按需组件</label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <button
+          type="button"
+          onClick={handleCheck}
+          disabled={checking || anyInstalling}
+          className="settings-modal__dict-update-btn"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        >
+          <RefreshCw size={12} />
+          {checking ? '检查中...' : '检查清单'}
+        </button>
+        {busy?.engineRunning && (
+          <button
+            type="button"
+            onClick={handleStopEngine}
+            disabled={stopping || busy.synthesizing}
+            className="settings-modal__dict-update-btn"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          >
+            <Square size={12} />
+            {stopping ? '停止中...' : '停止本地配音引擎'}
+          </button>
+        )}
+        <span style={{ fontSize: 11, color: '#9AA5B8' }}>
+          {states === null ? '读取中...' : `合计占用 ${formatBytes(totalBytes)}`}
+        </span>
+      </div>
+      <span className="settings-form-hint">
+        本地配音用的引擎和模型不随安装包分发，缺哪个下哪个。下载走 GitHub Release，
+        完成后按文件指纹校验过才会替换现有组件，中途失败或取消都不会留下半份。
+        {busy?.synthesizing && '（有一批字幕配音正在逐段合成，等它跑完或先取消这一批，才能动组件）'}
+      </span>
+
+      {(states ?? []).map((s) => {
+        const p = progress[s.id]
+        const task = pending[s.id]
+        const percent = p && p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : null
+        return (
+          <div className="vv-component-row" key={s.id}>
+            <div className="vv-component-row__head">
+              <span className="vv-component-row__name">{s.title}</span>
+              <span className="vv-component-row__meta">{describe(s)}</span>
+            </div>
+            <div className="vv-component-row__hint">{s.hint}</div>
+
+            {p && (
+              <div className="vv-component-progress">
+                <div className="media-progress__bar">
+                  <div
+                    className="media-progress__fill"
+                    style={{ width: `${percent === null ? 100 : percent}%`, opacity: percent === null ? 0.35 : 1 }}
+                  />
+                </div>
+                <span className="vv-component-progress__text">
+                  {PHASE_LABEL[p.phase]} {formatBytes(p.done)}
+                  {p.total > 0 ? ` / ${formatBytes(p.total)}` : ''}
+                  {percent !== null ? `（${percent}%）` : ''}
+                </span>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {s.action !== 'none' && s.inManifest !== false && (
+                <button
+                  type="button"
+                  onClick={() => void handleInstall(s.id)}
+                  disabled={!!p || task === 'remove' || busy?.synthesizing === true}
+                  className="settings-modal__save-btn"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 14px', fontSize: 12 }}
+                >
+                  <Download size={12} />
+                  {task === 'install' ? '处理中...' : ACTION_LABEL[s.action]}
+                  {s.action === 'update' && s.remoteVersion ? `到 v${s.remoteVersion}` : ''}
+                </button>
+              )}
+              {p && (
+                <button
+                  type="button"
+                  onClick={() => void handleCancel(s.id)}
+                  disabled={task === 'cancel'}
+                  className="settings-modal__dict-update-btn"
+                >
+                  {task === 'cancel' ? '取消中...' : '取消下载'}
+                </button>
+              )}
+              {s.installed && !p && (
+                <button
+                  type="button"
+                  onClick={() => void handleRemove(s.id)}
+                  disabled={task === 'remove' || busy?.synthesizing === true}
+                  className="settings-modal__dict-update-btn"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                >
+                  <Trash2 size={12} />
+                  {task === 'remove' ? '删除中...' : '删除'}
+                </button>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}

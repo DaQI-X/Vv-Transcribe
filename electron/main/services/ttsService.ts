@@ -1,18 +1,25 @@
 /**
  * 配音（TTS）服务
  *
- * 只做一件事：把一段文本交给用户在设置里配好的 OpenAI 兼容音频接口
- * （`POST {apiBase}/v1/audio/speech`），拿回音频落盘，并顺手用 ffprobe 读出它的时长。
+ * 只做一件事：把一段文本换成一条音频落盘，并带回它的时长。换的方式有两档，
+ * 对上层（ttsHandlers、配音页）是同一个契约 `{ filePath, bytes, duration }`：
+ * - 云端档（默认）：`POST {apiBase}/v1/audio/speech`，OpenAI 兼容音频接口。
+ * - 本地档：本机 sidecar（见 localTtsEngine），不花钱、不联网，回 WAV 并自带精确采样数。
  *
- * 这个时长只给「试听完那句有多长」用；铺轴不认它。接口不返回时间信息，而 ffprobe 对 mp3 报的是
+ * 这个时长只给「试听完那句有多长」用；铺轴不认它。云端接口不返回时间信息，而 ffprobe 对 mp3 报的是
  * 按码率估的容器长度（含 LAME 前后填充），实测 0.5 秒的片段会报成 0.549 秒——拼整轨时改用自己的
- * PCM 解码样本数，见 toMeasuredPcm。
+ * PCM 解码样本数，见 toMeasuredPcm。本地档的 X-Vv-Duration 就是 sidecar 数的采样数，可以直接用，
+ * 但「段与段之间怎么顺延」仍然每次都重新解一遍：VITS 同文本同音色连跑时长会抖 ±6%（2026-10-28 本机实测），
+ * 没有 seed 可钉，缓存上一次的结论就是把误差累进时间轴。
  *
- * 三条踩过坑的口径写在这里：
- * - 接口地址与 Key 跟校对共用，模型和音色**不共用**（chat 模型调音频接口会被直接拒）。
+ * 四条踩过坑的口径写在这里：
+ * - 配音有独立的一整套配置（接口地址、Key、模型、音色）；地址与 Key 留空时沿用校对那套，
+ *   但模型和音色**绝不共用**（chat 模型调音频接口会被直接拒）。
  * - 各家兼容程度不一样，接口返回 200 但 body 是 JSON 错误的网关确实存在，所以内容类型必须验，
  *   否则落盘一个 .mp3 里面装着 `{"error":...}`，用户在播放器里只会看到「加载失败」。
  * - 花费落在用户自己的 Key 上，所以任何一次调用前都得让他看清要调多少次。
+ * - 配置校验必须跟着引擎档分叉：本地档根本没有 Key 和模型，拿云端那三条去问就是把用户拦在门外；
+ *   反过来本地档真正会失败的是「音色不是编号」和「组件没下载」。判松判严都栽过（见 #220/#227）。
  */
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -21,20 +28,37 @@ import { mkdir, rm, writeFile, stat, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { probeFile, resolveFfmpegBinary } from './audioProcessor'
+import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './localTtsEngine'
 
 /** 主进程内部用的配音配置：明文 Key，只有主进程拿得到（见 settingsService 的脱敏视图） */
 export interface TTSConfig {
+  /**
+   * 用哪一档。云端档要 Key/模型/音色三样，本地档一样都不要——所以后面那三个字段的含义
+   * 是按这一档变的，任何「不分档就取值」的写法都会把另一档的配置要求强加过来。
+   */
+  engine: 'cloud' | 'local'
   apiKey: string
   apiBase: string
   model: string
+  /** 云端档是服务商的音色名；本地档是 sid 编号的字符串写法（'0'、'40'） */
   voice: string
+  /** 本地档用哪个引擎（白名单见 localTtsEngine）；云端档忽略这一项 */
+  localEngine: LocalTtsEngineId
+  /**
+   * 倍速，OpenAI 标准 `speed` 的取值范围是 0.25–4.0。只有单次调用参数能带它（设置里没有这一项），
+   * 不填按 1 处理。两档都收这个值：本地 sidecar 自己夹到 0.25–4.0，界面与云端语义因此是一套。
+   */
+  speed?: number
 }
 
 /** 单次合成产物：路径给播放器，字节数与时长给时间轴 */
 export interface SynthesizedClip {
   filePath: string
   bytes: number
-  /** 秒，ffprobe 实测；读不出来时为 0，调用方必须当成「不知道」而不是「零长度」 */
+  /**
+   * 秒。云端档是 ffprobe 读 mp3 容器，本地档是 sidecar 数的采样数；
+   * 读不出来时为 0，调用方必须当成「不知道」而不是「零长度」。
+   */
   duration: number
 }
 
@@ -47,11 +71,20 @@ const ERROR_BODY_LIMIT = 200
 /**
  * 缺哪项说哪项。让请求带着空 model 发出去，用户收到的是一条看不懂的 400，
  * 而真实原因只是「设置里配音模型还没填」。
+ *
+ * 本地档只问本地档会坏的那件事：它没有 Key、没有模型名、也没有接口地址，
+ * 唯一能从云端那档带坏的字段是音色——界面切了引擎，配置里留着的还可能是 `alloy`。
  */
 export function ttsConfigProblem(config: TTSConfig): string | null {
-  if (!config.apiKey) return '未配置 API Key，请在「设置 → 校对配置」中填写'
-  if (!config.model) return '未配置配音模型，请在「设置 → 校对配置 → 配音模型」中填写'
-  if (!config.voice) return '未配置配音音色，请在「设置 → 校对配置 → 配音音色」中填写'
+  if (config.engine === 'local') {
+    if (parseLocalTtsSid(config.voice) === null) {
+      return `本地配音的音色是一个编号（如 0），当前是「${config.voice || '空'}」。请在「设置 → 配音配置 → 本地音色」里重选一个`
+    }
+    return null
+  }
+  if (!config.apiKey) return '未配置 API Key，请在「设置 → 配音配置」中填写（留空则沿用校对配置那把）'
+  if (!config.model) return '未配置配音模型，请在「设置 → 配音配置 → 配音模型」中填写'
+  if (!config.voice) return '未配置配音音色，请在「设置 → 配音配置 → 配音音色」中填写'
   return null
 }
 
@@ -76,7 +109,8 @@ async function releasePreviewDir(): Promise<void> {
 }
 
 /**
- * 调用音频接口合成一条文本。
+ * 把一段文本换成一条音频落盘：云端打用户在设置里配好的接口，本地打本机 sidecar。
+ * 两档回同一个形状，所以逐段合成、试听、熔断、取消那套语义不需要知道对面是谁。
  * 抛错即失败，调用方负责把它变成 `{ error }` 回给界面——主进程不跨 IPC 抛（全应用统一口径）。
  */
 export async function synthesizeSpeech(
@@ -90,7 +124,22 @@ export async function synthesizeSpeech(
   const problem = ttsConfigProblem(config)
   if (problem) throw new Error(problem)
 
+  if (config.engine === 'local') {
+    // ttsConfigProblem 已经保证这是个纯数字编号，这里直接交给 sidecar 就行
+    return synthesizeLocally(trimmed, config.localEngine, Number(config.voice), config.speed ?? 1, tempDir)
+  }
+
   const url = `${config.apiBase}/v1/audio/speech`
+  // 倍速只在真的改过时才进请求体：兼容网关对未知字段的行为不一致，
+  // 默认值不带这个键，等于没改倍速的调用走的还是原来那份请求体。
+  const body: Record<string, unknown> = {
+    model: config.model,
+    input: trimmed,
+    voice: config.voice,
+    response_format: 'mp3',
+  }
+  if (config.speed && config.speed !== 1) body.speed = config.speed
+
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), SPEECH_TIMEOUT_MS)
   let bytes: Buffer
@@ -101,12 +150,7 @@ export async function synthesizeSpeech(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({
-        model: config.model,
-        input: trimmed,
-        voice: config.voice,
-        response_format: 'mp3',
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
     if (!response.ok) {
@@ -171,13 +215,14 @@ export async function previewSpeech(text: string, config: TTSConfig): Promise<Sy
   logger.userAction('TTS preview synthesized', {
     bytes: clip.bytes,
     duration: Number(clip.duration.toFixed(2)),
+    engine: config.engine,
     model: config.model,
     voice: config.voice,
   })
   return clip
 }
 
-/** 显式释放（切走、取消、退出前）；没留目录时什么都不做 */
+/** 显式释放（配音页点「清空」时）；没留目录时什么都不做 */
 export async function releasePreview(): Promise<void> {
   await releasePreviewDir()
 }
@@ -237,10 +282,24 @@ export interface TTSBatchResult {
 interface BatchJob {
   id: string
   canceled: boolean
+  /**
+   * 逐段循环还在跑。批次记录本身要活到用户释放整轨为止（合成完到点「另存」之间
+   * 它一直都在表里），所以「有没有在配音」不能拿 map 的大小判，得看这一段。
+   * #230 的组件下载/删除与「停止引擎」都按它拒绝：把正在配音的引擎杀掉，剩下的段落全失败。
+   */
+  running: boolean
   tempDir: string
 }
 
 const batchJobs = new Map<string, BatchJob>()
+
+/** 有没有一批配音正在逐段跑。侧栏组件管理与「停止引擎」的前置闸门 */
+export function hasActiveTTSSynthesis(): boolean {
+  for (const job of batchJobs.values()) {
+    if (job.running) return true
+  }
+  return false
+}
 
 /**
  * 连续失败到这个数就整批停。
@@ -267,6 +326,7 @@ export function cancelTTSSynthesis(jobId: string): boolean {
  * 逐段合成。串行，不并发：
  * 并发对配音没有意义（总调用数一样），但各家网关的 QPS 限制会让并发版本先撞 429，
  * 而且失败重试的归属会糊在一起。慢一点是这条链路本来就有的性质，界面上如实给段号。
+ * 本地档串行还有另一个理由：一次推理吃满 4 个线程，并发只会互相抢核，还会把界面拖卡。
  */
 export async function synthesizeSegments(
   segments: TTSSegmentInput[],
@@ -279,7 +339,7 @@ export async function synthesizeSegments(
   const jobId = randomUUID()
   const tempDir = newBatchDir(jobId)
   await mkdir(tempDir, { recursive: true })
-  const job: BatchJob = { id: jobId, canceled: false, tempDir }
+  const job: BatchJob = { id: jobId, canceled: false, running: true, tempDir }
   batchJobs.set(jobId, job)
 
   const total = segments.length
@@ -289,7 +349,13 @@ export async function synthesizeSegments(
   let abortedReason: string | null = null
   let consecutiveFailures = 0
 
-  logger.info('TTS', 'Batch started', { jobId, total, model: config.model, voice: config.voice })
+  logger.info('TTS', 'Batch started', {
+    jobId,
+    total,
+    engine: config.engine,
+    model: config.model,
+    voice: config.voice,
+  })
 
   // 先把 jobId 推下去：第一段在慢网里能飞几十秒，界面那时候就已经想给用户一个能按的「取消」了
   onProgress({ jobId, stage: 'synthesizing', index: 0, total })
@@ -325,6 +391,10 @@ export async function synthesizeSegments(
       }
     }
   }
+
+  // 逐段循环出界（跑完、被取消、被熔断）就不再占用引擎了。后面的拼接读的是已经落盘的
+  // wav，不需要引擎，所以组件下载与「停止引擎」在这一步之后就可以放行。
+  job.running = false
 
   return {
     job,

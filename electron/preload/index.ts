@@ -26,6 +26,12 @@ interface VoiceSegment {
   text: string
 }
 
+/** 单次配音调用的可覆盖参数：只作用于这一次任务，不写回设置 */
+interface VoiceCallOptions {
+  voice?: string
+  speed?: number
+}
+
 /** 与 index.d.ts 的 VoiceProgress 对齐：index/total 是真实段号，不做假百分比 */
 interface VoiceProgressEvent {
   jobId: string
@@ -104,12 +110,17 @@ const api = {
     ipcRenderer.invoke('proofread:explain', differences),
 
   // 配音：一次调用只合成一句，供批量之前试听；产物路径是本机文件，播放器直接吃 file://
-  previewVoice: (text: string) => ipcRenderer.invoke('tts:preview', text),
+  previewVoice: (text: string, options?: VoiceCallOptions) => ipcRenderer.invoke('tts:preview', text, options),
   releaseVoicePreview: () => ipcRenderer.invoke('tts:release'),
-  synthesizeVoice: (segments: VoiceSegment[]) => ipcRenderer.invoke('tts:synthesize', segments),
+  synthesizeVoice: (segments: VoiceSegment[], options?: VoiceCallOptions) =>
+    ipcRenderer.invoke('tts:synthesize', segments, options),
   cancelVoiceJob: (jobId: string) => ipcRenderer.invoke('tts:cancel', jobId),
   saveVoiceTrack: (jobId: string) => ipcRenderer.invoke('tts:saveTrack', jobId),
   releaseVoiceBatch: (jobId: string) => ipcRenderer.invoke('tts:releaseBatch', jobId),
+  // 本地配音引擎：只读状态（不会因此拉起引擎）、应用内重启与停止
+  getLocalVoiceStatus: (engine?: string) => ipcRenderer.invoke('tts:localStatus', engine),
+  restartLocalVoiceEngine: () => ipcRenderer.invoke('tts:localRestart'),
+  stopLocalVoiceEngine: () => ipcRenderer.invoke('tts:localStop'),
   // 一批要跑几分钟（每段一次网络请求，串行），invoke 只给最后结果；段号得推回来界面才不会像卡死
   onVoiceProgress: (callback: (data: VoiceProgressEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, data: VoiceProgressEvent) => callback(data)
@@ -127,7 +138,7 @@ const api = {
 
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
-  testConnection: (kind: 'asr' | 'ai', values: unknown) =>
+  testConnection: (kind: 'asr' | 'ai' | 'tts', values: unknown) =>
     ipcRenderer.invoke('settings:testConnection', kind, values),
 
   getServiceReady: () => ipcRenderer.invoke('app:getServiceReady'),
@@ -137,6 +148,27 @@ const api = {
   getYtDlpLocal: () => ipcRenderer.invoke('ytDlp:getLocal'),
   checkYtDlpUpdate: () => ipcRenderer.invoke('ytDlp:check'),
   applyYtDlpUpdate: () => ipcRenderer.invoke('ytDlp:apply'),
+
+  // 按需组件（本地配音引擎与模型）：不联网的那份先回，清单要用户点「检查」才读
+  listComponents: () => ipcRenderer.invoke('component:list'),
+  checkComponents: () => ipcRenderer.invoke('component:check'),
+  installComponent: (id: string) => ipcRenderer.invoke('component:install', id),
+  cancelComponentInstall: (id: string) => ipcRenderer.invoke('component:cancel', id),
+  removeComponent: (id: string) => ipcRenderer.invoke('component:remove', id),
+  getComponentBusy: () => ipcRenderer.invoke('component:busy'),
+  // 下载/解压进度是事件推回来的（129MB 的模型在慢网里要跑几分钟），不包一层界面就只剩一个转圈
+  onComponentProgress: (
+    callback: (data: { id: string; phase: 'download' | 'extract' | 'verify'; done: number; total: number }) => void
+  ) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      data: { id: string; phase: 'download' | 'extract' | 'verify'; done: number; total: number }
+    ) => callback(data)
+    ipcRenderer.on('component:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('component:progress', listener)
+    }
+  },
   // 下载进度是事件推回来的（37MB 在慢网里要跑几分钟），不包一层渲染层就看不见它在动
   onYtDlpProgress: (callback: (data: { received: number; total: number }) => void) => {
     const listener = (

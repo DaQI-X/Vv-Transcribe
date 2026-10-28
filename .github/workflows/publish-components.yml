@@ -1,0 +1,168 @@
+name: Publish components
+
+# 本地配音组件的发布流程（#234）：把 CI 构建出来的引擎二进制传到某个 Release 上，并产出 components-manifest.json。
+#
+# 为什么是 workflow_dispatch 而不是自动跑：
+# - 这些资产是「应用内按需下载」的信任来源，传错一次就会被用户机器长期缓存，版本号还得跟着清单走；
+# - 引擎二进制只能来自某一次具体的构建（PyInstaller 不可交叉编译），所以必须人工指名 run-id。
+#   「最近一次成功」那种隐式取法会让清单里的指纹对应到一次没人看过的构建上。
+#
+# 为什么上传发生在 CI 而不是本地：
+# - 三平台里 Windows x64 与 macOS x64 本来只有 CI 能产，开发机只有一份本机架构；
+# - runner 上的 GITHUB_TOKEN 自带 contents: write（本 job 单独提权），不需要任何人把 token 交给谁。
+#
+# 清单不在这里直接合进 main：脚本把生成的 components-manifest.json 当 workflow artifact 交回人工，
+# 看过 diff 再提交。这与 yt-dlp-manifest.json 的处理一致——清单是信任锚，改它必须有人签字；
+# CI 无权把自己刚生成的信任锚直接推到 main 上（那样「CI 被改」和「清单被改」就塌成同一件事了）。
+#
+# 模型不在这个流程里：第三方权重（csukuangfj/sherpa-onnx-vits-zh-ll）的再分发许可尚未核实——
+# 2026-10-28 实测该 HuggingFace 仓库的 license 字段为空、也没有 LICENSE 文件。
+# 打包侧 scripts/components-manifest.mjs 已经支持 <staging>/models/<engine-id>/，
+# 许可核实完只需要在这里加一步把目录准备好，不用改脚本。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要上传到哪个 Release（必须已存在，如 v1.0.6）'
+        required: true
+        default: 'v1.0.6'
+      runId:
+        description: 'TTS 引擎二进制来自哪一次 Build 工作流的 run-id'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-components
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 打包并上传组件资产
+    runs-on: ubuntu-latest
+    # 只有这一步需要写：上传资产与读 Release 都用这个 jobs token
+    permissions:
+      contents: write
+    # dispatch 的两个输入走 env 而不是直接插进 run 脚本：表单里填什么都是字符串，
+    # 拼进 shell 就是脚本注入的入口。下面那步 Validate 负责把形状卡死，剩下的步骤只引用变量。
+    env:
+      TAG: ${{ inputs.tag }}
+      RUN_ID: ${{ inputs.runId }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 要写成 vX.Y.Z（收到 ${TAG}）"
+            exit 1
+          fi
+          if ! printf '%s' "$RUN_ID" | grep -Eq '^[0-9]+$'; then
+            echo "::error::run-id 只能是数字（收到 ${RUN_ID}）"
+            exit 1
+          fi
+          echo "输入形状合法：tag=${TAG} run-id=${RUN_ID}"
+
+      # 打包脚本只用 node 内置模块，所以这里不 pnpm install：省掉两分钟，也少一条能挂的依赖
+      - name: Check the release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,draft,assets \
+            --jq '"Release " + .tagName + " (draft=" + (.draft|tostring) + "), 现有资产 " + (.assets | length | tostring) + " 个"'
+
+      - name: Download TTS binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: vv-tts-server-macos-arm64
+          path: raw/macos-arm64
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download TTS binaries (macOS x64)
+        uses: actions/download-artifact@v4
+        with:
+          name: vv-tts-server-macos-x64
+          path: raw/macos-x64
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download TTS binaries (Windows x64)
+        uses: actions/download-artifact@v4
+        with:
+          name: vv-tts-server-windows-x64
+          path: raw/windows-x64
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # workflow 产物名与清单里的平台键是两套命名（macos-arm64 vs darwin-arm64），在这儿翻译一次。
+      # 用 find 而不是写死相对路径：upload-artifact 里存的层级取决于当时的 path 写法，
+      # 「产物目录里就一个二进制」时靠 find 取比猜结构稳。取不到就直接红——宁可不发，
+      # 也不要发一份缺平台的清单出去（那等于把那个平台的用户挡在外面还不知道）。
+      - name: Arrange staging
+        run: |
+          set -euo pipefail
+          mkdir -p staging/darwin-arm64 staging/darwin-x64 staging/win32-x64
+          for pair in "macos-arm64:darwin-arm64:vv-tts-server" "macos-x64:darwin-x64:vv-tts-server" "windows-x64:win32-x64:vv-tts-server.exe"; do
+            src="${pair%%:*}"; rest="${pair#*:}"; key="${rest%%:*}"; bin="${rest#*:}"
+            stem="${bin%.exe}"
+            # `| head -1` 在 pipefail 下会因为对端提前关闭而把 find 记成失败，所以补 || true
+            found=$(find "raw/$src" -type f -name "${stem}*" | head -1 || true)
+            if [ -z "$found" ]; then
+              echo "::error::产物 ${src} 里找不到 ${bin}（run-id ${RUN_ID} 那次构建真的产出过 TTS 二进制吗）"
+              exit 1
+            fi
+            mv "$found" "staging/$key/$bin"
+            echo "staging/$key/$bin  $(stat -c %s "staging/$key/$bin") bytes"
+          done
+
+      - name: Pack assets and generate manifest
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          node scripts/components-manifest.mjs --build \
+            --staging=staging --out=dist-components --version="$version" --tag="$TAG"
+          {
+            echo '### 生成的清单（要人工核对后再提交进 main）'
+            echo '```json'
+            cat components-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # --clobber：同一个 Release 重跑时先删同名资产。否则 gh 会因为「已存在」失败，
+          # 而那正好发生在最需要重跑的场合（上一次传到一半断了）
+          gh release upload "$TAG" dist-components/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | .name + "  " + (.size|tostring) + "  " + (.state // "?")'
+
+      # 这一步才是对账：GitHub 上传时自己算的 digest 与清单里的 sha256 必须逐条相同。
+      # 放在上传之后是因为「我们本机算的指纹」只能自证，跨不过「资产在路上被换过」这一类问题。
+      - name: Verify the manifest against the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/components-manifest.mjs
+
+      - name: Publish the manifest for human review
+        uses: actions/upload-artifact@v4
+        with:
+          name: components-manifest
+          path: |
+            components-manifest.json
+            dist-components/
+          if-no-files-found: error
+          retention-days: 30

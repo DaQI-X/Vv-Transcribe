@@ -71,6 +71,14 @@ export interface MediaProgress {
   eta: string | null
 }
 
+/** 转写段落：本地逐段推流时挂在进度事件上，云端整份返回时挂在 asr:start 的返回值上 */
+export interface TranscribedSegment {
+  startTime: number
+  endTime: number
+  text: string
+  confidence?: number
+}
+
 export interface VoiceSegment {
   /** 段落 id，主进程只用来回指失败清单，不透明 */
   id: string
@@ -78,6 +86,14 @@ export interface VoiceSegment {
   startTime: number
   endTime: number
   text: string
+}
+
+/** 单次调用的可覆盖参数：配音页选音色/倍速时用，只作用于这一次任务，不写回 settings.json */
+export interface VoiceCallOptions {
+  /** 空串＝不覆盖，按「设置 → 配音配置」里那个音色走 */
+  voice?: string
+  /** OpenAI 标准 speed 的取值范围 0.25–4.0；不填按 1，主进程会夹边界 */
+  speed?: number
 }
 
 export interface VoiceProgress {
@@ -102,6 +118,81 @@ export interface VoiceTrack {
   estimatedCount: number
   /** 原时间轴最后一段的结束点，用来跟 duration 对照 */
   originalEnd: number
+}
+
+/**
+ * 本地配音引擎的状态快照。查状态本身不会把引擎拉起来（本地档是懒启动的），
+ * 所以打开设置页不会凭空吃掉一次解包和几百 MB 内存。
+ * mode/configuredEngine 来自已保存的设置；requestedEngine 是界面当前问的那个，
+ * 设置表单里刚换、还没点保存时两者会不一样——组件在不在场按 requestedEngine 判。
+ */
+export interface LocalTtsStatus {
+  ready: boolean
+  /** 未就绪时可直接展示给用户的原因（人话，含「该下载组件」和「端口被占」这两类） */
+  error: string | null
+  /** 按需组件在场情况：配音页的首次下载引导按这两位决定文案 */
+  binaryPresent: boolean
+  modelPresent: boolean
+  /** 端口上那个进程绑定的引擎；没起来时是 null */
+  engine: string | null
+  /** 真的加载进内存的引擎；模型是惰性的，这一位为 null 不代表用不了 */
+  engineLoaded: string | null
+  /** 音色上限：本地音色下拉按它决定 sid 能选到几；模型没加载时是 0 */
+  speakers: number
+  sampleRate: number
+  port: number
+  mode: 'cloud' | 'local'
+  configuredEngine: string
+  requestedEngine: string
+}
+
+/**
+ * 按需组件（本地配音引擎二进制、配音模型）在磁盘与清单两边的状态。
+ * 「没检查过清单」和「清单里没有本机这一条」是两回事，所以远端那三位都可以是 null。
+ */
+export interface ComponentState {
+  id: string
+  title: string
+  /** binary=一个可执行文件，archive=解压成一个目录 */
+  kind: 'binary' | 'archive'
+  /** 这一项是干什么用的，界面直接印出来 */
+  hint: string
+  installed: boolean
+  /** 磁盘实际占用（目录已展开求和），没装是 0 */
+  bytes: number
+  /** installed.json 记的版本；手工放进组件目录的那份没有记录，为 null */
+  localVersion: string | null
+  remoteVersion: string | null
+  /** 清单声明的下载体积（压缩包本身）；还没查清单时为 null */
+  remoteBytes: number | null
+  /** install=没装，update=版本不同，repair=装了但没版本记录，none=与清单一致 */
+  action: 'install' | 'update' | 'repair' | 'none'
+  inManifest: boolean | null
+}
+
+/** download=拉字节，extract=解包（archive 才有），verify=比对指纹 */
+export type ComponentPhase = 'download' | 'extract' | 'verify'
+
+export interface ComponentProgress {
+  id: string
+  phase: ComponentPhase
+  done: number
+  /** 这一阶段的分母；未知时为 0，界面按「不显示百分比」处理，不给假百分比 */
+  total: number
+}
+
+export interface ComponentResult {
+  ok: boolean
+  error: string | null
+  state?: ComponentState
+  /** 失败特征像「系统拦住了写入/执行」，界面据此给「打开隐私设置」按钮 */
+  systemSettingsHint?: boolean
+}
+
+export interface ComponentCheckResult {
+  ok: boolean
+  error: string | null
+  components: ComponentState[]
 }
 
 export interface TTSSynthesizeResult {
@@ -143,6 +234,8 @@ export interface ConnectionTestValues {
   apiBase: string
   apiKey: string
   model: string
+  /** 配音用：音频接口除了模型还要音色 id，两项都是必填 */
+  voice?: string
 }
 
 export interface ElectronAPI {
@@ -182,6 +275,8 @@ export interface ElectronAPI {
     jobId: string
     success: boolean
     provider?: 'local' | 'cloud'
+    /** 云端不逐段推流，整份结果只在这里；本地已经流式填好时界面不再覆盖 */
+    segments?: TranscribedSegment[]
     canceled?: boolean
     error?: string
   }>
@@ -193,12 +288,7 @@ export interface ElectronAPI {
     callback: (data: {
       jobId: string
       progress: number
-      segment?: {
-        startTime: number
-        endTime: number
-        text: string
-        confidence?: number
-      }
+      segment?: TranscribedSegment
       /** 引擎阶段性状态，目前只有本地首次转写的 'loading_model' */
       stage?: string
       /** 随 status 事件下发的档位与权重体积，界面用它说清「这次要下载多大」 */
@@ -237,15 +327,17 @@ export interface ElectronAPI {
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
 
   /**
-   * 配音试听：合成一句，回本机文件路径 + 字节数 + ffprobe 实测时长（秒）。
+   * 配音试听：合成一句，回本机文件路径 + 字节数 + 时长（秒）。
+   * 时长的来源按档不同：云端档是 ffprobe 的容器估算（mp3 偏大，只够给「这句有多长」用），
+   * 本地档是引擎自己数的采样数（准确）。
    * duration 为 0 是「时长没读出来」，不是「这条音频是空的」——产物本身已经落盘成功。
    * 失败一律走 error（人话原因），主进程不跨 IPC 抛。
    */
-  previewVoice: (text: string) => Promise<{
+  previewVoice: (text: string, options?: VoiceCallOptions) => Promise<{
     clip: { filePath: string; bytes: number; duration: number } | null
     error: string | null
   }>
-  /** 关闭配音弹窗时回收试听临时目录；漏调也会被启动清扫兜住 */
+  /** 离开配音工作台时回收试听临时目录；漏调也会被启动清扫兜住 */
   releaseVoicePreview: () => Promise<{ ok: boolean }>
 
   /**
@@ -253,7 +345,7 @@ export interface ElectronAPI {
    * 分钟级耗时，段号走 onVoiceProgress 推回来，invoke 只给最后结果。
    * 串行调用、每段一次请求，花的是用户 Key 的钱，所以调用点必须先在界面上确认段数。
    */
-  synthesizeVoice: (segments: VoiceSegment[]) => Promise<TTSSynthesizeResult>
+  synthesizeVoice: (segments: VoiceSegment[], options?: VoiceCallOptions) => Promise<TTSSynthesizeResult>
   /** 取消：正在飞出去的那次请求不打断，从下一段起不再调用；已成功的片段照常拼 */
   cancelVoiceJob: (jobId: string) => Promise<{ success: boolean }>
   /** 成品另存为用户选的位置（走系统保存框，主进程写盘） */
@@ -263,9 +355,35 @@ export interface ElectronAPI {
     name?: string
     error: string | null
   }>
-  /** 没另存就关掉弹窗时回收整批中间产物 */
+  /** 没另存就清空这批时回收整批中间产物（另存成功后同样回收） */
   releaseVoiceBatch: (jobId: string) => Promise<{ ok: boolean }>
   onVoiceProgress: (callback: (data: VoiceProgress) => void) => () => void
+
+  /** 本地配音引擎状态快照（只读，不拉起引擎）；engine 传界面当前选中的那个引擎 id */
+  getLocalVoiceStatus: (engine?: string) => Promise<LocalTtsStatus>
+  /**
+   * 应用内重启本地配音引擎。引擎只取已保存的设置——设置页「点保存才生效」这条口径不在这儿破例。
+   * 首次启动要解包，最长可能等两分钟。
+   */
+  restartLocalVoiceEngine: () => Promise<{ ok: boolean; error: string | null }>
+  /**
+   * 停掉后台的本地配音引擎。组件下载/删除前必须先停——那几个文件正被进程占着。
+   * 有一批配音正在逐段合成时主进程会拒绝，因为这里停了剩下的段落会全失败。
+   */
+  stopLocalVoiceEngine: () => Promise<{ ok: boolean; stopped: boolean; error: string | null }>
+
+  /**
+   * 按需组件：只读磁盘在场情况与占用体积，不联网。打开「关于与更新」先吃这一份，
+   * 要不要下载由用户点「检查」触发——直连 GitHub 时清单可能要十几秒。
+   */
+  listComponents: () => Promise<ComponentState[]>
+  checkComponents: () => Promise<ComponentCheckResult>
+  installComponent: (id: string) => Promise<ComponentResult>
+  cancelComponentInstall: (id: string) => Promise<{ ok: boolean; error: string | null }>
+  removeComponent: (id: string) => Promise<ComponentResult>
+  /** 这几个文件现在能不能动；两种占用分开报，界面给的不一样 */
+  getComponentBusy: () => Promise<{ engineRunning: boolean; synthesizing: boolean }>
+  onComponentProgress: (callback: (data: ComponentProgress) => void) => () => void
 
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
   lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>
@@ -279,8 +397,8 @@ export interface ElectronAPI {
   getDictionaryVersion: () => Promise<string>
 
   /**
-   * 脱敏视图：两把 API Key 不回明文（值根本不过 IPC），只给状态。
-   * 字段是 asrKeyStatus / aiKeyStatus（none / encrypted / plaintext / unreadable）
+   * 脱敏视图：三把 API Key 不回明文（值根本不过 IPC），只给状态。
+   * 字段是 asrKeyStatus / aiKeyStatus / ttsKeyStatus（none / encrypted / plaintext / unreadable）
    * 与 keyEncryptionAvailable，见 SettingsModal 的 KeyStatus。
    */
   getSettings: () => Promise<Record<string, unknown>>
@@ -294,7 +412,10 @@ export interface ElectronAPI {
     tierRestart: 'not-needed' | 'done' | 'busy' | 'failed'
     error: string | null
   }>
-  testConnection: (kind: 'asr' | 'ai', values: ConnectionTestValues) => Promise<TestOutcome>
+  testConnection: (
+    kind: 'asr' | 'ai' | 'tts',
+    values: ConnectionTestValues
+  ) => Promise<TestOutcome>
 
   getServiceReady: () => Promise<{
     ready: boolean

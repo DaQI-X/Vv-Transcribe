@@ -13,16 +13,18 @@ dist-electron
 dist-ssr
 *.local
 
-# Python ASR
-python-asr/venv/
-python-asr/venv-x64/
-python-asr/dist/
-python-asr/dist-arm64/
-python-asr/dist-x64/
-python-asr/build/
-python-asr/build-arm64/
-python-asr/build-x64/
-python-asr/__pycache__/
+# Python sidecars（ASR 转写 / TTS 本地配音）：venv 与 PyInstaller 产物都不进仓库
+python-*/venv/
+python-*/venv-x64/
+python-*/dist/
+python-*/dist-arm64/
+python-*/dist-x64/
+python-*/build/
+python-*/build-arm64/
+python-*/build-x64/
+python-*/dist-probe/
+python-*/build-probe/
+python-*/__pycache__/
 *.pyc
 
 # Build output

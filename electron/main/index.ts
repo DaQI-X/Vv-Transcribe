@@ -7,6 +7,7 @@ import { app, BrowserWindow, nativeImage, ipcMain, powerSaveBlocker } from 'elec
 import { join } from 'node:path'
 import { registerAllHandlers } from './ipc'
 import { startASRService, stopASRService, getASRServiceStatus } from './services/asrServiceManager'
+import { stopLocalTtsEngine } from './services/localTtsEngine'
 import { initDictionary } from './services/dictionaryService'
 import { logger } from './services/logger'
 import { releaseAllMediaSessions, sweepStaleMediaTempDirs } from './services/urlDownloader'
@@ -192,6 +193,10 @@ app.on('before-quit', async (e) => {
   await releaseAllMediaSessions().catch(() => {})
   await stopASRService()
   logger.info('App', 'ASR service stopped')
+  // 本地配音引擎是懒启动的：没配音过就从没存在过，这一步是空操作；配过的话它占着 370–878MB，
+  // 必须连进程组一起收掉，否则下次启动只能靠端口回收兜住
+  await stopLocalTtsEngine()
+  logger.info('App', 'Local TTS engine stopped')
   app.exit()
 })
 

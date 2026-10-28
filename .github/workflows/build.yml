@@ -43,6 +43,10 @@ jobs:
             py: python-asr/venv/Scripts/python.exe
             artifactPath: dist/*.exe
             artifactName: Vv-Transcribe-Windows-x64
+            ttsVenvCreate: python -m venv python-tts/venv
+            ttsPy: python-tts/venv/Scripts/python.exe
+            ttsArtifactPath: python-tts/dist-x64/vv-tts-server.exe
+            ttsArtifactName: vv-tts-server-windows-x64
           - label: macOS arm64
             os: macos-14
             arch: arm64
@@ -52,6 +56,10 @@ jobs:
             py: python-asr/venv/bin/python
             artifactPath: dist/*.dmg
             artifactName: Vv-Transcribe-macOS-arm64
+            ttsVenvCreate: python -m venv python-tts/venv
+            ttsPy: python-tts/venv/bin/python
+            ttsArtifactPath: python-tts/dist-arm64/vv-tts-server
+            ttsArtifactName: vv-tts-server-macos-arm64
           - label: macOS x64 (Rosetta)
             os: macos-14
             arch: x64
@@ -62,6 +70,10 @@ jobs:
             py: arch -x86_64 python-asr/venv-x64/bin/python
             artifactPath: dist/*.dmg
             artifactName: Vv-Transcribe-macOS-x64
+            ttsVenvCreate: arch -x86_64 python -m venv python-tts/venv-x64
+            ttsPy: arch -x86_64 python-tts/venv-x64/bin/python
+            ttsArtifactPath: python-tts/dist-x64/vv-tts-server
+            ttsArtifactName: vv-tts-server-macos-x64
 
     steps:
       - name: Checkout
@@ -94,6 +106,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/yt-dlp-manifest.mjs
 
+      # 本地配音组件的清单（#234）与 Release 资产对账：清单声明的 sha256 必须等于 GitHub 上传时自己算的 digest。
+      # 清单文件还没进仓库时脚本只打一行说明再退出 0——那是「这条链路还没对外」的正常状态，
+      # 但文件一旦进来，下面任何一条对不上就是拒绝构建的理由（清单是应用内按需下载的唯一信任来源）。
+      - name: Verify components manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/components-manifest.mjs
+
       - name: Install Rosetta (macOS x64 only)
         if: matrix.needsRosetta
         run: softwareupdate --install-rosetta --agree-to-license
@@ -111,6 +131,28 @@ jobs:
 
       - name: Build ASR binary (${{ matrix.arch }})
         run: node scripts/build-asr.mjs --arch=${{ matrix.arch }}
+
+      # 本地配音 sidecar。放在 Electron 打包前面：sherpa-onnx 的 wheel 矩阵或 PyInstaller 收原生库
+      # 这几件事一旦在某个平台挂了，没必要再等两分钟的 pnpm build + electron-builder。
+      # 产物只当 workflow artifact 存着，不进安装包——模型与引擎二进制走 #234 的 components Release
+      # + 自家清单按需下载，安装包体积因此不受这项功能影响。
+      - name: Create TTS Python venv
+        run: ${{ matrix.ttsVenvCreate }}
+
+      - name: Install TTS Python dependencies
+        run: |
+          ${{ matrix.ttsPy }} -m pip install --upgrade pip
+          ${{ matrix.ttsPy }} -m pip install -r python-tts/requirements.txt
+
+      - name: Build TTS binary (${{ matrix.arch }})
+        run: node scripts/build-tts.mjs --arch=${{ matrix.arch }}
+
+      - name: Upload TTS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.ttsArtifactName }}
+          path: ${{ matrix.ttsArtifactPath }}
+          if-no-files-found: error
 
       - name: Build renderer + main
         run: pnpm build

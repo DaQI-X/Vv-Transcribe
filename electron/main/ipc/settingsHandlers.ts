@@ -1,7 +1,7 @@
 /**
  * 设置持久化 IPC 处理器
  * 提供设置的读取、保存，以及「测试连接 / 检查引擎状态」接口
- * 数据存储在 userData/settings.json；两把 API Key 只在主进程解密，回给界面的一律是脱敏视图
+ * 数据存储在 userData/settings.json；三把 API Key 只在主进程解密，回给界面的一律是脱敏视图
  */
 import { ipcMain } from 'electron'
 import {
@@ -9,6 +9,7 @@ import {
   loadSettings,
   saveSettings,
   normalizeLocalModel,
+  normalizeTtsEngine,
   type AppSettings,
   type LocalModelTier,
   type SettingsView,
@@ -18,8 +19,10 @@ import { hasActiveTranscription } from './asrHandlers'
 import {
   testASRConfig,
   testAIConfig,
+  testTTSConfig,
   type AsrTestValues,
   type AITestValues,
+  type TTSTestValues,
   type TestOutcome,
 } from '../services/connectionTestService'
 import { logger } from '../services/logger'
@@ -67,7 +70,8 @@ export function registerSettingsHandlers() {
     async (
       _event,
       // 界面上的 Key 输入框留空＝不改，显式清除走 null，非空才是替换（见 saveSettings）
-      patch: Partial<AppSettings> & Partial<{ asrApiKey: string | null; aiApiKey: string | null }>
+      patch: Partial<AppSettings> &
+        Partial<{ asrApiKey: string | null; aiApiKey: string | null; ttsApiKey: string | null }>
     ): Promise<SaveSettingsResult> => {
       const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
       const saved = await saveSettings(patch)
@@ -76,26 +80,62 @@ export function registerSettingsHandlers() {
     }
   )
 
-  ipcMain.handle('settings:testConnection', async (_event, kind: 'asr' | 'ai', values: AsrTestValues | AITestValues) => {
-    try {
-      let probe = values
-      if (!values.apiKey.trim()) {
-        const view = await getSettingsView()
-        const status = kind === 'ai' ? view.aiKeyStatus : view.asrKeyStatus
-        if (status === 'unreadable') {
-          return { level: 'fail' as const, title: '还测不了', message: UNREADABLE_KEY_MESSAGE } satisfies TestOutcome
+  ipcMain.handle(
+    'settings:testConnection',
+    async (
+      _event,
+      kind: 'asr' | 'ai' | 'tts',
+      values: AsrTestValues | AITestValues | TTSTestValues
+    ) => {
+      try {
+        // 配音这一腿的回落口径必须与 getTTSConfig 一致：接口地址与 Key 留空时用的是校对那套。
+        // 测试不跟着回落就会出现「自检报没填、点开始配音却跑得通」这种最难解释的分歧。
+        // 但本地配音档例外：Key 与地址根本不参与这一档，跟着回落等于把能用的人拦在门外（#220/#227）。
+        const formKey = String((values as { apiKey?: unknown }).apiKey ?? '')
+        const formBase = String((values as { apiBase?: unknown }).apiBase ?? '')
+        const isLocalTTS =
+          kind === 'tts' && normalizeTtsEngine((values as { engine?: unknown }).engine) === 'local'
+        const needSavedKey = !isLocalTTS && !formKey.trim()
+        const needSavedBase = !isLocalTTS && kind === 'tts' && !formBase.trim()
+        let probe = values
+        if (needSavedKey || needSavedBase) {
+          const view = await getSettingsView()
+          const saved = await loadSettings()
+          const effectiveKey =
+            kind === 'tts'
+              ? saved.ttsApiKey || saved.aiApiKey
+              : kind === 'ai'
+                ? saved.aiApiKey
+                : saved.asrApiKey
+          const statuses =
+            kind === 'tts'
+              ? [view.ttsKeyStatus, view.aiKeyStatus]
+              : [kind === 'ai' ? view.aiKeyStatus : view.asrKeyStatus]
+          if (needSavedKey && !effectiveKey && statuses.includes('unreadable')) {
+            return {
+              level: 'fail' as const,
+              title: '还测不了',
+              message: UNREADABLE_KEY_MESSAGE,
+            } satisfies TestOutcome
+          }
+          // 测试用的 Key 必须和真正干活的是同一把：表单留空时回落到已保存的那把，
+          // 否则改个接口地址就得重贴 Key，测出来永远是「还没填」
+          probe = {
+            ...values,
+            apiKey: needSavedKey ? effectiveKey : values.apiKey,
+            apiBase: needSavedBase ? saved.aiApiBase : values.apiBase,
+          }
         }
-        // 测试用的 Key 必须和真正干活的是同一把：表单留空时回落到已保存的那把，
-        // 否则改个接口地址就得重贴 Key，测出来永远是「还没填」
-        const saved = await loadSettings()
-        probe = { ...values, apiKey: kind === 'ai' ? saved.aiApiKey : saved.asrApiKey }
+        if (kind === 'tts') return await testTTSConfig(probe as TTSTestValues)
+        return kind === 'ai'
+          ? await testAIConfig(probe as AITestValues)
+          : await testASRConfig(probe as AsrTestValues)
+      } catch (err) {
+        // 兜底：任何未预期异常都要变成界面上的结论，而不是让渲染层的 await 直接抛
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error('ConnTest', 'probe crashed', { kind, message })
+        return { level: 'fail' as const, title: '测试没能跑完', message }
       }
-      return kind === 'ai' ? await testAIConfig(probe as AITestValues) : await testASRConfig(probe as AsrTestValues)
-    } catch (err) {
-      // 兜底：任何未预期异常都要变成界面上的结论，而不是让渲染层的 await 直接抛
-      const message = err instanceof Error ? err.message : String(err)
-      logger.error('ConnTest', 'probe crashed', { kind, message })
-      return { level: 'fail' as const, title: '测试没能跑完', message }
     }
-  })
+  )
 }
