@@ -218,6 +218,13 @@ jobs:
           fi
           echo "package.json ${pkg_version} == tag ${GITHUB_REF_NAME}，版本一致"
 
+      - name: Setup Node
+        # 打包脚本只用 node 内置模块，所以这里不 pnpm install（理由与 publish-components 那条一样：
+        # 少一条能挂的依赖，也省两分钟）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -238,18 +245,109 @@ jobs:
           echo "release-notes.md $(wc -c < release-notes.md) bytes:"
           cat release-notes.md
 
+      # ── 本地配音组件随本版一起发布（#234）────────────────────────────────────────
+      # 为什么挪进创建过程：仓库 2026-10-26 开了 Release immutability，已发布的 Release 事后
+      # 一个资产都加不进去（publish-components.yml 就死在这上面，HTTP 422）。唯一合法的位置是
+      # 「创建 Release 时一起传」，而那只有本 job 做得到。附带的好处是真的：这三份二进制与三个
+      # 安装包出自同一次构建，不再需要人工指名 run-id，清单指纹对应的必然是眼前这一次产物。
+      #
+      # 代价也要认：这几步一旦红，本版 Release 就发不出去（因为跳过去发布就等于永久传不上去）。
+      # 这是两害相权里选中的那一个——宁可当晚补一步再发，也不要发一个「引擎永远没下载包」的版本。
+      - name: Arrange component staging
+        run: |
+          set -euo pipefail
+          mkdir -p staging/darwin-arm64 staging/darwin-x64 staging/win32-x64
+          # workflow 产物名（macos-arm64）与清单里的平台键（darwin-arm64）是两套命名，在这儿翻译一次。
+          # 用 find 而不是写死相对路径：upload-artifact 存的层级取决于当时的 path 写法，
+          # 「产物目录里就一个二进制」时靠 find 取比猜结构稳。
+          for pair in "vv-tts-server-macos-arm64:darwin-arm64:vv-tts-server" "vv-tts-server-macos-x64:darwin-x64:vv-tts-server" "vv-tts-server-windows-x64:win32-x64:vv-tts-server.exe"; do
+            src="${pair%%:*}"; rest="${pair#*:}"; key="${rest%%:*}"; bin="${rest#*:}"
+            stem="${bin%.exe}"
+            # `| head -1` 在 pipefail 下会因为对端提前关闭而把 find 记成失败，所以补 || true
+            found=$(find "artifacts/$src" -type f -name "${stem}*" | head -1 || true)
+            if [ -z "$found" ]; then
+              echo "::error::产物 $src 里找不到 $bin——这个平台的引擎二进制没构建出来，宁可不发这一版，也不要发一份缺平台的清单（那等于把那个平台的用户挡在按需下载外面）"
+              exit 1
+            fi
+            mv "$found" "staging/$key/$bin"
+            echo "staging/$key/$bin  $(stat -c %s "staging/$key/$bin") bytes"
+          done
+
+      - name: Pack component assets and generate manifest
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/components-manifest.mjs --build \
+            --staging=staging --out=dist-components --version="$version" --tag="$GITHUB_REF_NAME"
+          # 清单要人工看过 diff 才提交进 main（应用读的是 main 上那份），所以把全文抄进 job summary：
+          # 原始日志匿名是 403，summary 与公开资产才是「谁都能复核」的那两份副本。
+          {
+            echo "### 本版生成的组件清单（人工核对后再提交进 main）"
+            echo '```json'
+            cat components-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -l dist-components/
+
+      # 七个要挂的文件在这儿收齐（3 安装包 + 3 份引擎资产 + 1 份清单），发布步骤只认 publish/*。
+      # 为什么不用 artifacts/**/*.dmg 那种通配：① 它正是 v1.0.6 多出那枚 vv-tts-server.exe 的原因
+      # （**/*.exe 把 Windows 引擎二进制也当安装包挂了上去，白多一枚 24MB 公开资产，还绕过清单）；
+      # ② 单层 * 依赖 upload-artifact 内部到底保不保留 dist/ 这一层，而这一步挂了就是整版发不出去，
+      # 不该把发布押在 glob 语义上。find + 显式复制把这件事变成能看懂的错误。
+      - name: Collect release files
+        run: |
+          set -euo pipefail
+          mkdir -p publish
+          for pair in "Vv-Transcribe-macOS-arm64:dmg" "Vv-Transcribe-macOS-x64:dmg" "Vv-Transcribe-Windows-x64:exe"; do
+            src="${pair%%:*}"; ext="${pair#*:}"
+            found=$(find "artifacts/$src" -type f -name "*.${ext}" | head -1 || true)
+            if [ -z "$found" ]; then
+              echo "::error::产物 $src 里没找到 .$ext 安装包——三个安装包少一个都不该发（下载直链与官网按钮都指向它）"
+              exit 1
+            fi
+            cp "$found" "publish/"
+          done
+          cp dist-components/* publish/
+          cp components-manifest.json publish/
+          n=$(ls publish | wc -l)
+          if [ "$n" -ne 7 ]; then
+            echo "::error::publish/ 里是 $n 个文件，应为 7（3 安装包 + 3 份引擎资产 + 1 份清单）——Release 一旦发出去就不可变，多挂少挂都补不回来，所以在这儿拦住"
+            ls -l publish/
+            exit 1
+          fi
+          echo "publish/ 里要挂的 $n 个文件："
+          ls -l publish/
+
       - name: Publish to GitHub Release
         # 钉 SHA 而不是 @v2：这一步跑在 release job 里，环境变量里有能写 GitHub Release 的
         # GITHUB_TOKEN。tag 是可移动的，上游一旦 force-move 或发了被投毒的版本，我们一行代码
         # 没改就会跑到它身上。3bb1273 = v2 系列当前指向的提交（release 2.6.2，2026-04-12）。
         # 升级流程：核对官方 release 页面与源码后，改这里并保证注释里的版本号一起更新。
+        #
+        # ⚠ 每个版本只允许这一步成功一次。Release 一旦创建就是不可变的（仓库设置，2026-10-26），
+        # 再跑一次「Re-run jobs」会在资产上传处 422——那不是新 bug，别去修 gh 或换 action。
+        # 资产没传全又要重发，只有两个办法：挪版本号重打 tag，或临时关掉 immutability。
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
-          files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.exe
+          files: publish/*
           body_path: release-notes.md
           # 与 body_path 并存时，action 会把自动生成的 changelog 追加在正文之后
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      # 对账放在发布之后：这一步比的是 GitHub 上传时自己算出来的 digest，跨得过「资产在路上被换过」
+      # 那一类问题，而我们本机算的 sha256 只能自证。它同时也是「人工核对清单」的凭据——
+      # 绿了就说明 main 上即将提交的那份与 Release 上真实存在的资产逐条对得上。
+      # 失败原因必须落进 ::error:: 注解：原始日志匿名 403，只有注解公开可读（理由见 publish-components 那步）。
+      - name: Verify the manifest against the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! node scripts/components-manifest.mjs 2>/tmp/verify.err; then
+            cat /tmp/verify.err
+            echo "::error::清单与 ${GITHUB_REF_NAME} 上的资产对账失败：$(tr '\n' ' ' < /tmp/verify.err)"
+            exit 1
+          fi
+          cat /tmp/verify.err || true
 

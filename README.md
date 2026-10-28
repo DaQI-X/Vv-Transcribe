@@ -137,9 +137,13 @@ basic_one/
 │                                      #   先校验 tag 在 main 上、package.json 版本 == tag，再发 .dmg/.exe）。
 │                                      #   三个目标各自构建 vv-tts-server 并 upload artifact；build job 早期有一步
 │                                      #   「Verify components manifest」——清单文件不存在时只提示并退 0（现在就是这条路），
-│                                      #   一旦存在就对不上账硬失败
-├── .github/workflows/publish-components.yml # 手工触发（workflow_dispatch，填 build 的 runId）：把三个平台的
-│                                      #   sidecar 传成 Release 资产并生成 components-manifest.json。
+│                                      #   一旦存在就对不上账硬失败。
+│                                      #   release job 在创建 Release 前把三份引擎打成资产、生成 components-manifest.json，
+│                                      #   与三个安装包一起挂上（immutability 只允许这一刻传），发布后再拿 GitHub 算的
+│                                      #   digest 对一遍账
+├── .github/workflows/publish-components.yml # ⚠ 已被上面那条取代（2026-10-29）：它只能「事后往已发布的
+│                                      #   Release 加资产」，而仓库开了 Release immutability，Upload 那步必然 422。
+│                                      #   留着只作为「临时关掉 immutability 后补历史版本资产」的回收路径。
 │                                      #   ⚠ 这份清单目前还不在 main 上（仓库里没有 components-manifest.json）：
 │                                      #     点「检查清单」会报「这一版还没有发布组件清单（404），本版没有对应的下载包」，
 │                                      #     引擎那一行收起下载按钮、同说这句（2026-10-28 #251：404 是服务器答清楚了
@@ -455,7 +459,7 @@ pnpm build:mac:arm64
 
 清单本身用 `pnpm check:yt-dlp-manifest` 与上游 `SHA2-256SUMS` + Release API 逐条对账（版本号、资产名、指纹、体积），CI 把它放在装依赖之前（`Setup Python` 之后、`pnpm install` 之前）——清单写错了，没必要再花三平台的构建时间去发现；网络拉不到上游时用 `--offline` 只验结构。2026-10-25 本机实测：五个资产全部与上游一致（macOS 37.2 MB / win32-x64 17.9 MB / win32-arm64 21.7 MB / linux-x64 40.6 MB / linux-arm64 40.3 MB）。
 
-本地配音的 sidecar 不走这条：`build:mac:arm64` / `build:electron*` 里没有 `build:tts`，electron-builder 的 `extraResources` 也只列了 `python-asr/dist-<arch>`——安装包**不含**配音引擎（见「按需组件」的理由）。CI 每个平台各编一份 `python-tts/dist-<arch>/vv-tts-server[.exe]` 并传成 `vv-tts-server-<platform>-<arch>` 这份 artifact；`publish-components.yml` 是**手动触发**的（要指名 `tag` 与哪一次 Build 的 `runId`——引擎二进制只能来自某一次具体构建，「取最近一次成功」会让清单指纹对应到一次没人看过的构建上），它把那三份资产传到已存在的 Release 上，并生成 `components-manifest.json` 当 **workflow artifact 交回人工**，看过 diff 再提交——CI 不把自己刚生成的信任锚直接推上 main。这份流程里没有模型：第三方权重的再分发许可尚未核实（2026-10-28 实测该 HuggingFace 仓库 `license` 字段为空、也没有 LICENSE 文件），而模型这一路本来就不走 Release（应用从 hf-mirror 自取）。`build.yml` 里那步 `Verify components manifest` 只在仓库根有这份清单时才对账（不存在只提示并退 0，存在即硬失败；对的是清单声明的 sha256 与 GitHub 上传时自己算的 digest）。本地要手工出这份二进制就是 `pnpm setup:tts` + `pnpm build:tts`；`pnpm check:components-manifest` 是发布后的独立复核（比对 GitHub 给每个资产自己算的 digest），清单还没进仓库时它只打一行「本地配音组件尚未发布」再退 0，联网不通或只改文案时用 `--offline` 做本地结构校验。
+本地配音的 sidecar 不走这条：`build:mac:arm64` / `build:electron*` 里没有 `build:tts`，electron-builder 的 `extraResources` 也只列了 `python-asr/dist-<arch>`——安装包**不含**配音引擎（见「按需组件」的理由）。CI 每个平台各编一份 `python-tts/dist-<arch>/vv-tts-server[.exe]` 并传成 `vv-tts-server-<platform>-<arch>` 这份 artifact；这三份由 **`build.yml` 的 release job 在创建 Release 的那一刻**打成资产、连同生成的 `components-manifest.json` 一起挂上（2026-10-29 改的：仓库开了 Release immutability，「事后往已发布的 Release 加资产」这条路必然 HTTP 422，只有创建那一刻传得进去；顺带把「人工指名 run-id」也省了——三份二进制与三个安装包出自同一次 run，指纹天然对得上眼前这次产物）。原来的 `publish-components.yml` 就此成为回收路径（只在临时关掉 immutability 补历史版本时才有用）。清单仍然要**人工看过 diff 再提交进 main**——CI 不把自己刚生成的信任锚直接推上 main，全文会抄进 job summary，Release 上也有一份公开可读的资产副本。这份流程里没有模型：第三方权重的再分发许可尚未核实（2026-10-28 实测该 HuggingFace 仓库 `license` 字段为空、也没有 LICENSE 文件），而模型这一路本来就不走 Release（应用从 hf-mirror 自取）。`build.yml` 里那步 `Verify components manifest` 只在仓库根有这份清单时才对账（不存在只提示并退 0，存在即硬失败；对的是清单声明的 sha256 与 GitHub 上传时自己算的 digest）；release job 发布之后还会再对一遍同一笔账。`win32-arm64` 在 `ENGINE_KEYS` 里但 CI 不产这一档，清单里缺它是设计内的状态（那个平台的引擎行显示「本版没有下载包」）。本地要手工出这份二进制就是 `pnpm setup:tts` + `pnpm build:tts`；`pnpm check:components-manifest` 是发布后的独立复核（比对 GitHub 给每个资产自己算的 digest），清单还没进仓库时它只打一行「本地配音组件尚未发布」再退 0，联网不通或只改文案时用 `--offline` 做本地结构校验。
 
 #### 构建 x64（Intel）DMG —— 在 arm64 Mac 上经 Rosetta
 

@@ -2,6 +2,13 @@ name: Publish components
 
 # 本地配音组件的发布流程（#234）：把 CI 构建出来的引擎二进制传到某个 Release 上，并产出 components-manifest.json。
 #
+# ⚠ 本流程已被 build.yml 的 release job 取代（2026-10-29）。仓库 2026-10-26 开了 Release immutability，
+#   已发布的 Release 一个资产都加不进去——本流程跑到 Upload 那步必然 HTTP 422（v1.0.6 就是这么停住的，
+#   run 40721273648）。资产现在只能在「创建 Release」时一起传，而那只有 build.yml 做得到。
+#   这份文件留着只作为一种回收路径：真要往历史版本补资产，得先在 Settings → General → Releases
+#   临时取消勾选 immutability，补完再勾回去；不改设置的话这里每一步都会红在同一句上。
+#   （要不要直接删掉这份，等用户拍板。）
+#
 # 为什么是人工指名而不是自动跑（两种触发方式都遵守这条）：
 # - 这些资产是「应用内按需下载」的信任来源，传错一次就会被用户机器长期缓存，版本号还得跟着清单走；
 # - 引擎二进制只能来自某一次具体的构建（PyInstaller 不可交叉编译），所以必须人工指名 run-id。
