@@ -244,6 +244,20 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
+/* 跟着档位名的「实验」标：抄 provider-badge 那一套着色，两档主题下都不用另写。
+ * 它写的是这条功能本身的成色（打包版还没在 Intel/Windows 上端到端跑过），不是装饰 */
+.upload-tab__beta {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--brand-teal-light);
+  color: var(--brand-blue);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
 .upload-zone {
   position: relative;
   display: flex;
@@ -1286,10 +1300,17 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   font-family: var(--font-sans);
 }
 
-.transcript-editor__back-btn:hover {
+.transcript-editor__back-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
   border-color: rgba(27, 85, 245, 0.3);
+}
+
+/* 配音页那颗「清空文稿」有两种按不动的时候（正在跑、输入框本来就空）：
+ * 亮着等人点就等于答应一个按下去没反应的动作 */
+.transcript-editor__back-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .transcript-editor__title {
@@ -1966,11 +1987,12 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   animation: fadeInUp 0.4s ease-out;
 }
 
-/* 配音页只有一个返回入口，不再套首页那枚灰底药丸：
+/* 配音页抬头只留「返回首页 + 清空文稿」两颗，不再套首页那枚灰底药丸：
  * 药丸自带的 margin-bottom:16px 会叠上这里的 gap:16px，抬头到内容之间凭空多出一段空。
  * 靠左由 .voice-studio 的 padding 决定，按钮本身按内容收缩，不要铺满一整行。 */
 .voice-studio__back {
   display: flex;
+  gap: 8px;
   width: fit-content;
 }
 
@@ -3180,7 +3202,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   border-color: var(--border-color);
 }
 
-:root[data-theme="dark"] .transcript-editor__back-btn:hover {
+:root[data-theme="dark"] .transcript-editor__back-btn:hover:not(:disabled) {
   background: var(--bg-page);
   border-color: var(--brand-blue);
 }

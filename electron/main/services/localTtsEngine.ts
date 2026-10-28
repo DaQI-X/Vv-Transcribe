@@ -68,6 +68,23 @@ export function normalizeLocalTtsEngine(raw: unknown): LocalTtsEngineId {
 }
 
 /**
+ * 这一档模型有几个说话人，给界面在引擎还没起来时把音色列表列全用。
+ *
+ * 为什么这儿敢写死、下面 parseLocalTtsSid 又坚持交给 sidecar 判：模型是按上游 commit + 逐文件
+ * sha256 钉死的（`ttsModelUpstream.ts`），换模型＝换指纹表，这个数不会悄悄变；而「起来的那台引擎
+ * 实际有几个」仍然只有它自己知道，所以 sid 越界一律由 sidecar 拒——两份数各司其职，不打架。
+ * 真报上来一个更大的数时，`getLocalTtsDetail` 认实时的，这里只兜「还没加载」那一段。
+ *
+ * VITS 的 5 是 2026-10-28 本机实测（第一次真合成后 /health 回 num_speakers=5）。
+ * Kokoro 写 0 是「还不知道」：本版没有它的应用内下载包（见 `ttsModelUpstream.ts` 那段范围决定），
+ * 103 那个数出自更早一轮、此刻这台机器上验不了，把一个没复核的数摆成 103 行比少摆几行更糟。
+ */
+const LOCAL_TTS_MODEL_SPEAKERS: Record<LocalTtsEngineId, number> = {
+  'sherpa-onnx-vits-zh-ll': 5,
+  'kokoro-multi-lang-v1_1': 0,
+}
+
+/**
  * 按需组件的根目录。
  * #230 的下载器把引擎二进制与模型都写进这里，约定与 ytDlpUpdate 的 userData/bin 同源
  * （应用可写、升级不动安装包），只是按组件 id 分目录，好按版本摆放与整体回收。
@@ -557,11 +574,12 @@ export function restartLocalTtsEngine(engine: LocalTtsEngineId): Promise<EngineA
 }
 
 /**
- * 本地档的「音色」在界面上是一个下拉，落到配置里是 sid 编号的字符串写法（'0'、'40'）。
+ * 本地档的「音色」在界面上是一个下拉，显示按 1…N 编号，落到配置里仍是 sid 编号的字符串写法
+ * （'0' 就是界面上那行「音色 1」——sherpa 的 sid 从 0 数起，界面从 1 数起，转换只发生在这一层）。
  * 收口成数字前先验格式：云端那档的音色名（'alloy'）会被原样带过来，
  * 直接 Number() 会得到 NaN 再被 sidecar 拒成一句看不懂的 400。
- * 上限（VITS 5 个、Kokoro 103 个）不在这里判——由 /health 报的 num_speakers 说了算，
- * 这边抄一份就是第三处需要跟引擎版本对齐的清单。
+ * 上限不在这里判，由 sidecar 按它真加载的那份模型说了算（`LOCAL_TTS_MODEL_SPEAKERS` 那份是给界面列表用的，
+ * 拿它来拒请求等于把一个静态数摆成第二道闸，模型换了它不会跟着报错）。
  */
 export function parseLocalTtsSid(raw: string): number | null {
   const trimmed = (raw || '').trim()
@@ -606,7 +624,7 @@ export interface LocalTtsDetail {
   engine: string | null
   /** 真的驻留在内存里的引擎；模型是惰性的，这一位为 null 不代表起不来 */
   engineLoaded: string | null
-  /** 音色上限：界面按它决定 sid 能选到几；模型没加载时是 0 */
+  /** 这一档有几个音色：模型真加载了用 /health 报的数，没加载用钉死指纹那份的实测值；0＝还不知道 */
   speakers: number
   sampleRate: number
   port: number
@@ -619,7 +637,9 @@ export async function getLocalTtsDetail(engine: LocalTtsEngineId): Promise<Local
     modelPresent: status.modelPresent,
     engine: null as string | null,
     engineLoaded: null as string | null,
-    speakers: 0,
+    // 引擎还没起来时也要能把音色列表列全：这一档有几个说话人是那份钉死指纹的模型的性质，
+    // 不是这台进程的性质，所以懒启动阶段照报得出来（见 LOCAL_TTS_MODEL_SPEAKERS 的口径）
+    speakers: LOCAL_TTS_MODEL_SPEAKERS[engine],
     sampleRate: 0,
     port: TTS_PORT,
   }
@@ -637,10 +657,10 @@ export async function getLocalTtsDetail(engine: LocalTtsEngineId): Promise<Local
     }
   }
 
-  // /health 报的是「这个端口上的进程」那一档的状态：speakers 和 sample_rate 都属于它那档模型。
-  // 界面上问的是另一档时（VITS 正在跑、用户把模型下拉切到 Kokoro）这两个数不能挪用——
-  // Kokoro 有 103 个音色，把 VITS 的 5 报过去等于骗用户「0–4 就是全部」。
-  // 按 0 回，界面那侧的口径是「还不知道」，等这一档真跑过一次再问就全了。
+  // /health 报的是「这个端口上的进程」那一档的状态。界面上问的是另一档时（VITS 正在跑、用户把
+  // 模型下拉切到 Kokoro），sample_rate 这种「这台进程实际在用什么采样率」不能挪用，按 0 回，
+  // 界面那侧的口径是「还不知道」。speakers 不一样：它问的是「选中这一档有几个说话人」，
+  // 跨档也得答得出，所以只在同一档时让实时值覆盖静态表（表写小了由它纠正），跨档就回表里那份。
   const servingEngine = typeof health.engine === 'string' ? health.engine : null
   const sameTier = servingEngine === engine
 
@@ -650,7 +670,7 @@ export async function getLocalTtsDetail(engine: LocalTtsEngineId): Promise<Local
     error: status.ready ? null : status.error,
     engine: servingEngine,
     engineLoaded: typeof health.engine_loaded === 'string' ? health.engine_loaded : null,
-    speakers: sameTier ? Number(health.speakers) || 0 : 0,
+    speakers: sameTier ? Number(health.speakers) || base.speakers : base.speakers,
     sampleRate: sameTier ? Number(health.sample_rate) || 0 : 0,
   }
 }

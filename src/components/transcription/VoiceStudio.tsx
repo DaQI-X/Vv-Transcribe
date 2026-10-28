@@ -22,7 +22,13 @@ import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
-import { LOCAL_TTS_ENGINE_OPTIONS, missingModelHint, voiceSidOptions } from '@/utils/localTtsEngines'
+import {
+  LOCAL_TTS_ENGINE_OPTIONS,
+  missingModelHint,
+  modelPresenceTag,
+  voiceSidLabel,
+  voiceSidOptions,
+} from '@/utils/localTtsEngines'
 import { StudioTabs } from './StudioTabs'
 
 function formatTime(seconds: number): string {
@@ -64,6 +70,9 @@ function RunningCard() {
     return `已合成 ${progress.index} / ${progress.total} 段`
   })()
 
+  // 拼接与收尾这两步在主进程没有取消位（tts:cancel 那时返回 'late'）：按钮留着就是承诺一个按下去没用的动作
+  const lateStage = progress?.stage === 'assembling' || progress?.stage === 'done'
+
   return (
     <div className="status-card status-card--processing">
       <div className="processing-header">
@@ -103,11 +112,15 @@ function RunningCard() {
       <div className="processing-text">
         <span className="processing-text__title">{stageText}</span>
         <span className="processing-text__desc">
-          {current
-            ? `正在念：${current.slice(0, 40)}${current.length > 40 ? '…' : ''}`
-            : mode === 'local'
-              ? '逐段串行交给本机引擎，一段一次合成'
-              : '逐段串行调用配音接口，一段一次请求'}
+          {lateStage
+            ? mode === 'local'
+              ? '拼接读的是已经落盘的片段，本机引擎这一轮已经用完了'
+              : '拼接读的是已经下载好的片段，不再调用接口'
+            : current
+              ? `正在念：${current.slice(0, 40)}${current.length > 40 ? '…' : ''}`
+              : mode === 'local'
+                ? '逐段串行交给本机引擎，一段一次合成'
+                : '逐段串行调用配音接口，一段一次请求'}
         </span>
       </div>
 
@@ -123,14 +136,21 @@ function RunningCard() {
         {cancelRequested && '（已请求取消，正在收尾）'}
       </div>
 
-      <button className="processing-cancel-btn" onClick={() => void cancel()} disabled={cancelRequested}>
-        {cancelRequested ? '正在取消…' : '取消配音'}
-      </button>
+      {!lateStage && (
+        <button className="processing-cancel-btn" onClick={() => void cancel()} disabled={cancelRequested}>
+          {cancelRequested ? '正在取消…' : '取消配音'}
+        </button>
+      )}
 
       <p className="voice-studio__note">
-        {mode === 'local'
-          ? '取消只拦后面的段落；正在念的那一段要等它跑完，这一段不花钱但省不下来。'
-          : '取消只拦后面的段落，正在飞的那一次请求已经发出去了，钱已经花掉。'}
+        {progress?.stage === 'assembling'
+          ? '逐段那一步已经跑完，现在是本地 ffmpeg 在拼这一条轨：不再调接口、不再花钱，但也停不下来——' +
+            '拦下来等于把已经合成好的段白扔。所以这一步没有取消按钮，等它跑完轨照常给你。'
+          : progress?.stage === 'done'
+            ? '配音轨已经拼好了，正在收尾。'
+            : mode === 'local'
+              ? '取消只拦后面的段落；正在念的那一段要等它跑完，这一段不花钱但省不下来。'
+              : '取消只拦后面的段落，正在飞的那一次请求已经发出去了，钱已经花掉。'}
       </p>
     </div>
   )
@@ -358,7 +378,7 @@ export function VoiceStudio() {
                   {LOCAL_TTS_ENGINE_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
                       {option.label}
-                      {engineModelPresent[option.value] === false ? '（模型还没下载）' : ''}
+                      {modelPresenceTag(option.value, engineModelPresent[option.value])}
                     </option>
                   ))}
                 </select>
@@ -384,7 +404,7 @@ export function VoiceStudio() {
                 >
                   {sids.map((sid) => (
                     <option key={sid} value={sid}>
-                      音色 {sid}
+                      {voiceSidLabel(sid)}
                     </option>
                   ))}
                 </select>
@@ -419,13 +439,15 @@ export function VoiceStudio() {
           <p className="voice-studio__hint">
             {local
               ? speakers > 0
-                ? `这一档有 ${speakers} 个音色（引擎加载后自己报的数）。上游没给音色名字，只能按编号挨个试听来认。`
-                : '音色总数要等引擎把模型读进内存才知道——先点一次「试听第一句」，这里就会列出全部编号。'
+                ? `这一档有 ${speakers} 个音色，从 1 开始编号。上游没给音色名字，只能挨个试听来认。`
+                : // 这一档既没核实过音色数、本版又没有下载包，那「先试听一下」不是条出路——
+                  // 模型不在盘上，点下去只会被前置检查拦下
+                  '这一档的音色总数还没核实，本版也没有它的应用内下载包——换回 VITS 才有得选。'
               : '云端能填哪些模型和音色由服务商决定，应用不替你猜，所以这两项手输。留空＝用配音配置里保存的那个。'}
           </p>
 
           <div className="voice-studio__config">
-            {local ? '配音引擎：本地（在你这台电脑上跑，不调接口）' : '配音引擎：云端接口（按服务商计费）'}
+            {local ? '配音引擎：本地（在你这台电脑上跑，不调接口）' : '配音引擎：云端接口'}
             {' · '}
             {local ? (
               <code>{selectedEngine}</code>

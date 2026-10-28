@@ -116,11 +116,12 @@ export async function checkVoiceReady(): Promise<ReadinessBlock | null> {
         settingsTab: hasInAppDownload(status.requestedEngine) ? 'about' : 'tts',
       }
     }
-    // 与主进程 ttsConfigProblem 同一口径：音色得是编号。空着不算问题（主进程按推荐档 0 处理）
+    // 与主进程 ttsConfigProblem 同一口径：音色得是列表里的一项（存的是 0-based 的 sid）。
+    // 空着不算问题（主进程按推荐档 0 处理，界面显示成「音色 1」）
     const voice = str(settings?.ttsLocalVoice)
     if (voice && !/^\d+$/.test(voice)) {
       return {
-        message: `本地配音的音色是一个编号（如 0），当前是「${voice}」。请在「设置 → 配音配置 → 本地音色」里重选一个`,
+        message: `本地配音的音色要选「本地音色」列表里的一项，当前是「${voice}」。请在「设置 → 配音配置 → 本地音色」里重选一个`,
         settingsTab: 'tts',
       }
     }

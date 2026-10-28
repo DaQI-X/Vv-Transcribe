@@ -89,6 +89,8 @@ interface VoiceStudioState {
   cancel: () => Promise<void>
   save: () => Promise<void>
   clearResult: () => void
+  /** 清空输入框里那份文稿（连带它派生的试听片段）；已经配出来的那条轨不动 */
+  clearDraft: () => void
   /** 回到上传视图（首页/换一份稿子）：跑完的那批当场回收，正在跑的那批不动 */
   backToUpload: () => void
   /** 回收这一批的中间产物临时目录（清空结果、重开一批、回首页时用；切 tab 不回收，产物要留着能回来听） */
@@ -146,10 +148,10 @@ function ensureProgressSubscription() {
 }
 
 /**
- * 问一次本地档的状态：这一档的音色上限，和两档的模型各自在不在磁盘上。
- * 查状态不会把引擎拉起来（懒启动），所以进页面就查不花钱；反过来，
- * 引擎还没把模型读进内存时 speakers 是 0——那不是「只有 0 号音色」，是「还不知道」，
- * 界面上得是两种说法。合成跑过一次之后再查一遍，音色列表就全了。
+ * 问一次本地档的状态：这一档有几个音色，和两档的模型各自在不在磁盘上。
+ * 查状态不会把引擎拉起来（懒启动），所以进页面就查不花钱；音色数也不等引擎——引擎还没把模型
+ * 读进内存时主进程按那份钉死 sha256 的模型表回实测值（VITS 5 个），只有没核实过的档位才回 0，
+ * 那是「还不知道」而不是「只有一个」。真跑过一次之后再查一遍，实报的数会覆盖表里那份。
  */
 async function refreshLocalVoiceState(requested: string) {
   const api = getElectronAPI()
@@ -363,9 +365,16 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       return
     }
     const res = await api.cancelVoiceJob(jobId)
-    if (res.success) {
+    if (res.reason === 'stopped') {
       set({ cancelRequested: true })
       toast.info('已请求取消，正在收尾')
+    } else if (res.reason === 'late') {
+      // 这一步不再置 cancelRequested：置了界面就写「正在取消…」，而拼接照旧跑完，等于跟着一起骗人
+      toast.info(
+        '逐段那一步已经跑完了，现在是本地 ffmpeg 在拼这一条轨——不再调接口、不再花钱，也停不下来。' +
+          '等它跑完，轨照常给你（已经合成好的段扔掉就白费了）',
+        9000
+      )
     } else {
       toast.error('这批任务已经不在了')
     }
@@ -407,6 +416,21 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   backToUpload: () => {
     if (get().phase === 'done') get().clearResult()
     set({ tab: 'file' })
+  },
+
+  /**
+   * 清空文稿：输入框是这一页唯一的「上一版」，想重来不该靠手选删除。
+   * 两条边界：产物与队列都不动——那是已经跑过的东西（云端花过钱、本地跑过引擎），
+   * 删它另有入口（结果卡那颗「清空」）；「从转写带入」那份文稿来自转写结果，
+   * 这一键清不动它，也不该去动，否则点一下就删了用户的转写稿。
+   */
+  clearDraft: () => {
+    const { phase, source, text, preview } = get()
+    if (phase === 'running' || source !== 'text') return
+    if (text.trim() === '' && !preview) return
+    // 试听片段是那句文稿的派生物：文稿没了还留着播放器，等于给一段已经不存在的文本挂着一段音频
+    if (preview) void getElectronAPI()?.releaseVoicePreview()
+    set({ text: '', preview: null })
   },
 
   releaseBatch: () => {

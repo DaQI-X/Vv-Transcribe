@@ -141,7 +141,7 @@ export interface LocalTtsStatus {
   engine: string | null
   /** 真的加载进内存的引擎；模型是惰性的，这一位为 null 不代表用不了 */
   engineLoaded: string | null
-  /** 音色上限：本地音色下拉按它决定 sid 能选到几；模型没加载时是 0 */
+  /** 这一档有几个音色（本地音色下拉按它列编号，界面从 1 数起、存的是 0-based sid）；没核实过的档位是 0 */
   speakers: number
   sampleRate: number
   port: number
@@ -350,8 +350,12 @@ export interface ElectronAPI {
    * 串行调用、每段一次请求，花的是用户 Key 的钱，所以调用点必须先在界面上确认段数。
    */
   synthesizeVoice: (segments: VoiceSegment[], options?: VoiceCallOptions) => Promise<TTSSynthesizeResult>
-  /** 取消：正在飞出去的那次请求不打断，从下一段起不再调用；已成功的片段照常拼 */
-  cancelVoiceJob: (jobId: string) => Promise<{ success: boolean }>
+  /**
+   * 取消：正在飞出去的那次请求不打断，从下一段起不再调用；已成功的片段照常拼。
+   * reason 是 'late' 时说明逐段循环已经跑完、现在只剩本地 ffmpeg 在拼轨——这一步没有可拦的东西，
+   * 界面要据此把取消入口收起来，不能显示「正在取消…」。
+   */
+  cancelVoiceJob: (jobId: string) => Promise<{ success: boolean; reason: 'stopped' | 'late' | 'gone' }>
   /** 成品另存为用户选的位置（走系统保存框，主进程写盘） */
   saveVoiceTrack: (jobId: string) => Promise<{
     success: boolean

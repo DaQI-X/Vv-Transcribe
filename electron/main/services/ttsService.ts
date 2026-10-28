@@ -78,7 +78,7 @@ const ERROR_BODY_LIMIT = 200
 export function ttsConfigProblem(config: TTSConfig): string | null {
   if (config.engine === 'local') {
     if (parseLocalTtsSid(config.voice) === null) {
-      return `本地配音的音色是一个编号（如 0），当前是「${config.voice || '空'}」。请在「设置 → 配音配置 → 本地音色」里重选一个`
+      return `本地配音的音色要选「本地音色」列表里的一项，当前是「${config.voice || '空'}」。请在「设置 → 配音配置 → 本地音色」里重选一个`
     }
     return null
   }
@@ -313,13 +313,22 @@ function newBatchDir(jobId: string): string {
   return join(tmpdir(), `transcribe-tts-${jobId}`)
 }
 
+/**
+ * 取消请求落在哪一步。
+ * 'late' 是「逐段循环已经出界，现在在拼轨」：拼接读的是已经落盘（云端档是已经花过钱）的片段，
+ * 停下来等于把那些段白扔了，所以这一步根本没有取消位——以前这里返回 success:true 却什么都不停，
+ * 界面写着「正在取消…」而音轨照旧拼完，是谎报。
+ */
+export type TTSCancelReason = 'stopped' | 'late' | 'gone'
+
 /** 取消：置标志位，循环在每段之间检查（正在飞出去的那一次请求不打断，钱已经花了） */
-export function cancelTTSSynthesis(jobId: string): boolean {
+export function cancelTTSSynthesis(jobId: string): TTSCancelReason {
   const job = batchJobs.get(jobId)
-  if (!job) return false
+  if (!job) return 'gone'
+  if (!job.running) return 'late'
   job.canceled = true
   logger.userAction('TTS batch canceled', { jobId })
-  return true
+  return 'stopped'
 }
 
 /**

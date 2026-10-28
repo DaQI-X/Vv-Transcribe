@@ -43,6 +43,8 @@ import {
   hasInAppDownload,
   localTtsEngineLabel,
   missingModelHint,
+  modelPresenceTag,
+  voiceSidLabel,
   voiceSidOptions,
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
@@ -73,7 +75,7 @@ interface SettingsValues {
   ttsVoice: string
   /** 本地档的引擎 id（白名单在主进程 localTtsEngine；空＝主进程按默认档处理） */
   ttsLocalEngine: string
-  /** 本地档的音色编号，存成字符串（'0'…）；上限由引擎加载后报，界面上不写死 */
+  /** 本地档的音色编号（0-based sid，界面上写「音色 1…」）；条数主进程先按钉死的模型表给，引擎加载后由实报值覆盖 */
   ttsLocalVoice: string
 }
 
@@ -371,6 +373,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     tts: boolean
   }>({ asr: false, ai: false, tts: false })
   const [restarting, setRestarting] = useState(false)
+  const [restartingVoice, setRestartingVoice] = useState(false)
   const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocal | null>(null)
   const [ytDlpRemote, setYtDlpRemote] = useState<YtDlpCheckResult['remote'] | null>(null)
   const [ytDlpHasUpdate, setYtDlpHasUpdate] = useState(false)
@@ -582,6 +585,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   // 连点守卫只能放 ref：state 在同一次渲染里读不到刚 set 的值，快速点三下会放行三次
   const testingRef = useRef(false)
   const restartingRef = useRef(false)
+  const restartingVoiceRef = useRef(false)
 
   /** 表单里选的配音引擎档位（还没点保存也算）——本地档和云端档要问的不是同一套字段 */
   const ttsLocal = values.ttsEngine === 'local'
@@ -590,14 +594,14 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   /**
    * 本地档的状态快照（问一次不拉起引擎）：下拉里每一行都得标得出「这一档的模型还没下载」，
    * 所以两档一起问，而不是只问当前选中的那档。null＝还没读到，界面上不许把它当「都不缺」渲染。
-   * speakers 只认当前选中那一档报的数——VITS 5 个、Kokoro 103 个，拿别的档的数列编号等于骗人。
+   * speakers 只认当前选中那一档的数——VITS 与 Kokoro 的音色数不同，拿别的档的数列编号等于骗人。
    */
   const [localVoiceState, setLocalVoiceState] = useState<{
     speakers: number
     binaryPresent: boolean
     modelPresent: Record<string, boolean>
   } | null>(null)
-  /** 测试连接跑完引擎就活了，speakers 当场报得出来；不留神这里会一直停在「只列得出 0 个」 */
+  /** 测连接、重启跑完引擎就活了，音色数能按 /health 实报的数校正一遍；不留神这里会一直停在档位表那份 */
   const [voiceStateTick, setVoiceStateTick] = useState(0)
 
   useEffect(() => {
@@ -698,6 +702,33 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     } finally {
       restartingRef.current = false
       setRestarting(false)
+    }
+  }
+
+  /**
+   * 本地配音引擎起不来时，应用内的出路。主进程那条 IPC 只认磁盘上已保存的那一档
+   * （这边表单换了引擎没点保存，重启的还是保存过的），所以文案要把这一点写在按钮旁边。
+   * 首启要解包、慢盘更久，所以和转写引擎一样必须有「重启中」态。
+   */
+  const handleRestartVoiceEngine = async () => {
+    if (!api || restartingVoiceRef.current || testingRef.current) return
+    restartingVoiceRef.current = true
+    setRestartingVoice(true)
+    try {
+      const result = await api.restartLocalVoiceEngine()
+      if (result.ok) {
+        toast.success('本地配音引擎已重启，可以去配音页直接跑')
+        // 重问一次状态刷新「组件在不在、端口活不活」。模型是第一次真合成才进内存的，重启后
+        // /health 那一栏仍是 0，此时音色列表用的是档位表里那份实测值——不是「只列得出一个」。
+        setVoiceStateTick((prev) => prev + 1)
+      } else {
+        toast.error(result.error || '本地配音引擎重启失败，请稍后再试', 8000)
+      }
+    } catch {
+      toast.error('本地配音引擎重启失败。可在「关于与更新 → 打开日志文件夹」取日志后重新下载组件', 8000)
+    } finally {
+      restartingVoiceRef.current = false
+      setRestartingVoice(false)
     }
   }
 
@@ -1119,8 +1150,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   value={ttsLocal ? 'local' : 'cloud'}
                   onChange={(e) => updateField('ttsEngine', e.target.value)}
                 >
-                  <option value="cloud">云端接口（花钱，效果由服务商决定）</option>
-                  <option value="local">本地配音（在自己电脑上跑，不花钱，实验）</option>
+                  {/* 括号只写「这一档要不要准备东西」，不写钱：默认档是云端（settingsService 的
+                      ttsEngine 默认值就是 cloud），本地档的前置条件是按需组件下载。 */}
+                  <option value="cloud">云端接口（默认）</option>
+                  <option value="local">本地配音（需下载引擎和模型）</option>
                 </select>
                 <span className="settings-form-hint">
                   本地这一档是实验功能：引擎二进制和模型都不在安装包里，要先在「设置 → 关于与更新 → 按需组件」里下载。
@@ -1144,9 +1177,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       {LOCAL_TTS_ENGINE_OPTIONS.map((option) => (
                         <option key={option.value} value={option.value}>
                           {option.label}
-                          {localVoiceState?.modelPresent[option.value] === false
-                            ? '（模型还没下载）'
-                            : ''}
+                          {modelPresenceTag(option.value, localVoiceState?.modelPresent[option.value])}
                         </option>
                       ))}
                     </select>
@@ -1181,14 +1212,18 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     >
                       {voiceSidOptions(localVoiceState?.speakers ?? 0, values.ttsLocalVoice).map((sid) => (
                         <option key={sid} value={sid}>
-                          音色 {sid}
+                          {voiceSidLabel(sid)}
                         </option>
                       ))}
                     </select>
                     <span className="settings-form-hint">
                       {(localVoiceState?.speakers ?? 0) > 0
-                        ? `引擎报了这一档共 ${localVoiceState?.speakers} 个音色。上游没给音色名字，只能按编号挨个试听来认。`
-                        : '音色总数要等引擎把模型读进内存才知道，所以现在只列得出默认那一个编号。点本页下面的「测试连接」，或去配音页「试听第一句」，引擎报完数这里就全了。'}
+                        ? `这一档共 ${localVoiceState?.speakers} 个音色，从 1 开始编号。上游没给音色名字，只能挨个试听来认。`
+                        : // 「点测试连接让引擎报一次」只有在模型真的在盘上才是条出路：这一档连下载包
+                          // 都没有时答应它，等于把用户推向一个必然失败的按钮
+                          localVoiceState?.modelPresent[selectedTtsEngine] === true
+                          ? '这一档的音色总数还没核实，所以现在只列得出默认那一个。换回 VITS，或先点下面的「测试连接」让引擎报一次。'
+                          : '这一档的音色总数还没核实，所以现在只列得出默认那一个。换回 VITS。'}
                     </span>
                   </div>
                 </>
@@ -1266,10 +1301,24 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <Plug size={12} />
                   {testingKind === 'tts' ? '检查中...' : '测试连接'}
                 </button>
+                {ttsLocal && (
+                  <button
+                    type="button"
+                    onClick={handleRestartVoiceEngine}
+                    disabled={restartingVoice || testingKind !== null}
+                    className="settings-modal__dict-update-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 8 }}
+                  >
+                    <RotateCcw size={12} />
+                    {restartingVoice ? '重启中…' : '重启本地配音引擎'}
+                  </button>
+                )}
                 <span className="settings-form-hint">
                   {ttsLocal
                     ? '按上面选的这一档在本机合成一句话（约 10 个字），不需要先保存。这一档不调接口、不花钱；' +
-                      '引擎还没下载或模型还没下载时会直接告诉你缺哪一样，不用等配音跑失败。'
+                      '引擎还没下载或模型还没下载时会直接告诉你缺哪一样，不用等配音跑失败。' +
+                      '引擎端口被上一代占住、启动后秒退这类情况点「重启本地配音引擎」，不用退出应用重开——' +
+                      '重启用的是已保存的那一档，表单里换了没保存不算。'
                     : '按上面填写的值合成一句话（约 10 个字），确认这把 Key、这个模型、这个音色能出音频，不需要先保存；' +
                       '地址和 Key 留空时用的是已保存的那套。本次只合成一句，按字符计费的接口上这是最小的一笔。'}
                 </span>

@@ -13,10 +13,11 @@
 - **音视频播放器**：播放/暂停、进度拖拽 seek、段落高亮同步，视频文件内嵌播放
 - **段落编辑器**：行内编辑转写文本，点击段落跳转到对应播放时间
 - **多格式导出**：SRT 字幕 / VTT 字幕 / 台词表 TSV（时间码 + 台词）/ 纯文本 TXT / JSON 数据 / Markdown 文档，走系统「另存为」面板
-- **字幕配音**：首页第三个 tab「字幕配音」是一整页工作台，输入来源两种——**纯文本**（自己贴稿，按句切成每块 ≤800 字的朗读单元，一段挨一段念成连续朗读）或**从转写带入**（拿当前转写段落，按字幕时间轴铺）。音色与倍速在工作台上选（倍速只透传接口的 `speed`，服务商不认这个字段就是不认，界面不替它承诺），先「试听第一句」再「开始配音」，逐段串行调用 OpenAI 兼容的音频接口（一段一次请求）。产物是一条**独立的 MP3 配音轨**（44.1kHz 单声道）：字幕源上某段配音比它的字幕槽位长就顺延到后面、整条往后推，结果卡写明几段被顺延、这条轨比原时间轴长多少——**字幕与时间轴一个字都不改**。跑完点「保存配音轨」走系统「另存为」；不保存的话，清空或重开一批就把这一版产物删掉。空段落不调接口；连续 3 段失败自动熔断停下整批；「取消」只停后面的段，已合成的照样拼成一条轨。切走再回来进度与产物都还在（状态在 store 里，不跟组件走）
-- **设置持久化**：转写、校对、配音三套配置写入 `userData/settings.json`，点「保存设置」才生效；保存后窗口不关，可以直接接着点检测。转写页在云端模式下是「测试连接」、本地模式下是「检查引擎状态」，校对页是「测试连接」，配音页也是「测试连接」——都不保存也能先试一次
+- **字幕配音**：首页第三个 tab「字幕配音」是一整页工作台，输入来源两种——**纯文本**（自己贴稿，按句切成每块 ≤800 字的朗读单元，一段挨一段念成连续朗读）或**从转写带入**（拿当前转写段落，按字幕时间轴铺）。音色与倍速在工作台上选（倍速只透传接口的 `speed`，服务商不认这个字段就是不认，界面不替它承诺），先「试听第一句」再「开始配音」，逐段串行——云端档一段一次请求打 OpenAI 兼容的音频接口，本地档一段一次交给本机引擎。产物是一条**独立的 MP3 配音轨**（44.1kHz 单声道）：字幕源上某段配音比它的字幕槽位长就顺延到后面、整条往后推，结果卡写明几段被顺延、这条轨比原时间轴长多少——**字幕与时间轴一个字都不改**。跑完点「保存配音轨」走系统「另存为」；不保存的话，清空或重开一批就把这一版产物删掉。空段落不调接口；连续 3 段失败自动熔断停下整批；「取消」只停后面的段，已经合成的照样拼成一条轨——等到只剩本地拼轨这一步，界面上就没有取消按钮了（那一步停不下来，拦下来等于把已经合成好的段白扔）。切走再回来进度与产物都还在（状态在 store 里，不跟组件走）；工作台抬头是「返回首页」+「清空文稿」两颗——清空只清输入框里那份稿和它派生的试听片段，已经配好的那条轨不动（删产物另有结果卡那颗「清空」）；**文稿目前不落盘**，退出应用就没了，「历史记录」排在 1.0.9。首页那个 tab 上挂着「实验」标：本地档随 1.0.6 发但按实验功能对待，而两条档共用的铺轴在 Intel / Windows 的打包版上还没跑过端到端冒烟
+- **本地配音（离线，1.0.6 新增）**：「配音配置 → 配音引擎」切成「本地配音（需下载引擎和模型）」后，配音不再调任何远程接口——主进程 spawn 一个 `vv-tts-server` sidecar（sherpa-onnx，Python 冻结出来的单个可执行文件），只绑 `127.0.0.1:8010`，一段一段在本机念完，**不花钱、不上传文稿**。引擎和模型都不塞进安装包：缺哪个下哪个，入口在「设置 → 关于与更新 → 按需组件」（引擎取自家清单 + 本仓库 Release 资产，模型按下钉死的上游 commit 与逐文件 sha256 从 hf-mirror 自取）。本地档是**懒启动**的：打开设置只查状态不会把引擎拉起来，第一次试听或配音才真正启动
+- **设置持久化**：转写、校对、配音三套配置写入 `userData/settings.json`，点「保存设置」才生效；保存后窗口不关，可以直接接着点检测。转写页在云端模式下是「测试连接」、本地模式下是「检查引擎状态」，校对页是「测试连接」，配音页云端档是「测试连接」、本地档还多一个「重启本地配音引擎」——都不保存也能先试一次
 - **密钥加密落盘**：三把 API Key 走系统密钥库（macOS 钥匙串 / Windows DPAPI）加密后写进同一份 `settings.json`，磁盘上的值形如 `v1:<base64>`。输入框不回显已保存的值：留空＝不改，「清除已保存的 Key」要点「保存设置」才生效。历史明文在首次读到时就地换成密文；这台机器用不了密钥库时退回明文落盘并在设置里如实标注，读不出密文（换过电脑）时提示重新填写——任何一步都不会静默丢掉用户填的 Key
-- **故障自救**：本地引擎没能起来时在「设置 → 转写配置」点「重启本地引擎」，不必退出应用；「关于与更新 → 打开日志文件夹」直接取日志
+- **故障自救**：本地转写引擎没能起来时在「设置 → 转写配置」点「重启本地引擎」，本地配音起不来（端口被上一代占住、启动后秒退）时在「设置 → 配音配置」点「重启本地配音引擎」，都不必退出应用；「关于与更新 → 打开日志文件夹」直接取日志
 - **词典更新**：内置开源中文词库；「校对配置 → 检查更新」发现新版会直接下载并装上，当场生效，不需要重装应用
 
 ## 技术栈
@@ -34,6 +35,7 @@
 | ASR 转写 | Python faster-whisper（本地，FastAPI + NDJSON 流式）/ OpenAI 兼容 Whisper 接口（云端） |
 | 校对 | 本地规则校对（误听表 + chinese-xinhua 词库 + 参考稿 diff）/ OpenAI 兼容大模型接口 |
 | 配音（TTS） | OpenAI 兼容音频接口 `POST {apiBase}/v1/audio/speech`（一次一句，body `{model, input, voice, response_format:'mp3'}`，倍速只在 ≠1 时才带 `speed`）+ FFmpeg 铺轴拼接（每段先解成 44.1k 单声道 PCM 量准长度，再按时轴垫静音 `concat` 串成一条，`libmp3lame` 192k 输出） |
+| 本地配音（离线，1.0.6） | sherpa-onnx 2.0.1（VITS 中文 / Kokoro 多语，onnxruntime 由 `sherpa-onnx-core` 自带）+ 自写 FastAPI sidecar `vv-tts-server`（PyInstaller 冻结，只绑 `127.0.0.1:8010`，一进程一引擎）；引擎二进制与模型都按需下载、不进安装包 |
 | 文本比对 | diff 库 + 自写段落对齐（`segmentDiff` / `textAlignment`） |
 | 参考稿解析 | mammoth（.docx）、pdf-parse（.pdf）、自写 SRT/Markdown 解析 |
 | 链接转写 | yt-dlp（随包内置，可在应用内更新）+ puppeteer-core 取站点 cookies |
@@ -54,7 +56,8 @@ basic_one/
 │   │   │   ├── asrHandlers.ts         #   转写任务：开始、取消、应用内重启引擎、进度推送
 │   │   │   ├── aiHandlers.ts          #   AI 校对、差异解释、参考稿分析
 │   │   │   ├── proofreadHandlers.ts   #   本地校对与规则解释（完全不读 API Key）
-│   │   │   ├── ttsHandlers.ts         #   配音：试听、整批合成、进度推送、取消、另存为、释放这批
+│   │   │   ├── ttsHandlers.ts         #   配音：试听、整批合成、进度推送、取消、另存为、释放这批、本地引擎状态/重启/停止
+│   │   │   ├── componentHandlers.ts   #   按需组件（本地配音引擎与模型）：列出、对清单、下载、取消、删除、占用查询
 │   │   │   ├── settingsHandlers.ts    #   设置读写 + 「测试连接」
 │   │   │   ├── dictionaryHandlers.ts  #   词典查询、版本检查、更新下载
 │   │   │   ├── updateHandlers.ts      #   版本号、检查更新、外链与系统设置入口
@@ -70,7 +73,12 @@ basic_one/
 │   │       ├── dictionaryService.ts   #   中文词典加载 / 查询 / GitHub 更新
 │   │       ├── ai/                    #   AI 校对：types（Provider 接口）+ openaiCompatible
 │   │       │                          #     中文走误听表 + 词典 prompt，其他语言走通用 prompt
-│   │       ├── ttsService.ts          #   配音：逐段合成落盘 + 解码量准时长 + 铺轴（溢出顺延）+ 静音垫 concat 拼成整轨（命令行超预算时分块）
+│   │       ├── ttsService.ts          #   配音：逐段合成落盘 + 解码量准时长 + 铺轴（溢出顺延）+ 静音垫 concat 拼成整轨（命令行超预算时分块）；云端/本地两档分流与这批账目（含取消落在哪一步）
+│   │       ├── localTtsEngine.ts      #   本地配音 sidecar：spawn + bootId 握手 + /health 轮询 + 进程树回收，只绑 127.0.0.1:8010，一进程一引擎（引擎 id 走白名单）
+│   │       ├── ttsModelUpstream.ts    #   模型上游指纹表：钉死 commit + 逐文件 bytes/sha256，从 hf-mirror 按文件自取
+│   │       ├── componentService.ts    #   按需组件下载器：读自家清单→校验→解压/逐文件落盘→installed.json 记账→占用判断与删除
+│   │       ├── componentArchive.ts    #   自写的 tar.gz 流式解包（只用 node:zlib + node:fs）：符号/硬链接与设备节点直接拒绝，
+│   │       │                          #     每条头部校验和都比——不调系统 tar、不引第三方解压库
 │   │       ├── referenceParser.ts     #   参考稿解析：txt / md / srt / docx / pdf
 │   │       ├── urlDownloader.ts       #   链接取内容：`-J` 解析元信息 + 会话表 + 音/视频两路 args + 进度与看门狗 + 另存为 + 临时目录回收
 │   │       ├── ytDlpUpdate.ts         #   链接解析组件的应用内更新：读清单→校验指纹→落盘→重探版本→失败退回
@@ -93,8 +101,10 @@ basic_one/
 │   │   │                              #     按钮样式与转写结果页那颗一致）、
 │   │   │                              #     FileUploader（本地 / 链接）、UploadStatus、AudioPlayer、
 │   │   │                              #     TranscriptEditor、SegmentRow、DiffPanel、ProofreadModeDialog、
-│   │   │                              #     VoiceStudio（配音工作台：输入来源 + 音色倍速 + 试听 + 合成中 + 结果卡）
-│   │   └── settings/SettingsModal.tsx #   转写配置 / 校对配置 / 配音配置 / 主题 / 关于与更新
+│   │   │                              #     VoiceStudio（配音工作台：输入来源 + 本地档的模型/音色下拉 + 试听 + 合成中 + 结果卡；
+│   │   │                              #     「云端还是本地」不在这一页给选择，只在设置里定）
+│   │   └── settings/                  #   SettingsModal.tsx（转写配置 / 校对配置 / 配音配置 / 主题 / 关于与更新）
+│   │       └── ComponentsSection.tsx  #   「按需组件」一栏：本地配音引擎与两份模型的下载、进度、删除、停引擎
 │   ├── stores/                        #   useTranscriptionStore、usePlayerStore、useReferenceStore、
 │   │                                  #     useSettingsModalStore、useThemeStore、useVoiceStudioStore（均 Zustand；
 │   │                                  #     顶部 tab 也在最后一个里——配音是分钟级后台任务，状态跟组件走会丢）
@@ -103,6 +113,7 @@ basic_one/
 │   └── utils/                         #   asrLanguage（12 语种 + 本地校对适用性）、segmentDiff、textAlignment、
 │                                      #     correctedTextAlignment、referenceComparator、exportTranscript、
 │                                      #     splitPlainText（纯文本稿按句切成 ≤800 字的朗读块）、
+│                                      #     localTtsEngines（本地引擎白名单选项、音色编号枚举、缺件该说哪句话）、
 │                                      #     readiness（阻塞项统一提示）、logger
 │
 ├── python-asr/                        # 本地转写服务：main.py（FastAPI，协议 2 = NDJSON 逐句回传）
@@ -110,13 +121,28 @@ basic_one/
 │   ├── requirements.txt               #   faster-whisper / fastapi / uvicorn / python-multipart / pyinstaller
 │   └── dist-<arch>/                   #   按架构产出的 vv-asr-server[.exe]，开发模式也用它
 │
+├── python-tts/                        # 本地配音服务（sidecar）：main.py（sherpa-onnx，一进程一引擎，
+│   │                                  #     /synthesize 用 X-Vv-Duration 回它自己数的采样时长）
+│   ├── vv-tts-server.spec             #   PyInstaller 配置；**不进安装包**，CI 按平台构建后发成 Release 资产供按需下载
+│   ├── requirements.txt               #   sherpa-onnx 2.0.1 + sherpa-onnx-core 同号（onnxruntime 在 core 的 wheel 里）+
+│   │                                  #     fastapi / uvicorn / pyinstaller 钉的版本号与 ASR 那份对齐；刻意不含 numpy
+│   └── dist-<arch>/                   #   按架构产出的 vv-tts-server[.exe]，开发模式回落用它
+│
 ├── yt-dlp-manifest.json               # yt-dlp 组件的版本+指纹清单（构建期与运行期读同一份；改它=改往包里塞什么）
-├── scripts/                           # build-asr.mjs（按 --arch 选 venv 与产物目录）、fetch-yt-dlp.mjs（校验 SHA2-256）、
-│                                      #   yt-dlp-manifest.mjs + lib/（pnpm check:yt-dlp-manifest：与上游 sums 逐条对账）
+├── scripts/                           # build-asr.mjs / build-tts.mjs（按 --arch 选 venv 与产物目录）、fetch-yt-dlp.mjs（校验 SHA2-256）、
+│                                      #   yt-dlp-manifest.mjs + components-manifest.mjs + lib/（pnpm check:* 与上游/远端资产逐条对账）
 ├── vendor/yt-dlp/                     # 拉下来的官方独立二进制（已 gitignore，构建时进包）
 ├── release/                           # 最终安装包（Vv-Transcribe-arm64.dmg 等）
 ├── .github/workflows/build.yml        # CI：build（Win x64 + macOS arm64/x64 三个目标）+ release（tag 触发，
-│                                      #   先校验 tag 在 main 上、package.json 版本 == tag，再发 .dmg/.exe）
+│                                      #   先校验 tag 在 main 上、package.json 版本 == tag，再发 .dmg/.exe）。
+│                                      #   三个目标各自构建 vv-tts-server 并 upload artifact；build job 早期有一步
+│                                      #   「Verify components manifest」——清单文件不存在时只提示并退 0（现在就是这条路），
+│                                      #   一旦存在就对不上账硬失败
+├── .github/workflows/publish-components.yml # 手工触发（workflow_dispatch，填 build 的 runId）：把三个平台的
+│                                      #   sidecar 传成 Release 资产并生成 components-manifest.json。
+│                                      #   ⚠ 这份清单目前还不在 main 上（仓库里没有 components-manifest.json）：
+│                                      #     点「检查组件」会报「检查清单失败：…」，引擎那一行只停在「还没和清单对过」，
+│                                      #     装不了引擎；模型那一档不读清单（指纹钉在代码里），照常能下
 ├── electron-builder.cjs               # 打包配置 + afterPack（ASR 架构、yt-dlp 是否进包）
 ├── vite.config.ts                     # React + Tailwind + vite-plugin-electron
 └── package.json                       # version 与全部脚本
@@ -131,32 +157,40 @@ basic_one/
 │ React 渲染进程                                                │
 │  Transcription 页：FileUploader（本地/链接）→ UploadStatus →  │
 │    AudioPlayer + TranscriptEditor（DiffPanel、校对弹窗、导出）│
-│  SettingsModal：转写 / 校对 / 配音 / 主题 / 关于             │
+│  字幕配音页：VoiceStudio（两档引擎 → 进度卡 → 结果卡 + 另存为）│
+│  SettingsModal：转写 / 校对 / 配音 / 主题 / 关于（含按需组件） │
 │  Zustand：transcription · player · reference · settingsModal ·│
-│            theme                                              │
+│            theme · voiceStudio                                │
 └──────────────────────┬───────────────────────────────────────┘
                        │ window.electronAPI（preload contextBridge，无 nodeIntegration）
 ┌──────────────────────┴───────────────────────────────────────┐
 │ Electron 主进程                                               │
-│  IPC：file · asr · ai · proofread · settings · dictionary ·   │
-│       update · window                                         │
+│  IPC：file · asr · ai · proofread · tts · component ·         │
+│       settings · dictionary · update · window                 │
 │  服务：audioProcessor（FFmpeg）· asrServiceManager（引擎生命  │
 │       周期）· asr/localASR · asr/cloudASR · ruleProofread ·   │
 │       localProofread · ai/openaiCompatible · dictionaryService│
 │       · referenceParser · urlDownloader · browserCookieFetcher│
-│       · connectionTestService · settingsService · logger      │
+│       · ttsService（逐段合成/铺轴/拼轨，两档共用）·           │
+│       localTtsEngine（配音 sidecar 生命周期）·                │
+│       componentService + componentArchive + ttsModelUpstream ·│
+│       ytDlpUpdate · connectionTestService · settingsService · │
+│       logger                                                  │
 └───────┬───────────────────────┬──────────────────────┬────────┘
-        │ HTTP localhost:8000   │ spawn                │ HTTPS（云端转写/校对要显式配置才走；
+        │ HTTP :8000 与 :8010   │ spawn                │ HTTPS（云端转写/校对要显式配置才走；
         │                      │                      │ 链接转写、词库检查更新按用户操作发起）
 ┌───────┴───────────┐  ┌────────┴─────────┐  ┌─────────┴────────────┐
-│ Python ASR 引擎   │  │ yt-dlp（随包）   │  │ 云端 ASR / OpenAI 兼容│
-│ faster-whisper    │  │ + 临时浏览器配置 │  │ 大模型接口            │
-│ base·int8·CPU     │  │ 取站点 cookies   │  │                      │
-│ NDJSON 逐句回传   │  └──────────────────┘  └──────────────────────┘
-└───────────────────┘
+│ 本机 Python 引擎  │  │ yt-dlp（随包）   │  │ 云端 ASR / OpenAI 兼容│
+│ 两个 sidecar，同一│  │ + 临时浏览器配置 │  │ 大模型接口            │
+│ 套生命周期口径：  │  │ 取站点 cookies   │  │                      │
+│  8000 ASR：       │  └──────────────────┘  │ 另：按需组件从本仓库  │
+│  faster-whisper   │                        │ Release 取引擎二进制、│
+│  8010 本地配音：  │                        │ 从 hf-mirror 逐文件取 │
+│  sherpa-onnx      │                        │ 模型（sha256 校验）   │
+└───────────────────┘                        └──────────────────────┘
 ```
 
-只有主进程直连 8000 与外部接口，渲染层不发任何 `fetch`。密钥也不进渲染层：`settings:get` 返回的是脱敏视图——两把 Key 字段被剔除，只留 `asrKeyStatus` / `aiKeyStatus`（无 / 密文 / 明文 / 解不开）和 `keyEncryptionAvailable` 三个状态位；解密结果只在主进程里用于转写、校对和「测试连接」。引擎由主进程随应用拉起（`bootId` 握手确认应答者是自己这次启动的那个），退出时按进程树优雅关闭。
+只有主进程直连 8000 / 8010 与外部接口，渲染层不发任何 `fetch`。两个本机端口都是「一进程一服务、启动时钉死身份」：ASR 用 `bootId` 握手确认应答者是自己这次拉起的那个，配音引擎除此之外还用 `VV_TTS_ENGINE` 把引擎 id 钉在进程上（换档＝重起，端口上留着的还是那一个）。配音这一路只绑 `127.0.0.1:8010`（ASR 那个 8000 绑了 0.0.0.0 是历史遗留，新服务不重复）。密钥也不进渲染层：`settings:get` 返回的是脱敏视图——两把 Key 字段被剔除，只留 `asrKeyStatus` / `aiKeyStatus`（无 / 密文 / 明文 / 解不开）和 `keyEncryptionAvailable` 三个状态位；解密结果只在主进程里用于转写、校对和「测试连接」。引擎由主进程按需拉起（本地配音是懒启动：只有真开始配音/试听才 `ensure`，打开设置页不会把它拉起来），退出时按进程树优雅关闭。
 
 ### 数据流
 
@@ -228,8 +262,15 @@ basic_one/
     → 可选 ai:analyzeReference 让模型通读参考稿找自身问题
 
 字幕配音（一整页工作台；一次调用只合成一句，整条稿子串行跑完再拼成一条轨；字幕与时间轴一个字都不改）：
-  入口两条：首页顶部第三个 tab「字幕配音」，或转写结果页头部的「字幕配音」按钮——后者只是把 tab 切过去，
+  入口两条：首页顶部第三个 tab「字幕配音」（tab 上带一枚「实验」标，`StudioTabs` 与首页共用同一组件，
+    所以标在两处同一位置），或转写结果页头部的「字幕配音」按钮——后者只是把 tab 切过去，
     不叠弹窗（配音跑起来是分钟级的事，藏在一层浮层里没法中途去看别处）
+  抬头两颗：「返回首页」（有转写结果时写作「返回转写」）与「清空文稿」。后者走 `clearDraft`，
+    只清 `text` 与它派生的试听片段，`queue` / `result` 一律不动；正在跑整批、或来源是「从转写带入」时按不动
+    （那两份都不是这一页的输入框里的东西），禁用原因写在按钮的 title 上
+  两档引擎（「配音配置 → 配音引擎」）：cloud＝逐段打远程音频接口；local＝主进程 spawn 的 `vv-tts-server`
+    sidecar，逐段 `POST /synthesize`（`{ engine, text, sid, speed }`）。下面这套链路——切分、前置校验、进度、
+    熔断、铺轴、拼轨、另存为、临时目录回收——两档共用，只有「念一段」这一步分叉
   左列选输入来源：
     纯文本：整篇稿子 → `splitPlainText` 先按行、再按句末、再按停顿切，贪心合并到每块 ≤800 字 → 每块一段、时间轴全 0
       （时间轴全 0 时下面那套铺轴天然退化成「首尾相接」，所以纯文本朗读不用主进程另开一条路）
@@ -241,14 +282,22 @@ basic_one/
     校对那一套，但模型与音色**不回落**：音频接口吃的是配音模型 id，拿 chat 模型去调必然被拒。
     所以点「开始配音」先过 checkVoiceReady：Key（配音或校对两把里任一可用）、配音模型、配音音色，
     缺任何一项都不发起整批调用——toast 说清缺的是哪一项，并当场打开「设置 → 配音配置」那一层。
+    本地档走另一问：不看地址和 Key，只拦「组件不在场」——引擎二进制缺就指路「设置 → 关于与更新 → 按需组件」，
+    模型缺就按「这一版有没有对应的下载包」分叉（有包的说去哪下、开的就是那个 tab；没包的说换回 VITS 或改用云端档），
+    音色填的不是编号再单独拦一次；`ready:false` **不算**阻塞条件（懒启动的引擎只是还没起过，
+    要求用户先去手动点一次「启动引擎」是凭空加一步）。配音页上还会再问一遍，问的是「界面当前选的这一档
+    在不在磁盘上」而不是「设置里保存的那一档」，还没查到结果时按不拦处理
     这一层是唯一的：配音是一整页，不再是弹窗底下又叠一个设置弹窗（那种两层互相盖住的坑见 #220）
-  试听：IPC tts:preview(text, opts) → POST {apiBase}/v1/audio/speech（response_format=mp3）→ 落盘 → ffprobe 读时长
-    （这个时长只给试听那一句显示用，铺轴不认它）
+  试听：云端档 IPC tts:preview(text, opts) → POST {apiBase}/v1/audio/speech（response_format=mp3）→ 落盘
+    → ffprobe 读时长（这个时长只给试听那一句显示用，铺轴不认它）；本地档同样走 tts:preview，
+    只是那一次交给 sidecar 的 `/synthesize`，倍速与音色编号原样带过去
   进行中：IPC tts:synthesize(queue, opts) 一次带走全部段落（时间轴只有渲染层这一份，主进程按 jobId 记账）
-    → 逐段**串行**调接口（并发只会换来 429），每段落进 `transcribe-tts-<uuid>/`
+    → 逐段**串行**（云端档并发只会换来 429；本地档一次推理吃满 4 个线程，并发只会互相抢核、还把界面拖卡），
+      每段落进 `transcribe-tts-<uuid>/`
     → 段号经 IPC tts:progress 推回界面，写的是「已合成 7 / 12 段」这种真实段号
-    → 空段落跳过不调接口；单段 60 秒超时；连续 3 段失败熔断停下整批（原因与「用户点了取消」分开报）
-    → 「取消」只停后面的段，正在飞的那段等它回来，已经合成的照样拼成一条轨
+    → 空段落跳过不调接口；单段 60 秒超时（两档都是 60 秒）；连续 3 段失败熔断停下整批（原因与「用户点了取消」分开报）
+    → 「取消」只停后面的段，正在飞的那段/正在念的那段等它回来，已经合成的照样拼成一条轨；
+      只剩本地拼轨这一步时没有取消位（`tts:cancel` 回 `late`），界面上那个按钮这时直接收起
     → 合成中那张卡直接复用转写的 processing 视觉（徽章 + 波形 + 进度条 + 取消按钮），只做分钟级活儿的界面不需要两套动画
   铺轴与拼接：每段落点 = max(该段字幕起点, 上一段配音终点)，配音比字幕槽位长就顺延、整条往后推
     （不截断也不重叠混音；某段解出来一个采样都没有才退回按字幕槽位估长，并在结果里标明有几段是估的）
@@ -261,8 +310,9 @@ basic_one/
       多块时先各落一个无损 WAV、最后一轮只把块串起来编码。graph 写进文件用 `-filter_complex_script` 传
     → `libmp3lame -b:a 192k` 出一条 `voice-track.mp3`（整条只在最后重编码一次，不 mp3→mp3 来回掉质量）
   结果：配音轨时长与体积、原时间轴到几点、这条比它长多少、几段被顺延、成功/失败/跳过清单
-    → 一条都没成功时同一张卡换成失败态：整批停下的原因 + 「接口回的原话」+「去配音配置测连接」，
-      不假装成功；地址 / Key / 模型 / 音色任何一样不对都长这样
+    → 一条都没成功时同一张卡换成失败态：整批停下的原因 + 原话（云端档标题「接口回的原话：」、本地档「本机引擎回的原话：」）
+      +「去配音配置测连接」，不假装成功；云端档补「地址 / Key / 模型 / 音色任何一样不对都长这样」，
+      本地档那句换成「本地这一档不看地址和 Key；引擎二进制、模型、音色编号三样里任何一样不对，都长这样」
     → 页内 `<audio controls>` 直接播这条轨（file:// 绝对路径，和回放转写源音频同一套加载口径）
     → 「保存配音轨」IPC tts:saveTrack：系统「另存为」+ copyFile（另存出去的副本不跟着临时目录删）
     → 「清空」/ 重开一批 / 回首页时 IPC tts:releaseBatch 当场删掉这批临时目录；正在跑的那批不删，
@@ -308,9 +358,17 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `tts:release` | 渲染 → 主 | 删掉刚才那句试听的产物（主进程本来只留一份，下一次试听会自己回收上一份；配音页点「清空」时当场还掉） |
 | `tts:synthesize` | 渲染 → 主 | 整条稿子配音：段落（含时间轴）由渲染层一次传来，第二个参数同样是这一批的可覆盖项（音色/倍速对整批生效，不写回设置）。主进程不存第二份时间轴、也不用界面报回来的路径。逐段**串行**（并发只会换来 429），空段落直接跳过不调接口，单段 60 秒超时，连续 3 段失败熔断停下整批；跑完按时间轴铺成整轨（每段先解成 PCM 量准长度，再垫静音 `concat`，命令行超字符预算时分块）。回 `{ jobId, track, clipCount, failures, skipped, canceled, abortedReason, error }`——`abortedReason` 只写熔断原因，与「用户自己点了取消」分开报；拼接失败时前面的账目照样带回去，不会抹成「一段都没成」 |
 | `tts:progress` | 主 → 渲染 | 推 `{ jobId, stage, index, total, segmentId, note }`，`stage` 五态：`synthesizing` / `skipped` / `failed` / `assembling` / `done`。界面写的是真实段号（「已合成 7 / 12 段」），不做假百分比 |
-| `tts:cancel` | 渲染 → 主 | 置取消标志：只停**后面**的段，正在飞的那段等它回来；已经合成的照样拼成一条轨，不白跑 |
+| `tts:cancel` | 渲染 → 主 | 置取消标志：只停**后面**的段，正在飞的那段等它回来；已经合成的照样拼成一条轨，不白跑。回 `{ success, reason }`，`reason` 三态如实说：`stopped`＝落在逐段循环里、真被停下了；`late`＝循环已经出界、现在在本地拼轨，那一步**没有取消位**（拼接读的是已经落盘/已经花过钱的片段，拦下来等于白扔），所以这里绝不回 `success: true`；`gone`＝这批已经不在了。界面只在 `stopped` 时写「正在取消…」，`late` 给的是「这一步停不下来、等它跑完轨照常给你」 |
 | `tts:saveTrack` | 渲染 → 主 | 弹系统「另存为」（默认名 `voice-track.mp3`、MP3 过滤），`copyFile` 到用户选的位置，回 `{ success, canceled, name, error }`。取消不算失败也不释放这批——界面还留着结果态让人再点一次 |
 | `tts:releaseBatch` | 渲染 → 主 | 删掉这批的临时目录：配音页「清空」、重开一批、回首页（且这批已跑完）三条路都会触发；**切走 tab 不触发**——产物要留着，回到配音页还能听。另存出去的那份是副本，跟着目录一起删不掉 |
+| `tts:localStatus` | 渲染 → 主 | 本地配音引擎的只读快照，**不会因此拉起引擎**（懒启动：只是打开设置页就吃 8 秒解包和几百 MB 内存是更坏的答案）。回 `{ binaryPresent, modelPresent, engine, engineLoaded, speakers, sampleRate, port, ready, error, mode, configuredEngine, requestedEngine }`。`requestedEngine` 允许界面传还没保存的那个选择，但必须先过白名单——这个值会拼进模型目录名，不能把渲染层传来的字符串直接当路径用。`speakers` 只有模型真进了内存才有值（`/health` 在此之前不报 `num_speakers`；实测引擎刚重启时仍是 0，跑过第一次真合成才回 5） |
+| `tts:localRestart` | 渲染 → 主 | 「重启本地配音引擎」：先回收躺在 8010 上的上一代再重开，换引擎失败、端口被占、启动失败后的重试都走这条。只认**已保存**的配置，不接受界面传值（设置页「点保存才生效」的口径不能在这儿破例），已保存档位不是本地时直接回 `{ ok: false, error }` 说明「本地配音引擎没在使用中，无需启动」。同一时刻只允许一次启动/重启，连点会被合并 |
+| `tts:localStop` | 渲染 → 主 | 停掉本地引擎且不重开（下一次配音由 `ensure` 懒启动，界面不用管）。存在的理由很具体：「按需组件」那栏要删/换那几个文件，而引擎配音完不会自己退，没这个入口同会话里永远动不了组件。有一批正在逐段合成时**拒绝**停（那会让剩下的段落全失败），回 `{ ok, stopped, error }` |
+| `component:list` | 渲染 → 主 | 「设置 → 关于与更新 → 按需组件」打开就读的磁盘快照：每个组件的在场情况、已装版本、占用体积、要不要下载、下载多大，**不联网** |
+| `component:check` | 渲染 → 主 | 取自家组件清单对版本（`components-manifest.json`，两条读法：raw.githubusercontent 直连 → api.github.com contents）。国内直连可能要十几秒，界面得有「检查中...」；取不到清单不等于「已是最新」，会如实报错 |
+| `component:install` | 渲染 → 主 | 下载并装上一个组件（id 之外的东西全在主进程决定：从哪读、落到哪、要不要解压），进度经 `component:progress` 推回界面。同一组件重复发起会复用前一份任务并接上同一条进度流，连点不会产生两条下载。落点 `userData/components/` |
+| `component:cancel` / `component:remove` | 渲染 → 主 | 取消正在跑的下载 / 删掉已装组件。这个组件没在下载时 `cancel` 直接回错误，不谎报「已取消」 |
+| `component:busy` | 渲染 → 主 | 回 `{ engineRunning, synthesizing }`：这两种占用分开报——引擎进程还活着有「停止本地配音引擎」可点，一批正在逐段合成则只能等它跑完或去配音页取消，因为在这里停引擎会让剩下的段落全失败 |
 | `dictionary:lookup` | 渲染 → 主 | 查单个词释义。词库现在由主进程在校对/prompt 组装时内部使用，界面暂无调用点 |
 | `dictionary:lookupMultiple` | 渲染 → 主 | 批量查词，同上 |
 | `dictionary:getVersion` | 渲染 → 主 | 当前词库 commit hash |
@@ -335,7 +393,7 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 ### 环境要求
 
 - Node.js 22.12+（Vite 8 要 `^20.19.0 || >=22.12.0`，Electron 44 要 `>=22.12.0`；CI 用 22）
-- Python 3.10+（本地 ASR 引擎需要；CI 用 3.12，x64 包还要一份 x64 解释器）
+- Python 3.10+（本地 ASR 引擎需要；CI 用 3.12，x64 包还要一份 x64 解释器）。本地配音的 sidecar 只在要动那条链路时才需要装：`python-tts/requirements.txt` 里 fastapi / uvicorn / pyinstaller 钉的就是 ASR 那份已在三平台 CI 上验证过的版本号，两边共用一个 venv 不会打架
 - pnpm（推荐）
 
 ### 安装依赖
@@ -349,6 +407,10 @@ pnpm setup:asr          # 等价于 python-asr/venv + pip install -r python-asr/
 
 # 编译本机架构的引擎二进制：开发模式也由主进程拉起它，不是跑 main.py
 pnpm build:asr
+
+# 可选：本地配音的 sidecar（只在要动这条链路时才需要装与编译）
+pnpm setup:tts          # python-tts/venv + pip install -r python-tts/requirements.txt
+pnpm build:tts          # 产物 python-tts/dist-<arch>/vv-tts-server
 ```
 
 ### 开发模式
@@ -358,6 +420,8 @@ pnpm dev
 ```
 
 `pnpm dev` 启动 Electron 时，主进程照样会 spawn `python-asr/dist-<arch>/vv-asr-server[.exe]`（`getBinaryPath()` 在开发模式取的就是这个架构目录），所以先跑过 `pnpm build:asr` 才有本地转写；缺文件时应用会明确报「本地转写引擎文件缺失」。
+
+本地配音的 sidecar 找法略有次序：`getBinaryPath()`（`electron/main/services/localTtsEngine.ts:97-105`）先看「按需组件」那份 `userData/components/vv-tts-server/<platform>-<arch>/vv-tts-server`，在就用它；没有才在开发模式退回 `python-tts/dist-<arch>/`。所以在开发模式测本地配音，两条路都算「装上了」——走过一次应用内下载就不用再编译，反之先 `pnpm build:tts` 也能跑；两边都没有时测连接会直接说「本地配音组件还没下载」。打包版没有这个退回分支：sidecar **不进安装包**（`electron-builder.cjs` 只 `extraResources` 了 `python-asr/dist-<arch>`），磁盘上没有下载好的那份就是没有。
 
 只有要改 Python 侧代码时才需要另外手动起服务：
 
@@ -388,6 +452,8 @@ pnpm build:mac:arm64
 `build:electron*` 第一步会执行 `scripts/fetch-yt-dlp.mjs`：按 `yt-dlp-manifest.json` 里钉死的版本与 SHA2-256 拉官方独立二进制，落在 `vendor/yt-dlp/`（已 gitignore，同版本重复构建会跳过下载）。GitHub 慢就换前缀：`YTDLP_MIRROR=https://<加速域名> pnpm build:mac:arm64`。`afterPack` 同样校验它是否进了包，缺了就红。
 
 清单本身用 `pnpm check:yt-dlp-manifest` 与上游 `SHA2-256SUMS` + Release API 逐条对账（版本号、资产名、指纹、体积），CI 把它放在装依赖之前（`Setup Python` 之后、`pnpm install` 之前）——清单写错了，没必要再花三平台的构建时间去发现；网络拉不到上游时用 `--offline` 只验结构。2026-10-25 本机实测：五个资产全部与上游一致（macOS 37.2 MB / win32-x64 17.9 MB / win32-arm64 21.7 MB / linux-x64 40.6 MB / linux-arm64 40.3 MB）。
+
+本地配音的 sidecar 不走这条：`build:mac:arm64` / `build:electron*` 里没有 `build:tts`，electron-builder 的 `extraResources` 也只列了 `python-asr/dist-<arch>`——安装包**不含**配音引擎（见「按需组件」的理由）。CI 每个平台各编一份 `python-tts/dist-<arch>/vv-tts-server[.exe]` 并传成 `vv-tts-server-<platform>-<arch>` 这份 artifact；`publish-components.yml` 是**手动触发**的（要指名 `tag` 与哪一次 Build 的 `runId`——引擎二进制只能来自某一次具体构建，「取最近一次成功」会让清单指纹对应到一次没人看过的构建上），它把那三份资产传到已存在的 Release 上，并生成 `components-manifest.json` 当 **workflow artifact 交回人工**，看过 diff 再提交——CI 不把自己刚生成的信任锚直接推上 main。这份流程里没有模型：第三方权重的再分发许可尚未核实（2026-10-28 实测该 HuggingFace 仓库 `license` 字段为空、也没有 LICENSE 文件），而模型这一路本来就不走 Release（应用从 hf-mirror 自取）。`build.yml` 里那步 `Verify components manifest` 只在仓库根有这份清单时才对账（不存在只提示并退 0，存在即硬失败；对的是清单声明的 sha256 与 GitHub 上传时自己算的 digest）。本地要手工出这份二进制就是 `pnpm setup:tts` + `pnpm build:tts`；`pnpm check:components-manifest` 是发布后的独立复核（比对 GitHub 给每个资产自己算的 digest），清单还没进仓库时它只打一行「本地配音组件尚未发布」再退 0，联网不通或只改文案时用 `--offline` 做本地结构校验。
 
 #### 构建 x64（Intel）DMG —— 在 arm64 Mac 上经 Rosetta
 
@@ -483,28 +549,39 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 
 ### 配音配置
 
-配音是「设置」里的第三个 Tab，四个字段独立存：
+配音是「设置」里的第三个 Tab。字段分两组：**云端档**四个（地址 / Key / 模型 / 音色），**本地档**三个（引擎档位 / 本地模型 / 本地音色）。哪一组显示由「配音引擎」决定——本地档根本不读地址、Key、模型，所以那三个框在本地档里直接不出现，而不是摆在那儿让人填了不管用。
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| API Base URL | `ttsApiBase`，音频接口地址。留空＝沿用「校对配置」那个；两者都空时 `getTTSConfig()` 退到 `https://api.openai.com`。同样先 `trim` 去尾斜杠、再去掉尾巴上的 `/v1`，然后拼 `${apiBase}/v1/audio/speech` | 空 |
+| 配音引擎 | `ttsEngine`，`cloud`（「云端接口（默认）」）或 `local`（「本地配音（需下载引擎和模型）」）。这一档决定后面走哪条链路，也是 `getTTSConfig().engine` 里那个 `engine`；非法值会被 `normalizeTtsEngine` 收成默认档 | `cloud` |
+| API Base URL | `ttsApiBase`，音频接口地址（**只有云端档看得着**）。留空＝沿用「校对配置」那个；两者都空时 `getTTSConfig()` 退到 `https://api.openai.com`。同样先 `trim` 去尾斜杠、再去掉尾巴上的 `/v1`，然后拼 `${apiBase}/v1/audio/speech` | 空 |
 | API Key | `ttsApiKey`，可以和校对是**另一家网关的另把 Key**。留空＝沿用校对那把（`ttsApiKey \|\| aiApiKey`）；输入框同样不回显、留空＝不改、点「清除已保存的 Key」才删 | 空 |
 | 配音模型 | `ttsModel`，配音用的模型 id，与校对的「模型」**不是同一个值**：音频接口要的是配音模型，填 chat 模型会被直接拒。**不回落**——留空就是没配，前置校验和「测试连接」都当场说「还没填」，不会拿校对模型去顶上 | 空 |
 | 配音音色 | `ttsVoice`，各家格式不同（OpenAI 是 `alloy` / `onyx` 这类短名，有的网关要求带模型前缀），照服务商文档原样填。整条配音用同一个音色，暂不支持逐段换。**同样不回落** | 空 |
+| 本地模型 | `ttsLocalEngine`，本地档用哪个引擎，下拉只有白名单里那两档：`VITS（推荐中文）` / `Kokoro（推荐英文）`。这个值会被拼进模型目录名，所以渲染层传来的字符串必须先过 `LOCAL_TTS_ENGINES` 白名单，不在名单里就退回默认档——不拿界面传来的字符串当路径用。换这一档会把本地音色复位成默认那一个（两档的音色不通用，VITS 的 3 号不是 Kokoro 的 3 号） | `sherpa-onnx-vits-zh-ll` |
+| 本地音色 | `ttsLocalVoice`，存的是 **0-based 的 sid** 字符串，界面按「音色 1 … 音色 N」显示（`voiceSidLabel` 做那一格偏移，配置里的 `'0'` 就是界面上的「音色 1」）。条数取 `LOCAL_TTS_MODEL_SPEAKERS` 那份实测表（VITS 5 个，2026-10-28 本机 `/health` 报的数），引擎真把模型读进内存后就改认 `/health` 实报的 `num_speakers`——静态表只兜「还没加载」那一段，所以懒启动状态下打开配音页也能一次列全。没核实过的档位（Kokoro）回 0，那时界面只列得出「音色 1」一行，并在提示里说清「这一档的音色总数还没核实，本版也没有它的应用内下载包」，不凭空造一串编号 | `'0'` |
 
 - **为什么地址和 Key 可以共用、模型和音色不行**：前者是「去哪家网关、拿什么身份去」，一家网关通常同时挂着对话和音频两个端点，共用一把 Key 是省事；后者是「要哪个产品」，`gpt-4o-mini` 拿去调 `/v1/audio/speech` 只会得到一个 400。所以回落只回落到会真正干活的那一层。
 - **旧值迁移**：1.0.5 的字段名是 `aiTtsModel` / `aiTtsVoice`（配音藏在校对 Tab 里）。1.0.6 起读磁盘时把这两个旧值搬进 `ttsModel` / `ttsVoice` 并当场写回，**只在目标值为空时搬**——新值已经填过就保留新值。任何情况都不会把用户填过的配音配置清空，也不会带着旧字段名继续读写。
-- **自检**：「配音配置 → 测试连接」用表单当前值真打一次音频接口，合成一句约 10 个字的文本；地址与 Key 留空时按上面同一口径回落，所以「没保存也能测」和「点开始配音」走的是同一条路径。返回 200 却是 JSON、或音频是 0 字节，都算失败并写出原因。
+- **自检（云端档）**：「配音配置 → 测试连接」用表单当前值真打一次音频接口，合成一句约 10 个字的文本；地址与 Key 留空时按上面同一口径回落，所以「没保存也能测」和「点开始配音」走的是同一条路径。返回 200 却是 JSON、或音频是 0 字节，都算失败并写出原因。
+- **自检（本地档）**：同一栏里换成两个按钮，问的不是同一件事。「测试连接」不起远程请求，而是**真起本机引擎**并合成一句约 10 字（倍速固定 1，只为验链路），成功报耗时与「几秒、多大」，失败标题是「本地配音跑不通」；缺件时缺哪样说哪样——只缺模型就不附「另需下载引擎二进制」（那是已经下好的包），音色不在列表里则说「本地配音的音色要选「本地音色」列表里的一项，当前是「X」」。「重启本地配音引擎」处理端口被上一代占住、启动后秒退这类情况，不用退出应用重开；它**只认磁盘上已保存的那一档**，表单里换了没保存不算（「点保存才生效」的口径在这儿不破例），连点会被合并成一次（两个引擎抢 8010 是更坏的结果）。重启后会再问一次状态，音色列表不靠这一次才齐：`/health` 只在模型真进了内存后才报 `num_speakers`（实测刚重启时仍是 0），而列表那条数来自按 sha256 钉死的那份模型表，引擎实报之后才由实报值覆盖。
+- **本地档不许打断正在跑的批次**：一批配音正在逐段合成时点「测试连接」，回的是「现在不能测 / 有一批配音正在逐段合成…」。理由是测试要把引擎换掉，而换掉之后剩下的几十段会全报「没能连上本地配音服务」——花过钱的（云端档）或已经念完的段就白扔了。同一口径也压在「停止本地配音引擎」上（`tts:localStop`）。
+- **本地配音的组件不进安装包**：引擎二进制 + 两份模型合计 500MB 以上，而大部分用户根本不用本地配音，所以缺哪个下哪个，入口在「设置 → 关于与更新 → 按需组件」。两条来源分开：引擎二进制认自家 `components-manifest.json`（schema、tag、资产名、sha256 全部收死字符集，清单里 `component` 必须是 `vv-components`，防把别家同类文件指过来），资产从本仓库的 Release 直链取；模型不读清单，由代码钉死上游 commit 与**逐文件**的 bytes + sha256，从 hf-mirror 按文件自取（VITS 钉的是 `sherpa-onnx-vits-zh-ll` 那个 commit 的 17 个文件，合计 135,454,939 字节，界面显示「未安装，下载约 135.5MB」）。落点都在 `userData/components/`，版本记录写 `installed.json`（手工放进目录的那份没有版本记录，`localVersion` 就是 null）。
+- **Kokoro 这一档本版没有应用内下载包，已拍板排到 1.0.7**，这是范围决定，不是漏了：1.0.6 只发中文 VITS，而 Kokoro 的 `espeak-ng-data/` 有几百个文件，指纹表要另做一轮实测，不能凭记忆填。2026-10-28 量的数（hf-mirror API，commit `423bfb9ccd6a66115a76602a9630ffea265ae176`）：**378 个文件、426,586,433 字节**（按界面那句「下载约 X MB」的十进制口径就是 426.6MB，MiB 是 406.8），其中 `espeak-ng-data/` 占 355 个文件却只有 17.2 MiB，大头是 `model.onnx` 325,561,476 与 `voices.bin` 53,790,720；5 个大文件走 LFS、sha256 能从 API 直取，剩下 373 个是普通 blob，只能整包下完自己算哈希——所以出表之前要先跑一次 426.6MB 的下载。本版这一档既不指清单也不钉上游指纹，界面按「这个版本没有发布对应的下载包」处理：模型下拉里跟在档位名后面那句是「（本版没有下载包）」（`modelPresenceTag`，与「（模型还没下载）」分叉），缺件提示原话是「Kokoro（推荐英文）这一版没有应用内下载包——把本地模型换回 VITS，或改用云端档」（`missingModelHint` 按 `hasInAppDownload` 分叉的那一条）——把一个按下去必然失败的按钮摆出来，比一开始就说清楚更糟。**sidecar 那一层其实已经认得这一档**（2026-10-28 本机实测：拿已发布的那个冻结包 `VV_TTS_ENGINE=kokoro-multi-lang-v1_1` 起在 8019，`/health` 回 `engines:["kokoro-multi-lang-v1_1","sherpa-onnx-vits-zh-ll"]`，`engine` 认下了这个 id），缺的只有模型包与它的指纹表，1.0.7 补表时不用重打 sidecar。两档采样率不同（VITS 16k / Kokoro 24k）也不影响拼轨：铺轴前每段都 `aformat` 成 44.1k 单声道 s16（`PCM_CHAIN`），进的是同一条 concat。真要手工用这份模型：自己放进 `userData/components/tts-models/kokoro-multi-lang-v1_1/`（目录名就是引擎 id，sidecar 与组件落点用的是同一个函数），引擎与模型都齐了就能跑。
 
 ### 配音（TTS）
 
-- **能用什么接口**：只实测了 OpenAI 标准的音频端点 `POST {apiBase}/v1/audio/speech`（body 为 `{ model, input, voice, response_format: 'mp3' }`，返回体直接是音频字节）。返回 JSON 会被当成失败并把 body 前 200 字带进报错，而不是当成一段空音频；404 会额外说明「这家可能没有这个端点，或 API Base 少/多层路径」，401 说明「Key 不对或没有该模型权限」。**只做对话的模型服务通常没有这个端点**，能不能配音以服务商文档为准——界面不承诺通用。
+- **两档引擎，同一条铺轴链路**：「配音配置 → 配音引擎」= `cloud` 时逐段打远程音频接口；= `local` 时主进程 spawn 一个 `vv-tts-server` sidecar（sherpa-onnx，只绑 `127.0.0.1:8010`，一进程一引擎，引擎 id 在启动时用 `VV_TTS_ENGINE` 钉死），逐段 `POST /synthesize`，body 是 `{ engine, text, sid, speed }`。**除音频那一步之外，两档共用同一套代码**：段落切分、记账、熔断、铺轴、拼轨、另存为、临时目录回收都不分叉——本地档只是把「一次请求」换成「本机念一段」。产物也一样：MP3，同样的结果卡与账目。
+- **本地档不花钱，也不上传文稿**：整条链路没有任何远程音频请求（模型下载是另一回事，那是按需组件从 hf-mirror / GitHub 取文件）。界面在点下去之前写的就是这一档的账：「本机合成 N 段（逐段串行，不调接口、不花钱）」，云端那档才写「将调用 N 次接口，按服务商计费」。
+- **懒启动与首次成本**：`tts:localStatus` 只读快照，不会因为打开设置页就把引擎拉起来；真开始配音/试听时才 `ensure`。代码里记的实测：冻结包从 spawn 到 `/health` 回显本次身份要 8.07 秒（PyInstaller 解包是大头），模型读进内存再 VITS 0.22 秒、Kokoro 0.86 秒，这两笔都落在第一次 `/synthesize` 里——所以界面明说「第一次配音要多花几秒，之后就快了」，而「就绪」只保证能收请求，不保证已经念得动。应用内重启实测约 16 秒（本机 arm64 打包版，「设置 → 配音配置 → 重启本地配音引擎」）。
+- **时长信引擎，不信 ffprobe**：本地档的段时长取 sidecar 自己数的采样数（响应头 `X-Vv-Duration`）。ffprobe 读 mp3 拿到的是容器估算，铺轴不认它——这也是为什么本地档的铺轴比云端档准。真读不出来（sidecar 版本对不上）就按 0 报，调用方按「不知道」处理，与云端同一口径，不做「读不出来就猜一个」。
+- **能用什么接口**（云端档）：只实测了 OpenAI 标准的音频端点 `POST {apiBase}/v1/audio/speech`（body 为 `{ model, input, voice, response_format: 'mp3' }`，返回体直接是音频字节）。返回 JSON 会被当成失败并把 body 前 200 字带进报错，而不是当成一段空音频；404 会额外说明「这家可能没有这个端点，或 API Base 少/多层路径」，401 说明「Key 不对或没有该模型权限」。**只做对话的模型服务通常没有这个端点**，能不能配音以服务商文档为准——界面不承诺通用。
 - **前置校验跟主进程同一口径**：`checkVoiceReady()` 先看「配音那把 Key 或校对那把 Key，有没有一把在这台机器上解得开」——两把都指望不上才算没配（解不开的那把会直接说「读不出已保存的 Key」并跳到对应的 Tab），然后单独查 `ttsModel`、`ttsVoice` 这两项。缺任何一样都当场拦住、打开「配音配置」，不会带着空值去点「开始配音」烧用户额度。判得比主进程松或严都不行：松了是拿空 `Authorization` 去打接口，紧了会把本来能干活的人拦在门外。
 - **两种输入来源，走的同一条合成链路**：「纯文本」由 `splitPlainText` 按行 → 句末 → 停顿切、贪心合并到每块 ≤800 字，每块一段、时间轴全 0，铺轴因此天然退化成「首尾相接」，主进程不需要为朗读另开一条路；「从转写带入」把当前非空段落原样带走，起点/终点就是字幕时间轴，页面上给的是只读摘要——要改文字得回转写页编辑，配音页不动字幕一个字。
-- **计费与耗时**：逐段串行，一段一次请求，按服务商计费方式扣费；整条耗时取决于接口响应速度。左列在点下去之前就把账写清楚：纯文本给「N 字 · 会切成 M 次调用」，从转写带入给「共 K 段可配音，约 X 字」和「另外 n 段是空的，不会调用接口」，最下面固定一行「将调用 M 次接口（逐段串行，按服务商计费）」，旁边摆「试听第一句」。
+- **计费与耗时**：逐段串行——云端档一段一次请求、按服务商计费方式扣费，本地档一段一次交给本机引擎、不花钱；整条耗时云端档取决于接口响应速度，本地档取决于本机推理（第一次还多了引擎起来 + 模型读进内存那两笔）。左列在点下去之前就把账写清楚：纯文本给「N 字 · 会切成 M 次调用」，从转写带入给「共 K 段可配音，约 X 字」和「另外 n 段是空的，会被跳过、不占用一次合成」，最下面那行按档分叉：云端档「将调用 M 次接口（逐段串行，按服务商计费）」，本地档「本机合成 M 段（逐段串行，不调接口、不花钱）。第一次配音要多花几秒…」，旁边摆「试听第一句」。
 - **音色与倍速只作用于这一次任务**：工作台上的这两个字段作为 `tts:preview` / `tts:synthesize` 的第二个参数交给主进程收口，**不写回 `settings.json`**——在这一页试错的音色不该变成用户的长期默认值（那要去「配音配置」点「保存设置」）。音色留空＝不覆盖，按设置里那个走；倍速只给固定档位 `0.5 / 0.75 / 1 / 1.25 / 1.5 / 2`（接口字段本是 0.25–4.0 的连续值，让人手打 8 只会得到一条废音轨），并且只在 ≠1 时才进请求体的 `speed`。某家是不是照单实现由接口说了算，界面把这句话写在按钮旁边，不替服务商承诺。
 - **产物是一条独立音轨**：MP3（44.1kHz 单声道、192k）。按字幕时间轴铺开时，某段配音比它的字幕槽位长就顺延到后面，整条往后推——不截断、不做重叠混音，所以**这条轨可能比原时间轴长**。结果卡按来源说人话：从转写带入给「配音轨 00:42 · 体积 / 原时间轴到 00:27，这条比它长（差 00:14）/ n 段配音比字幕槽位长，已顺延到后面——这条轨和画面越到后面差得越多」；纯文本那一路没有时间轴，就写「纯文本连续朗读，按顺序首尾相接」，不把「相对字幕槽位」的警告套到一个根本不存在的槽位上。两条都照实写明「字幕与时间轴没有改动，这是一条独立的音轨」。越到后面偏差越大，对画面时要以这条轨为准重铺字幕，而不是直接盖在原时间轴上。
-- **失败与取消**：连续 3 段失败即熔断停下整批（熔断原因与「用户自己点了取消」分开报），失败清单在结果卡上列出前 3 段的原话（「第 n 段：接口回的原因」），剩下的并成一句「还有 n 段，原因同上一类」；「取消」只停后面的段，已经合成的照样拼成一条轨。一段都没成时不会谎报成功，同一张卡换成失败态：整批停下的原因 + 「接口回的原话」+「去配音配置测连接」，并写「地址、Key、模型、音色四样里任何一样不对，都长这样」。
+- **失败与取消**：连续 3 段失败即熔断停下整批（熔断原因与「用户自己点了取消」分开报），失败清单在结果卡上列出前 3 段的原话（「第 n 段：`failure.error`」，标题是「n 段失败：」），剩下的并成一句「还有 n 段，原因同上一类」；「取消」只停后面的段——正在飞的那一次请求、正在念的那一段都要等它回来，已经合成的照样拼成一条轨。只剩本地拼轨这一步时**界面上没有取消按钮**（主进程那一步也没有取消位，`tts:cancel` 此时回 `late`，绝不回 `success: true`），同一张卡的提示行改说「不再调接口、不再花钱，但也停不下来…等它跑完轨照常给你」，并且**不置「正在取消…」**——置了就等于跟着骗人。一段都没成时不会谎报成功，同一张卡换成失败态：整批停下的原因 + 原话（云端档标题是「接口回的原话：」，本地档是「本机引擎回的原话：」）+「去配音配置测连接」，最后一行按档分开：云端档写「地址、Key、模型、音色四样里任何一样不对，都长这样」，本地档写「本地这一档不看地址和 Key；引擎二进制、模型、音色编号三样里任何一样不对，都长这样」。
 - **产物只有一份留在用户手上**：中间片段与整轨都写在 `$TMPDIR/transcribe-tts-<uuid>/`，配音页「清空」、重开一批、回首页（且这批已跑完）三条路会当场把整目录删掉；切走 tab 不删——这一版产物在清空或重开之前一直能听，回来还能播。要把它留在自己机器上，必须点「保存配音轨」走系统「另存为」，另存出去的副本跟着目录删不掉。进程被强杀没走到那一步时，由下次启动的临时清扫回收（`transcribe-*` 前缀、mtime 超 24 小时）。
 
 ### 本地词典
@@ -521,7 +598,9 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 - 视频文件播放依赖 `webSecurity: false` 配置，通过 `file://` 协议加载本地文件
 - 「校对」不要求 API Key：没配置校对模型时不弹选择框，直接跑本地校对（误听表 + 词库 + 参考稿 diff）；配置了模型才弹「本地校对 / AI 校对」选择框。AI 校对调用失败会给出可见提示，不会静默返回原文
 - 本地校对依据的误听表和中文词库只对中文成立：「转写语言」选成其他语言后，没配模型时点「校对」会提示去「校对配置」选模型，配了模型则在选择框里把「本地校对」置灰
-- 配音整批是**逐段串行的一次段一次请求**，扣的是用户自己 Key 上的额度，所以点「开始配音」之前先看左列那两行账（字数、「将调用 n 次接口」），并先听「试听第一句」那一句——音色不对时第 2 段和第 20 段一样烧钱
+- 配音整批是**逐段串行**的：云端档一段一次请求、扣的是用户自己 Key 上的额度，所以点「开始配音」之前先看左列那两行账（字数、「将调用 n 次接口」），并先听「试听第一句」那一句——音色不对时第 2 段和第 20 段一样烧钱。本地档不烧钱，但一段一次本机推理，整批下来照样是分钟级的事，而且第一次配音多了「引擎起来 + 模型读进内存」两笔；选的这一档模型不在磁盘上时点下去会被当场拦住（不发起整批），提示去哪下按需组件
+- 本地配音的引擎和模型**都不在安装包里**：全新装机上「配音配置」选本地档，测连接会直接说「本地配音组件还没下载」并指路「设置 → 关于与更新 → 按需组件」，而不是转圈等到超时。所以对外别说「装上就能离线配音」，得先跑那一次下载（引擎二进制从本仓库 Release 取、模型从 hf-mirror 取，弱网这一步可能失败，报错按下载链路原样给）
+- 端口 8010 是本地配音引擎的约定端口，只绑 `127.0.0.1`，且**一进程一引擎**（引擎 id 启动时由 `VV_TTS_ENGINE` 钉死）：换档不并起第二个进程，而是 `ensure` 里把上一代收掉再开新的（所以换档=重启，端口上留着的还是那一个）。应用被强杀、上一代还占着 8010 时由「重启本地配音引擎」回收，不必退出重开。这批正在逐段合成时不许测连接也不许停引擎，理由见「配音配置」那条
 - 配音轨可能比原时间轴长（有段落被顺延），这是刻意不截断、不重叠的结果。拿这条轨对画面时**以配音轨为准重铺字幕**，别直接盖在原时间轴上；配音页结果卡上那句「n 段配音比字幕槽位长」和「差 00:xx」就是给人判断这件事用的——它们只在「从转写带入」时出现，纯文本连续朗读没有字幕槽位可比
 - 编译 Python ASR 二进制需要 PyInstaller，它已列在 `python-asr/requirements.txt` 里（`pnpm setup:asr` 一并装上）；`scripts/build-asr.mjs` 用的是 venv 里的解释器，所以必须先建好虚拟环境
 - API Key 的加密时机与退化路径：`settings.json` 里的历史明文在**首次读到设置**时就地换成密文（读到才迁，不是启动就迁——没打开设置页、也没跑过任何读配置的链路时，磁盘上那条仍是明文）；本机密钥库不可用时退回明文并在设置里标注，加密抛错也存明文，而不是把用户填的 Key 丢掉。换过电脑导致密文解不开时，设置里的状态、「测试连接」和开工前置校验给的是同一句「这台机器读不出已保存的 API Key…」，重新填一次并保存即恢复

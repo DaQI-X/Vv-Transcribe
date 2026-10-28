@@ -230,10 +230,12 @@ export function registerTTSHandlers() {
   /**
    * 取消：正在飞出去的那一次请求不打断（钱已经花了），从下一段起不再调用。
    * 已成功的片段照常拼，所以取消不等于这批产物作废。
+   * 逐段循环已经跑完时返回 'late' 而不是 success:true：那时只剩本地 ffmpeg 在拼轨，
+   * 没有可拦的东西，界面据此把取消入口收起来并说清楚，而不是装作按下了。
    */
   ipcMain.handle('tts:cancel', async (_event, jobId: string) => {
-    const success = cancelTTSSynthesis(String(jobId ?? ''))
-    return { success }
+    const reason = cancelTTSSynthesis(String(jobId ?? ''))
+    return { success: reason === 'stopped', reason }
   })
 
   /** 成品另存为用户选的位置：产物本来就在临时目录里，走「先下满再弹保存框」的既有口径 */

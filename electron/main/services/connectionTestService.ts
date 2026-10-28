@@ -27,6 +27,7 @@ import {
   parseLocalTtsSid,
   synthesizeLocally,
 } from './localTtsEngine'
+import { hasActiveTTSSynthesis } from './ttsService'
 import { hasInAppModelDownload } from './ttsModelUpstream'
 import { DEFAULT_PROMPT } from './ai/openaiCompatible'
 
@@ -387,6 +388,16 @@ const TTS_PROBE_TEXT = '这是一次配音接口自检。'
  * 本地档不花钱、不走网络，所以这里可以放开手真合成，不用像云端那样先确认段数。
  */
 async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestOutcome> {
+  // 有一批正在逐段合成时不放行：自检要真起引擎，而表单里那档可能和正在跑的不是同一档——
+  // 引擎被换掉，剩下几十段全报「没能连上本地配音服务」。与 tts:localStop 那条闸门同一个口径。
+  if (hasActiveTTSSynthesis()) {
+    return {
+      level: 'fail',
+      title: '现在不能测',
+      message: '有一批配音正在逐段合成。等它跑完（或先在配音页取消这一批）再测，' +
+        '否则这边会把正在用的引擎换掉，剩下的段落全部失败',
+    }
+  }
   const engine = normalizeLocalTtsEngine(rawEngine)
   const status = getLocalTtsStatus(engine)
   if (!status.binaryPresent || !status.modelPresent) {
@@ -412,7 +423,7 @@ async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestO
     return {
       level: 'fail',
       title: '还测不了',
-      message: `本地配音的音色是一个编号（如 0），当前是「${(rawVoice || '').trim() || '空'}」。请在「设置 → 配音配置 → 本地音色」里选一个`,
+      message: `本地配音的音色要选「本地音色」列表里的一项，当前是「${(rawVoice || '').trim() || '空'}」。请在「设置 → 配音配置 → 本地音色」里选一个`,
     }
   }
 
