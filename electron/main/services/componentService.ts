@@ -5,13 +5,22 @@
  * 它们都不进安装包（1.0.6 的范围决定），所以第一次用必须能在应用内取到；「要下多少、下到哪、
  * 失败了怎么办」这三件事就是本模块的职责。界面入口在设置 → 关于与更新。
  *
- * 信任模型照 ytDlpUpdate（自家清单），四条收紧点写在这儿而不是抄一遍：
+ * 两条来源，一个下载器（#237 拍板「引擎发在自己 Release、模型不替第三方权重做二次分发」之后分成这样）：
+ * - 引擎二进制是我们自己的产物 → 由清单（components-manifest.json）指版本与指纹，资产在我们仓库的 Release 上；
+ * - 模型是第三方训练出来的 → 不进清单，钉在上游提交号上，逐文件从上游客仓取（表在 ttsModelUpstream.ts，
+ *   为什么模型不转发到我们 Release 那份理由写在那份文件头上）。
+ * 「清单坏了」和「上游飘了」是两种故障，闸门不同，别指望一条链路替另一条把关。
+ *
+ * 走清单那一条的信任模型照 ytDlpUpdate（自家清单），四条收紧点写在这儿而不是抄一遍：
  * 1. 清单里没有 URL。下载地址 = 代码内写死的 Release 前缀 + 清单里的 tag 与资产名，两者都过正则；
  * 2. 清单里没有路径。落点由下面的 SPECS 决定，清单只能改版本/资产名/指纹，改不了写到哪；
  * 3. 先比 SHA2-256 再落地：验不过就整份删掉临时件，组件目录里绝不留半个组件；
  * 4. 归档解出来还要点名：SPECS.required 里的条目必须都在，文件数与解压后体积必须与清单声明一致。
  *    少了这一步，「多包了一层外壳目录」或 macOS 元数据混进来的包（实测 17 个文件变 37 个）
  *    会装完再让引擎报缺文件，那时已经分不清是下载坏了还是引擎坏了。
+ * 上游那一条比这四条更硬也更简单：路径与指纹都在代码里，网络回来的任何东西都没有过「写到哪」的权力；
+ * 每个文件各自比一次 SHA2-256，全部点齐才把整个目录改名落地——没有「解出来的结构对不对」这个问题，
+ * 因为根本不存在解包。
  *
  * 剩下的边界与 yt-dlp 那条一样：能写本仓库的人可以同时换掉清单和 Release 资产（同源自证，#182 记着）。
  */
@@ -22,8 +31,16 @@ import { dirname, join } from 'node:path'
 import { net } from 'electron'
 import { logger } from './logger'
 import { ArchiveError, extractTarGz } from './componentArchive'
-import { LOCAL_TTS_ENGINES, componentsDir, isLocalTtsEngineRunning } from './localTtsEngine'
+import { LOCAL_TTS_ENGINES, componentsDir, isLocalTtsEngineRunning, modelRootDir } from './localTtsEngine'
 import { hasActiveTTSSynthesis } from './ttsService'
+import {
+  UPSTREAM_MODEL_SOURCES,
+  upstreamFileUrl,
+  upstreamTableDigest,
+  upstreamTotalBytes,
+  upstreamVersion,
+  type UpstreamModelSource,
+} from './ttsModelUpstream'
 
 const TAG = 'Components'
 
@@ -59,24 +76,26 @@ const PROGRESS_INTERVAL_MS = 200
 
 const NETWORK_HINT = '连不上组件清单（多为国内直连 GitHub 过慢或被拦所致），可开启网络加速后重试'
 
+/** binary＝落点是一个文件；archive＝落点是一个目录（解包来的，或逐文件取来的，见下面 upstream） */
 export type ComponentKind = 'binary' | 'archive'
 
-/** 一个组件在代码侧的全部真相：落点、必需文件、体积上限、什么时候算「正在用」 */
+/** 一个组件在代码侧的全部真相：从哪儿取、落到哪、必需文件、体积上限、什么时候算「正在用」 */
 interface ComponentSpec {
   id: string
   title: string
   kind: ComponentKind
   /** 界面括号里那句「要下多少」的账。数字取 2026-10-28 本机实测，跨平台不同的那份不编数 */
   hint: string
-  /** 取清单 assets 里哪一条 */
-  manifestKey: () => string
+  /** 取清单 assets 里哪一条。与 upstream 二选一，两个都没有＝这一版本不给应用内下载 */
+  manifestKey?: () => string
+  /** 从上游客仓逐文件取（模型）。给了它就不读清单：版本、指纹、体积全在这份代码里 */
+  upstream?: UpstreamModelSource
   /** 落点。binary 是文件，archive 是目录 */
   target: () => string
-  /** archive 专用：解完后必须都在的条目。名字以 / 结尾表示只要「下面有东西」 */
+  /** 目录型组件专用：装完必须都在的条目。名字以 / 结尾表示只要「下面有东西」 */
   required?: string[]
-  /** archive 专用：解压体积的代码侧上限，兜住清单把数字写错的情况 */
+  /** 清单那条路专用：解包体积与文件数的代码侧上限，兜住清单把数字写错的情况。上游逐文件取用不到 */
   maxExtractBytes?: number
-  /** archive 专用：文件数上限，同上 */
   maxFiles?: number
   /** 正在被占用就给出那句人话。Windows 上运行中的 exe 改名会直接失败，模型目录被 sidecar 开着删一半会让下一次配音报一串看不懂的文件错误 */
   busy?: () => string | null
@@ -133,42 +152,45 @@ const MODEL_REQUIRED: Record<(typeof LOCAL_TTS_ENGINES)[number], string[]> = {
 }
 
 /**
- * 体积上限按实测账给两倍余量：VITS 解压后 135,454,939 字节（2026-10-28 本机 du/walk 实测），
- * Kokoro 的模型按 sidecar 里那份 weightsMb=409 的账放大。这里的数字只管「别撑爆磁盘」，
- * 精确对账靠清单声明的 fileCount / extractedBytes。
+ * 三个组件，两种来源：引擎那条要读清单才知道版本，模型这条的版本与指纹就是 ttsModelUpstream.ts 里
+ * 钉死的那个提交（135,454,939 字节 / 17 个文件，2026-10-28 本机实测）——所以「未安装，下载约 135.5MB」
+ * 这句在没点「检查清单」时也答得出来，不拿 0 或「不知道」冒充已知。
+ * hint 里一律不重复体积：那一格由表算，写死了就会出现「129MB」与「135.5MB」并排（同一份东西、
+ * 一个按 1024 进位一个按 1000 进位），用户只会当成两个不同的包。
+ * maxExtractBytes / maxFiles 这两位目前没人设：它们属于「清单指一个归档」那条路（还留在 doInstall 里，
+ * 供以后再有归档组件时用），逐文件取上游这条路按指纹对，不看这两个上限。
  */
 const SPECS: ComponentSpec[] = [
   {
     id: 'vv-tts-server',
     title: '本地配音引擎',
     kind: 'binary',
-    hint: '约 23MB（按平台差异较大）',
+    hint: '引擎二进制，三平台各一份，体积按平台差异较大',
     manifestKey: PLATFORM_KEY,
     target: () => join(componentsDir(), 'vv-tts-server', PLATFORM_KEY(), engineBinaryName()),
     busy: busyReason,
   },
   {
     id: `tts-model-${LOCAL_TTS_ENGINES[0]}`,
-    title: '中文配音模型（VITS）',
+    title: 'VITS（推荐中文）',
     kind: 'archive',
-    hint: '约 129MB',
-    manifestKey: () => 'any',
-    target: () => join(componentsDir(), 'tts-models', LOCAL_TTS_ENGINES[0]),
+    hint: '中文配音模型，取自 HuggingFace 上游仓库里钉死的那个提交',
+    upstream: UPSTREAM_MODEL_SOURCES[LOCAL_TTS_ENGINES[0]],
+    target: () => join(modelRootDir(), LOCAL_TTS_ENGINES[0]),
     required: MODEL_REQUIRED[LOCAL_TTS_ENGINES[0]],
-    maxExtractBytes: 400e6,
-    maxFiles: 5000,
     busy: busyReason,
   },
   {
     id: `tts-model-${LOCAL_TTS_ENGINES[1]}`,
-    title: '英文配音模型（Kokoro）',
+    title: 'Kokoro（推荐英文）',
     kind: 'archive',
-    hint: '约 409MB',
-    manifestKey: () => 'any',
-    target: () => join(componentsDir(), 'tts-models', LOCAL_TTS_ENGINES[1]),
+    hint: '英文配音模型，本版未开放应用内下载',
+    // 既不指清单也不钉上游指纹：1.0.6 的范围只发 VITS 中文（拍板过的），而 Kokoro 的
+    // espeak-ng-data/ 有几百个文件，指纹表要另做一轮实测，不能凭记忆填。
+    // 于是界面按「这一版没有发布对应的下载包」处理——把按钮按下再让用户看它失败是更坏的答案。
+    // 真要手工放入这份模型：放进 modelRootDir()/<引擎 id>，sidecar 与这里的落点用的是同一个函数。
+    target: () => join(modelRootDir(), LOCAL_TTS_ENGINES[1]),
     required: MODEL_REQUIRED[LOCAL_TTS_ENGINES[1]],
-    maxExtractBytes: 1.5e9,
-    maxFiles: 5000,
     busy: busyReason,
   },
 ]
@@ -358,8 +380,38 @@ function releaseBase(): string {
   return override && process.env.VV_COMPONENTS_MANIFEST_URL ? override : RELEASE_BASE
 }
 
+/**
+ * 上游那条来源翻译成一个 AssetEntry。之所以翻译而不是另写一套：界面那栏、installed.json、
+ * buildState 的「装的是哪一版」只认一种结构，多一条来源就多维护一份状态机，收益是零。
+ * 这里 version 与 tag 都放提交号前 7 位：模型没有「我们发了几版」这件事，能说的只有「钉的是哪个提交」。
+ * extractedBytes / fileCount 等于下载体积与文件数——没有归档这一层，取到的就是最终形态。
+ */
+function upstreamEntry(source: UpstreamModelSource): AssetEntry {
+  const bytes = upstreamTotalBytes(source)
+  const version = upstreamVersion(source)
+  return {
+    version,
+    tag: version,
+    asset: `${source.repo}@${version}`,
+    sha256: upstreamTableDigest(source),
+    bytes,
+    extractedBytes: bytes,
+    fileCount: source.files.length,
+  }
+}
+
+/** 这个组件的「远端」由谁说了算：代码里钉的上游表 > 清单 > 两者都没有＝本版不可下载 */
+function entryFrom(raw: unknown, spec: ComponentSpec): AssetEntry {
+  if (spec.upstream) return upstreamEntry(spec.upstream)
+  const manifestKey = spec.manifestKey
+  if (!manifestKey) {
+    throw new MissingAssetError(`${spec.title} 本版没有钉下载指纹，不能在应用内下载`)
+  }
+  return pickEntry(raw, spec, manifestKey())
+}
+
 /** 网络回来的 JSON 一律当外部输入对待：逐字段验，任何一条不合规矩就整份拒绝 */
-function pickEntry(raw: unknown, spec: ComponentSpec): AssetEntry {
+function pickEntry(raw: unknown, spec: ComponentSpec, key: string): AssetEntry {
   if (raw === null || typeof raw !== 'object') throw new Error('组件清单不是一个对象')
   const manifest = raw as Record<string, unknown>
   if (manifest.component !== MANIFEST_COMPONENT) {
@@ -390,7 +442,6 @@ function pickEntry(raw: unknown, spec: ComponentSpec): AssetEntry {
   }
   const assets = item.assets
   if (assets === null || typeof assets !== 'object') throw new Error(`组件清单里 ${spec.id} 缺少 assets`)
-  const key = spec.manifestKey()
   const asset = (assets as Record<string, unknown>)[key]
   if (asset === null || asset === undefined) {
     throw new MissingAssetError(`组件清单没有 ${spec.id} 的 ${key} 这一条，这个平台没有对应组件`)
@@ -472,22 +523,31 @@ async function fetchManifest(): Promise<unknown> {
   throw new Error(`${allNetwork ? NETWORK_HINT : '组件清单读取失败'}（${detail}）`)
 }
 
-/** 清单读到了，但本机这一条可能没有：按组件取，取不到就是这一个组件的事，不牵连另外两个 */
+/**
+ * 取这个组件的「远端」。钉了上游的模型不发 HTTP——指纹就在代码里，
+ * 让它去读一份跟自己无关的清单，等于把「GitHub 连不上」算成「我的模型下不了」。
+ * 清单里本机这一条可能没有：按组件取，取不到就是这一个组件的事，不牵连另外两个。
+ */
 async function entryFor(spec: ComponentSpec): Promise<AssetEntry> {
-  return pickEntry(await fetchManifest(), spec)
+  if (spec.upstream) return upstreamEntry(spec.upstream)
+  return entryFrom(await fetchManifest(), spec)
 }
 
 /**
  * 从会话缓存里取本机这条，给不联网的那份状态用。
- * 三种结果要分清楚：没缓存（null）→ 界面提示去点「检查清单」；
+ * 四种结果要分清楚：代码里钉了上游 → 不依赖清单，直接报版本与体积；
+ * 本版压根没有来源（false）→ 按钮按下并说清「本版没有钉下载指纹」；
+ * 没缓存（null）→ 界面提示去点「检查清单」；
  * 缓存里没这台机器的条目（false）→ 按钮按下并说明这个平台没有对应组件；
  * 其余结构不合规矩的清单（我们本来就在 checkComponents 里报过一次）在这里按 null 处理，
  * 不在每一次刷新里重复弹同一句。
  */
 function cachedRemote(spec: ComponentSpec): { entry: AssetEntry | null; inManifest: boolean | null } {
+  if (spec.upstream) return { entry: upstreamEntry(spec.upstream), inManifest: true }
+  if (!spec.manifestKey) return { entry: null, inManifest: false }
   if (lastManifest === null) return { entry: null, inManifest: null }
   try {
-    return { entry: pickEntry(lastManifest, spec), inManifest: true }
+    return { entry: entryFrom(lastManifest, spec), inManifest: true }
   } catch (err) {
     if (err instanceof MissingAssetError) return { entry: null, inManifest: false }
     return { entry: null, inManifest: null }
@@ -555,7 +615,7 @@ export async function checkComponents(): Promise<ComponentCheckResult> {
   const problems: string[] = []
   for (const spec of SPECS) {
     try {
-      components.push(await buildState(spec, pickEntry(raw, spec)))
+      components.push(await buildState(spec, entryFrom(raw, spec)))
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       // 「清单里没有本机这一条」不算检查失败：另外两个组件的版本照常报，
@@ -584,14 +644,21 @@ function emit(inFlight: Task, p: ComponentProgress): void {
   }
 }
 
-/** 边下边算 SHA2-256。返回收到的字节数；指纹不符或字节数不对直接抛，由调用方删掉临时件 */
+/**
+ * 边下边算 SHA2-256。返回收到的字节数；指纹不符或字节数不对直接抛，由调用方删掉临时件。
+ * `progress` 只给逐文件取上游那条路用：一条进度条要跨 17 个文件连起来走，
+ * 每个文件都拿自己的字节数当分母，界面上就是一根从 0 反复弹回去的假条。
+ */
 async function downloadToPart(
   url: string,
   partFile: string,
   entry: AssetEntry,
   inFlight: Task,
-  spec: ComponentSpec
+  spec: ComponentSpec,
+  progress?: { base: number; total: number }
 ): Promise<number> {
+  const doneOf = (received: number) => (progress ? progress.base + received : received)
+  const totalOf = () => (progress ? progress.total : entry.bytes)
   await mkdir(dirname(partFile), { recursive: true })
   await rm(partFile, { force: true })
 
@@ -617,7 +684,8 @@ async function downloadToPart(
       headers: { 'User-Agent': 'vv-transcribe' },
     })
     if (!res.ok) {
-      throw new Error(`下载失败 ${res.status}（${entry.asset} 在 ${entry.tag} 这个发布里不存在？）`)
+      // 这句话两条来源都要能用，所以不写「发布」：清单那条 entry.tag 是 v1.0.6，上游那条是提交号前 7 位
+      throw new Error(`下载失败 ${res.status}（${entry.asset} 在 ${entry.tag} 这一版里取不到？）`)
     }
     if (!res.body) throw new Error('下载响应没有内容')
 
@@ -635,13 +703,13 @@ async function downloadToPart(
         const now = Date.now()
         if (now - lastReport > PROGRESS_INTERVAL_MS) {
           lastReport = now
-          emit(inFlight, { id: spec.id, phase: 'download', done: received, total: entry.bytes })
+          emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
         }
       }
     } finally {
       await handle.close()
     }
-    emit(inFlight, { id: spec.id, phase: 'download', done: received, total: entry.bytes })
+    emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
   } catch (err) {
     if (inFlight.reason === 'cancelled') throw new Error('已取消下载')
     if (inFlight.reason === 'idle') {
@@ -664,13 +732,13 @@ async function downloadToPart(
   }
 
   if (received !== entry.bytes) {
-    throw new Error(`下载不完整（收到 ${received} / 应有 ${entry.bytes} 字节）`)
+    throw new Error(`下载不完整（${entry.asset}：收到 ${received} / 应有 ${entry.bytes} 字节）`)
   }
   const digest = hash.digest('hex')
   if (digest !== entry.sha256) {
     logger.error(TAG, 'fingerprint mismatch', { id: spec.id, expected: entry.sha256, actual: digest })
     throw new Error(
-      `校验不通过：下载到的文件与组件清单的指纹不一致（${digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…），已放弃`
+      `校验不通过：下载到的 ${entry.asset} 指纹和钉死的那份对不上（${digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…），已放弃`
     )
   }
   return received
@@ -712,10 +780,12 @@ async function doInstall(
   }
 
   const target = spec.target()
-  const url = `${releaseBase()}/${entry.tag}/${entry.asset}`
   // 临时件一律放组件目录之内：跨卷 rename 是 EXDEV，放同一棵树下改名必成
   const staging = join(componentsDir(), '.staging', `${spec.id}@${entry.version}`)
-  logger.info(TAG, 'install start', { id, url, sha256: entry.sha256, bytes: entry.bytes })
+  const from = spec.upstream
+    ? `${spec.upstream.repo}@${spec.upstream.commit.slice(0, 7)}`
+    : `${releaseBase()}/${entry.tag}/${entry.asset}`
+  logger.info(TAG, 'install start', { id, from, sha256: entry.sha256, bytes: entry.bytes })
 
   try {
     await rm(staging, { recursive: true, force: true })
@@ -725,6 +795,7 @@ async function doInstall(
     await mkdir(dirname(target), { recursive: true })
 
     if (spec.kind === 'binary') {
+      const url = `${releaseBase()}/${entry.tag}/${entry.asset}`
       const partFile = join(staging, entry.asset)
       await downloadToPart(url, partFile, entry, inFlight, spec)
       if (process.platform !== 'win32') await chmod(partFile, 0o755)
@@ -734,6 +805,55 @@ async function doInstall(
       return { ok: true, error: null, state: await buildState(spec, entry) }
     }
 
+    if (spec.upstream) {
+      const source = spec.upstream
+      const filesDir = join(staging, 'files')
+      let downloaded = 0
+      for (const file of source.files) {
+        // 指纹表是代码不是网络输入，但它会在未来某次编辑里写错：拼路径前先卡住「绝对路径 / 往上跳」，
+        // 否则一个笔误就能把下载写到组件目录之外去
+        if (file.path.startsWith('/') || file.path.includes('..')) {
+          throw new Error(`指纹表里的路径不合规矩：${file.path}`)
+        }
+        await downloadToPart(
+          upstreamFileUrl(source, file),
+          join(filesDir, file.path),
+          {
+            version: entry.version,
+            tag: entry.tag,
+            asset: file.path,
+            sha256: file.sha256,
+            bytes: file.bytes,
+            extractedBytes: null,
+            fileCount: null,
+          },
+          inFlight,
+          spec,
+          { base: downloaded, total: entry.bytes }
+        )
+        // 只按表里的字节数累加：downloadToPart 已经逐字节验过收到量等于这个数，
+        // 这里再读一次磁盘属于重复劳动，而进度条要的是「整批的分母别跳」
+        downloaded += file.bytes
+      }
+
+      emit(inFlight, { id: spec.id, phase: 'verify', done: 0, total: 1 })
+      const missing = (spec.required ?? []).filter((required) => {
+        const bare = required.replace(/\/+$/, '')
+        return !source.files.some((file) => file.path === bare || file.path.startsWith(`${bare}/`))
+      })
+      if (missing.length > 0) {
+        throw new Error(
+          `指纹表点不齐引擎要的文件：缺 ${missing.join('、')}。表与必需清单脱节了（那份必须与 python-tts/main.py 的 ENGINES 一致），已放弃`
+        )
+      }
+      await promote(filesDir, target)
+      const bytes = await diskBytes(target)
+      await recordInstalled(spec, entry, bytes)
+      logger.info(TAG, 'install done', { id, version: entry.version, target, bytes })
+      return { ok: true, error: null, state: await buildState(spec, entry) }
+    }
+
+    const url = `${releaseBase()}/${entry.tag}/${entry.asset}`
     const archive = join(staging, entry.asset)
     await downloadToPart(url, archive, entry, inFlight, spec)
 

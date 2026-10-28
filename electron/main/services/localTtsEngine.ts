@@ -25,6 +25,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { app } from 'electron'
 import { logger } from './logger'
+import { UPSTREAM_MODEL_SOURCES, upstreamTotalBytes } from './ttsModelUpstream'
 
 const TAG = 'LocalTTS'
 
@@ -76,8 +77,10 @@ export function componentsDir(): string {
 }
 
 /** 模型根目录：里面是 `<engine-id>/`，目录名就是上游仓库名，sidecar 按同样的名字找 */
-function modelRootDir(): string {
-  // 自测口子（同 VV_YTDLP_MANIFEST_URL 的思路）：模型已经手动下在别处时不用复制一份进包目录
+export function modelRootDir(): string {
+  // 自测口子（同 VV_YTDLP_MANIFEST_URL 的思路）：模型已经手动下在别处时不用复制一份进包目录。
+  // 导出给组件下载用——落点必须和这里读的是同一个地方，否则设了 VV_TTS_MODEL_DIR 会变成
+  // 「下到 A 处、引擎读 B 处」，而下完就报「已安装」的界面看不出这个分叉。
   return process.env.VV_TTS_MODEL_DIR || join(componentsDir(), 'tts-models')
 }
 
@@ -251,12 +254,15 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
 /**
  * 组件体积的口径。下载引导（#230/#233）、启动失败与自检文案都从这里取，
  * 免得同一个数字在三处各写一遍、改的时候只改对一处。
- * 模型体积是 2026-10-28 本机下载后实测（onnx 与词典文件，跨平台同一份）；引擎二进制按平台差异较大，
- * 这里不给数字——把 macOS 上量到的 23MB 说成三平台通用，就是把没验过的数字写进对客文案。
+ * 单位按 1000 进位（与界面的 formatBytes 同一把尺），VITS 那份直接算自钉死的指纹表——
+ * 表里的字节数变了，这句话跟着变，不会再出现「129MB」和「135.5MB」并排。
+ * Kokoro 本版不开放应用内下载，没有可算的表，用 2026-10-28 上游 tree 接口实测的
+ * 426,584,620 字节（不含 README 与 .gitattributes）。
  */
 export function componentsSizeHint(engine: LocalTtsEngineId): string {
-  const modelMb = engine === 'sherpa-onnx-vits-zh-ll' ? 129 : 409
-  return `${engine} 的模型约 ${modelMb}MB，另需下载对应平台的引擎二进制`
+  const source = UPSTREAM_MODEL_SOURCES[engine]
+  const modelBytes = source ? upstreamTotalBytes(source) : 426_584_620
+  return `${engine} 的模型约 ${(modelBytes / 1e6).toFixed(1)}MB，另需下载对应平台的引擎二进制`
 }
 
 function missingComponentsMessage(engine: LocalTtsEngineId): string {

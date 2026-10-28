@@ -8,8 +8,10 @@
  * 三条口径跟着主进程走，界面自己不发明：
  * - 组件名、说明、能装哪些，全在 services/componentService.ts 的 SPECS 白名单里；
  *   界面只印 id/title/hint，未知 id 到不了主进程。
- * - 版本号与下载体积只在点过「检查清单」之后才有；没检查过时那三位是 null，
- *   界面就说「还没和清单对过」，不拿 0 冒充已知。
+ * - 版本与体积谁说了算看来源：钉了上游指纹的模型不读清单，打开这一栏就答得出「未安装，下载约 135.5MB」；
+ *   引擎那一条要等用户点「检查清单」才有远端版本，没查过时那两位是 null，界面就说「还没和清单对过」，
+ *   不拿 0 冒充已知。体积数字只有一处算法（主进程按表内字节数报，界面按 1000 进位显示），
+ *   所以组件行和提示语不会出现「129MB」与「135.5MB」并排这种同一份东西两个数。
  * - 下载体积的分母可能是 0（清单没写 bytes），这时只显示已下载的字节数，不给假百分比。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -58,8 +60,8 @@ function describe(s: ComponentState): string {
   if (s.inManifest === null) return `v${s.localVersion}，${size}（还没和清单对过）`
   if (s.inManifest === false) return `v${s.localVersion}，${size}（清单里没有它的下载包）`
   return s.action === 'none'
-    ? `v${s.localVersion}，${size}，已是清单上的最新`
-    : `v${s.localVersion}，${size}；清单上是 v${s.remoteVersion}`
+    ? `v${s.localVersion}，${size}，已是本版可用的最新`
+    : `v${s.localVersion}，${size}；本版认的是 v${s.remoteVersion}`
 }
 
 export function ComponentsSection() {
@@ -255,8 +257,9 @@ export function ComponentsSection() {
         </span>
       </div>
       <span className="settings-form-hint">
-        本地配音用的引擎和模型不随安装包分发，缺哪个下哪个。下载走 GitHub Release，
-        完成后按文件指纹校验过才会替换现有组件，中途失败或取消都不会留下半份。
+        本地配音用的引擎和模型不随安装包分发，缺哪个下哪个：引擎取我们仓库的 Release 资产，
+        模型取 HuggingFace 上游仓库里钉死的那个提交。两条都按文件指纹校验过才会替换现有组件，
+        中途失败或取消都不会留下半份。
         {busy?.synthesizing && '（有一批字幕配音正在逐段合成，等它跑完或先取消这一批，才能动组件）'}
       </span>
 
