@@ -6,6 +6,7 @@
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
+import { hasInAppDownload, missingModelHint } from '@/utils/localTtsEngines'
 
 export interface ReadinessBlock {
   message: string
@@ -104,14 +105,15 @@ export async function checkVoiceReady(): Promise<ReadinessBlock | null> {
     const status = await api.getLocalVoiceStatus(str(settings?.ttsLocalEngine) || undefined).catch(() => null)
     if (status && !status.binaryPresent) {
       return {
-        message: '本地配音引擎还没下载好。请在「设置 → 配音配置」里下载本地配音组件',
-        settingsTab: 'tts',
+        message: '本地配音引擎还没下载。下载入口在「设置 → 关于与更新 → 按需组件」',
+        settingsTab: 'about',
       }
     }
     if (status && !status.modelPresent) {
+      // 拦下时打开哪个 tab 取决于这句话给的出路：能下载的去按需组件，本版没包的去处是换档
       return {
-        message: `本地配音的模型还没下载（${status.requestedEngine}）。请在「设置 → 配音配置」里下载对应模型`,
-        settingsTab: 'tts',
+        message: missingModelHint(status.requestedEngine),
+        settingsTab: hasInAppDownload(status.requestedEngine) ? 'about' : 'tts',
       }
     }
     // 与主进程 ttsConfigProblem 同一口径：音色得是编号。空着不算问题（主进程按推荐档 0 处理）

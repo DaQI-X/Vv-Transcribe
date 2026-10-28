@@ -25,7 +25,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { app } from 'electron'
 import { logger } from './logger'
-import { UPSTREAM_MODEL_SOURCES, upstreamTotalBytes } from './ttsModelUpstream'
+import { UPSTREAM_MODEL_SOURCES, hasInAppModelDownload, upstreamTotalBytes } from './ttsModelUpstream'
 
 const TAG = 'LocalTTS'
 
@@ -252,21 +252,33 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
 }
 
 /**
- * 组件体积的口径。下载引导（#230/#233）、启动失败与自检文案都从这里取，
+ * 模型体积的口径。下载引导（#230/#233）、启动失败与自检文案都从这里取，
  * 免得同一个数字在三处各写一遍、改的时候只改对一处。
  * 单位按 1000 进位（与界面的 formatBytes 同一把尺），VITS 那份直接算自钉死的指纹表——
  * 表里的字节数变了，这句话跟着变，不会再出现「129MB」和「135.5MB」并排。
  * Kokoro 本版不开放应用内下载，没有可算的表，用 2026-10-28 上游 tree 接口实测的
  * 426,584,620 字节（不含 README 与 .gitattributes）。
  */
-export function componentsSizeHint(engine: LocalTtsEngineId): string {
+export function modelSizeHint(engine: LocalTtsEngineId): string {
   const source = UPSTREAM_MODEL_SOURCES[engine]
   const modelBytes = source ? upstreamTotalBytes(source) : 426_584_620
-  return `${engine} 的模型约 ${(modelBytes / 1e6).toFixed(1)}MB，另需下载对应平台的引擎二进制`
+  return `${engine} 的模型约 ${(modelBytes / 1e6).toFixed(1)}MB`
 }
 
-function missingComponentsMessage(engine: LocalTtsEngineId): string {
-  return `本地配音组件还没下载完（${componentsSizeHint(engine)}）。下载后才能配音`
+/** 两份组件一起缺时的说法：模型体积 + 引擎二进制 */
+export function componentsSizeHint(engine: LocalTtsEngineId): string {
+  return `${modelSizeHint(engine)}，另需下载对应平台的引擎二进制`
+}
+
+/**
+ * 缺件时给人看的那句话。缺的若是模型，还得看这一档本版有没有应用内下载包：
+ * Kokoro 只钉了体积、没钉指纹，按需组件那一行下不了，指过去等于答应了做不到的事。
+ */
+function missingComponentsMessage(engine: LocalTtsEngineId, missingModel: boolean): string {
+  if (missingModel && !hasInAppModelDownload(engine)) {
+    return `本地配音缺 ${modelSizeHint(engine)}，而这一版没有放它的下载包——先在「设置 → 配音配置」换回 VITS，或改用云端档`
+  }
+  return `本地配音组件还没下载完（${componentsSizeHint(engine)}）。下载入口在「设置 → 关于与更新 → 按需组件」，下完才能配音`
 }
 
 /**
@@ -276,14 +288,14 @@ function missingComponentsMessage(engine: LocalTtsEngineId): string {
 async function startEngine(engine: LocalTtsEngineId): Promise<void> {
   const binaryPath = getBinaryPath()
   if (!existsSync(binaryPath)) {
-    lastError = missingComponentsMessage(engine)
+    lastError = missingComponentsMessage(engine, false)
     logger.warn(TAG, 'Engine binary missing', { path: basename(binaryPath), devMode: !!process.env.VITE_DEV_SERVER_URL })
     throw new Error(lastError)
   }
   if (!existsSync(join(modelRootDir(), engine))) {
     // 只查目录在不在：里面缺哪个文件由 sidecar 自己报（它有真清单，这边再抄一份必然对不齐），
     // 而「整个模型没下载」是另一种事——那种情况用户要的是「去下载」，不是「重装」
-    lastError = missingComponentsMessage(engine)
+    lastError = missingComponentsMessage(engine, true)
     logger.warn(TAG, 'Model directory missing', { engine, root: modelRootDir() })
     throw new Error(lastError)
   }
@@ -625,13 +637,20 @@ export async function getLocalTtsDetail(engine: LocalTtsEngineId): Promise<Local
     }
   }
 
+  // /health 报的是「这个端口上的进程」那一档的状态：speakers 和 sample_rate 都属于它那档模型。
+  // 界面上问的是另一档时（VITS 正在跑、用户把模型下拉切到 Kokoro）这两个数不能挪用——
+  // Kokoro 有 103 个音色，把 VITS 的 5 报过去等于骗用户「0–4 就是全部」。
+  // 按 0 回，界面那侧的口径是「还不知道」，等这一档真跑过一次再问就全了。
+  const servingEngine = typeof health.engine === 'string' ? health.engine : null
+  const sameTier = servingEngine === engine
+
   return {
     ...base,
     ready: status.ready,
     error: status.ready ? null : status.error,
-    engine: typeof health.engine === 'string' ? health.engine : null,
+    engine: servingEngine,
     engineLoaded: typeof health.engine_loaded === 'string' ? health.engine_loaded : null,
-    speakers: Number(health.speakers) || 0,
-    sampleRate: Number(health.sample_rate) || 0,
+    speakers: sameTier ? Number(health.speakers) || 0 : 0,
+    sampleRate: sameTier ? Number(health.sample_rate) || 0 : 0,
   }
 }

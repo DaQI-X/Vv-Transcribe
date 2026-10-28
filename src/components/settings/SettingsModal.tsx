@@ -1,9 +1,12 @@
 /**
  * 设置弹窗组件
- * 提供四个配置 Tab：
+ * 提供五个 Tab：
  * - 转写配置（asr）：转写模式（本地/云端）、API Base、API Key、模型
  * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
- * - 配音配置（tts）：接口地址、API Key（两者留空＝沿用校对那套）、配音模型、配音音色
+ * - 配音配置（tts）：先选「云端接口 / 本地配音」这一档，再按档展开要填的字段——
+ *   云端档是接口地址、API Key（两者留空＝沿用校对那套）、配音模型、配音音色；
+ *   本地档只有本地模型与本地音色两个下拉，地址/Key/模型那一组不显示（这一档根本不看它们）
+ * - 主题（theme）、关于与更新（about：版本、按需组件下载）
  * 设置通过 IPC 持久化到 userData/settings.json
  *
  * 保存只在点「保存设置」时发生，且保存后不关窗，方便紧接着点「测试连接」；
@@ -32,7 +35,16 @@ import {
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useThemeStore } from '@/stores/useThemeStore'
+import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { ASR_LANGUAGE_OPTIONS } from '@/utils/asrLanguage'
+import {
+  LOCAL_TTS_DEFAULT_ENGINE,
+  LOCAL_TTS_ENGINE_OPTIONS,
+  hasInAppDownload,
+  localTtsEngineLabel,
+  missingModelHint,
+  voiceSidOptions,
+} from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import type { KeyStatus } from '@/utils/readiness'
 
@@ -51,11 +63,18 @@ interface SettingsValues {
   /**
    * 配音（TTS）一整套。接口地址与 Key 留空＝沿用上面校对那套（主进程按同一口径回落），
    * 模型与音色不能和校对模型混用：音频接口吃的是配音模型 id。
+   * ttsEngine 决定这一套字段里哪几样真的被用到：本地档不看地址、Key、模型，
+   * 音色也换成 ttsLocalVoice 那个编号——所以界面上这两组是分着摆的，不摊成一排六个框。
    */
+  ttsEngine: string
   ttsApiBase: string
   ttsApiKey: string
   ttsModel: string
   ttsVoice: string
+  /** 本地档的引擎 id（白名单在主进程 localTtsEngine；空＝主进程按默认档处理） */
+  ttsLocalEngine: string
+  /** 本地档的音色编号，存成字符串（'0'…）；上限由引擎加载后报，界面上不写死 */
+  ttsLocalVoice: string
 }
 
 /** 与主进程 connectionTestService 的 TestOutcome 对应 */
@@ -76,10 +95,13 @@ const DEFAULT_VALUES: SettingsValues = {
   aiApiKey: '',
   aiApiBase: '',
   aiModel: '',
+  ttsEngine: 'cloud',
   ttsApiBase: '',
   ttsApiKey: '',
   ttsModel: '',
   ttsVoice: '',
+  ttsLocalEngine: '',
+  ttsLocalVoice: '',
 }
 
 /**
@@ -561,6 +583,56 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const testingRef = useRef(false)
   const restartingRef = useRef(false)
 
+  /** 表单里选的配音引擎档位（还没点保存也算）——本地档和云端档要问的不是同一套字段 */
+  const ttsLocal = values.ttsEngine === 'local'
+  /** 界面当前问的那一档：用户在下拉里换了但没保存，也要按新档去查状态、给建议 */
+  const selectedTtsEngine = values.ttsLocalEngine || LOCAL_TTS_DEFAULT_ENGINE
+  /**
+   * 本地档的状态快照（问一次不拉起引擎）：下拉里每一行都得标得出「这一档的模型还没下载」，
+   * 所以两档一起问，而不是只问当前选中的那档。null＝还没读到，界面上不许把它当「都不缺」渲染。
+   * speakers 只认当前选中那一档报的数——VITS 5 个、Kokoro 103 个，拿别的档的数列编号等于骗人。
+   */
+  const [localVoiceState, setLocalVoiceState] = useState<{
+    speakers: number
+    binaryPresent: boolean
+    modelPresent: Record<string, boolean>
+  } | null>(null)
+  /** 测试连接跑完引擎就活了，speakers 当场报得出来；不留神这里会一直停在「只列得出 0 个」 */
+  const [voiceStateTick, setVoiceStateTick] = useState(0)
+
+  useEffect(() => {
+    if (tab !== 'tts' || !api || !ttsLocal) return
+    let cancelled = false
+    const ids = LOCAL_TTS_ENGINE_OPTIONS.map((option) => option.value)
+    void Promise.all(ids.map((id) => api.getLocalVoiceStatus(id).catch(() => null))).then(
+      (statuses) => {
+        if (cancelled) return
+        const modelPresent: Record<string, boolean> = {}
+        statuses.forEach((status) => {
+          if (status) modelPresent[status.requestedEngine] = status.modelPresent
+        })
+        // 按主进程回的 requestedEngine 认领那一份：设置里存着白名单外的旧 id 时它会换回默认档，
+        // 这边跟着换，否则下拉标的是默认档、提示讲的是用户选的那一档，两句话对不上。
+        const current =
+          statuses.find((status) => status?.requestedEngine === selectedTtsEngine) ??
+          statuses.find((status) => status?.requestedEngine === LOCAL_TTS_DEFAULT_ENGINE) ??
+          null
+        if (!current) {
+          setLocalVoiceState(null)
+          return
+        }
+        setLocalVoiceState({
+          speakers: current.speakers,
+          binaryPresent: current.binaryPresent,
+          modelPresent,
+        })
+      }
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [tab, api, ttsLocal, selectedTtsEngine, voiceStateTick])
+
   const handleTestConnection = async (kind: 'asr' | 'ai' | 'tts') => {
     if (!api || testingRef.current) return
     testingRef.current = true
@@ -576,14 +648,20 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
             }
           : kind === 'tts'
             ? {
+                // 档位与本地引擎取表单当前值：主进程那边「测的就是你刚选的那个组合」，
+                // 读已保存设置会测到另一档上去（表单没保存时尤其明显）
+                engine: values.ttsEngine,
+                localEngine: values.ttsLocalEngine,
                 apiBase: values.ttsApiBase,
                 apiKey: values.ttsApiKey,
                 model: values.ttsModel,
-                voice: values.ttsVoice,
+                // 两档的「音色」不是一个东西：云端是服务商的音色名，本地是编号
+                voice: ttsLocal ? values.ttsLocalVoice : values.ttsVoice,
               }
             : { apiBase: values.aiApiBase, apiKey: values.aiApiKey, model: values.aiModel }
       const result = await api.testConnection(kind, payload)
       setTestResults((prev) => ({ ...prev, [kind]: result }))
+      if (kind === 'tts') setVoiceStateTick((prev) => prev + 1)
     } catch {
       setTestResults((prev) => ({
         ...prev,
@@ -1035,60 +1113,147 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
           {tab === 'tts' && (
             <>
               <div className="settings-form-group">
-                <label className="settings-form-label">API Base URL</label>
-                <input
-                  className="settings-form-input"
-                  value={values.ttsApiBase}
-                  onChange={(e) => updateField('ttsApiBase', e.target.value)}
-                  placeholder="留空＝沿用「校对配置」的地址"
-                />
+                <label className="settings-form-label">配音引擎</label>
+                <select
+                  className="settings-form-select"
+                  value={ttsLocal ? 'local' : 'cloud'}
+                  onChange={(e) => updateField('ttsEngine', e.target.value)}
+                >
+                  <option value="cloud">云端接口（花钱，效果由服务商决定）</option>
+                  <option value="local">本地配音（在自己电脑上跑，不花钱，实验）</option>
+                </select>
                 <span className="settings-form-hint">
-                  填了就用这条地址，请求会打在 {"{地址}"}/v1/audio/speech 上。配音和校对可以是两家不同的网关
-                  ——校对那家不一定有音频接口，这里留空只是省事。
+                  本地这一档是实验功能：引擎二进制和模型都不在安装包里，要先在「设置 → 关于与更新 → 按需组件」里下载。
+                  切到这里不会立刻拉起引擎——第一次配音时才启动，那时第一次会多花几秒解包和读模型。
                 </span>
               </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">API Key</label>
-                <ApiKeyField
-                  value={values.ttsApiKey}
-                  status={keyStates.tts}
-                  encryptable={keyStates.encryptable}
-                  cleared={pendingKeyClear.tts}
-                  emptyHint={
-                    keyStates.ai === 'none'
-                      ? '还没填。配音需要一把 Key：在这里填，或者去「校对配置」填一把供两边共用'
-                      : '留空＝沿用「校对配置」里已保存的那把 Key'
-                  }
-                  onChange={(v) => updateKeyField('tts', 'ttsApiKey', v)}
-                  onClear={() => clearKeyField('tts', 'ttsApiKey')}
-                />
-              </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">配音模型</label>
-                <input
-                  className="settings-form-input"
-                  value={values.ttsModel}
-                  onChange={(e) => updateField('ttsModel', e.target.value)}
-                  placeholder="tts-1"
-                />
-                <span className="settings-form-hint">
-                  音频接口的模型 id，和上面的校对模型是两回事——把校对模型填在这里会得到一句
-                  「模型不存在」。留空时配音不会启动。
-                </span>
-              </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">配音音色</label>
-                <input
-                  className="settings-form-input"
-                  value={values.ttsVoice}
-                  onChange={(e) => updateField('ttsVoice', e.target.value)}
-                  placeholder="alloy"
-                />
-                <span className="settings-form-hint">
-                  OpenAI 兼容接口的音色有 alloy、echo、fable、onyx、nova、shimmer
-                  六种，中文听感上 onyx 偏沉、nova 偏亮，可以先各试一句再定。换网关时以对方给的音色名为准。
-                </span>
-              </div>
+
+              {ttsLocal && (
+                <>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">本地模型</label>
+                    <select
+                      className="settings-form-select"
+                      value={values.ttsLocalEngine || LOCAL_TTS_DEFAULT_ENGINE}
+                      onChange={(e) => {
+                        updateField('ttsLocalEngine', e.target.value)
+                        // 编号是「这一档模型里的第几个说话人」，换档后旧编号指的是另一个人，不能留
+                        updateField('ttsLocalVoice', '0')
+                      }}
+                    >
+                      {LOCAL_TTS_ENGINE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                          {localVoiceState?.modelPresent[option.value] === false
+                            ? '（模型还没下载）'
+                            : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="settings-form-hint">
+                      {!localVoiceState
+                        ? '还没读到本机的组件状态——这一档暂时不能配音。'
+                        : !localVoiceState.binaryPresent
+                          ? '这台机器上还没有引擎二进制，配音跑不起来——去「关于与更新 → 按需组件」下载。'
+                          : localVoiceState.modelPresent[selectedTtsEngine] === false
+                            ? `${missingModelHint(selectedTtsEngine)}。`
+                            : `${localTtsEngineLabel(selectedTtsEngine)}的模型已在磁盘上。换档要点「保存设置」才生效；配音页那次换档只对本次调用有效，不会写回这里。`}
+                      {localVoiceState &&
+                        (!localVoiceState.binaryPresent ||
+                          (localVoiceState.modelPresent[selectedTtsEngine] === false &&
+                            hasInAppDownload(selectedTtsEngine))) && (
+                          <button
+                            type="button"
+                            className="voice-studio__link"
+                            onClick={() => useSettingsModalStore.getState().open('about')}
+                          >
+                            去按需组件
+                          </button>
+                        )}
+                    </span>
+                  </div>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">本地音色</label>
+                    <select
+                      className="settings-form-select"
+                      value={/^\d+$/.test(values.ttsLocalVoice) ? values.ttsLocalVoice : '0'}
+                      onChange={(e) => updateField('ttsLocalVoice', e.target.value)}
+                    >
+                      {voiceSidOptions(localVoiceState?.speakers ?? 0, values.ttsLocalVoice).map((sid) => (
+                        <option key={sid} value={sid}>
+                          音色 {sid}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="settings-form-hint">
+                      {(localVoiceState?.speakers ?? 0) > 0
+                        ? `引擎报了这一档共 ${localVoiceState?.speakers} 个音色。上游没给音色名字，只能按编号挨个试听来认。`
+                        : '音色总数要等引擎把模型读进内存才知道，所以现在只列得出默认那一个编号。点本页下面的「测试连接」，或去配音页「试听第一句」，引擎报完数这里就全了。'}
+                    </span>
+                  </div>
+                </>
+              )}
+
+              {/* 本地档不看地址、Key、模型这三样：填了也不生效，摆在能切到的地方就是让人往不生效的框里填 Key */}
+              {!ttsLocal && (
+                <>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">API Base URL</label>
+                    <input
+                      className="settings-form-input"
+                      value={values.ttsApiBase}
+                      onChange={(e) => updateField('ttsApiBase', e.target.value)}
+                      placeholder="留空＝沿用「校对配置」的地址"
+                    />
+                    <span className="settings-form-hint">
+                      填了就用这条地址，请求会打在 {"{地址}"}/v1/audio/speech 上。配音和校对可以是两家不同的网关
+                      ——校对那家不一定有音频接口，这里留空只是省事。
+                    </span>
+                  </div>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">API Key</label>
+                    <ApiKeyField
+                      value={values.ttsApiKey}
+                      status={keyStates.tts}
+                      encryptable={keyStates.encryptable}
+                      cleared={pendingKeyClear.tts}
+                      emptyHint={
+                        keyStates.ai === 'none'
+                          ? '还没填。配音需要一把 Key：在这里填，或者去「校对配置」填一把供两边共用'
+                          : '留空＝沿用「校对配置」里已保存的那把 Key'
+                      }
+                      onChange={(v) => updateKeyField('tts', 'ttsApiKey', v)}
+                      onClear={() => clearKeyField('tts', 'ttsApiKey')}
+                    />
+                  </div>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">配音模型</label>
+                    <input
+                      className="settings-form-input"
+                      value={values.ttsModel}
+                      onChange={(e) => updateField('ttsModel', e.target.value)}
+                      placeholder="tts-1"
+                    />
+                    <span className="settings-form-hint">
+                      音频接口的模型 id，和上面的校对模型是两回事——把校对模型填在这里会得到一句
+                      「模型不存在」。留空时配音不会启动。
+                    </span>
+                  </div>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">配音音色</label>
+                    <input
+                      className="settings-form-input"
+                      value={values.ttsVoice}
+                      onChange={(e) => updateField('ttsVoice', e.target.value)}
+                      placeholder="alloy"
+                    />
+                    <span className="settings-form-hint">
+                      OpenAI 兼容接口的音色有 alloy、echo、fable、onyx、nova、shimmer
+                      六种，中文听感上 onyx 偏沉、nova 偏亮，可以先各试一句再定。换网关时以对方给的音色名为准。
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="settings-form-group">
                 <label className="settings-form-label">配置自检</label>
                 <button
@@ -1102,8 +1267,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   {testingKind === 'tts' ? '检查中...' : '测试连接'}
                 </button>
                 <span className="settings-form-hint">
-                  按上面填写的值合成一句话（约 10 个字），确认这把 Key、这个模型、这个音色能出音频，不需要先保存；
-                  地址和 Key 留空时用的是已保存的那套。本次只合成一句，按字符计费的接口上这是最小的一笔。
+                  {ttsLocal
+                    ? '按上面选的这一档在本机合成一句话（约 10 个字），不需要先保存。这一档不调接口、不花钱；' +
+                      '引擎还没下载或模型还没下载时会直接告诉你缺哪一样，不用等配音跑失败。'
+                    : '按上面填写的值合成一句话（约 10 个字），确认这把 Key、这个模型、这个音色能出音频，不需要先保存；' +
+                      '地址和 Key 留空时用的是已保存的那套。本次只合成一句，按字符计费的接口上这是最小的一笔。'}
                 </span>
                 {testResults.tts && <TestResultView result={testResults.tts} />}
               </div>

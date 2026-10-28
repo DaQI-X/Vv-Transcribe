@@ -147,6 +147,14 @@ export const UPSTREAM_MODEL_SOURCES: Partial<Record<LocalTtsEngineId, UpstreamMo
     },
   }
 
+/**
+ * 这一档的模型本版有没有应用内下载包。界面上「去按需组件下载它」这句话能不能说，全看这一位：
+ * componentService 的 SPECS 按同一个位决定那一行的按钮，缺包时把用户领到一行灰按钮前面是更坏的答案。
+ */
+export function hasInAppModelDownload(engine: LocalTtsEngineId): boolean {
+  return Boolean(UPSTREAM_MODEL_SOURCES[engine])
+}
+
 /** 这批文件的总字节，就是「要下多少」的那本账 */
 export function upstreamTotalBytes(source: UpstreamModelSource): number {
   return source.files.reduce((sum, file) => sum + file.bytes, 0)

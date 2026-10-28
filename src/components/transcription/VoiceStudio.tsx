@@ -2,9 +2,16 @@
  * 字幕配音工作台（页面）
  *
  * 左输入、右结果，两个卡片就完事：
- * - 左边管「要念什么、用哪个音色、多快」，并在点下去之前把「要调多少次接口」写在脸上——
- *   每一次调用都花用户自己 Key 里的钱。
+ * - 左边管「要念什么、用哪档模型、哪个音色、多快」，并在点下去之前把「要调用多少次」写在脸上——
+ *   云端档每一次都花用户自己 Key 里的钱。
  * - 右边只有一个状态位（待开始 / 合成中 / 完成），不并列摆两块进度。
+ *
+ * 模型与音色按档给两种交互（这是 #238 的本意：用户不知道该填什么）：
+ * - 本地档两样都能枚举——模型是白名单里那两档，音色是引擎报的编号，所以下拉。
+ * - 云端档枚举不了：能填什么由服务商决定，应用不替用户猜，只能手输 + 一句「先试听验一次」。
+ *   把云端也做成下拉就得编一份模型/音色清单，那份清单错了比没有更糟。
+ * - 「云端还是本地」这一档不在页面上给选择：它决定花不花钱、要不要拉起本机进程，
+ *   是用户保存过的长期配置，只在「设置 → 配音配置」里改。
  *
  * 合成中那张卡复用转写的 processing 视觉（徽章 + 波形 + 进度 + 取消），因为它是同一件事：
  * 一个分钟级的活儿在后台跑。段号是主进程推回来的真实段号，不是编出来的百分比。
@@ -15,6 +22,7 @@ import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
+import { LOCAL_TTS_ENGINE_OPTIONS, missingModelHint, voiceSidOptions } from '@/utils/localTtsEngines'
 import { StudioTabs } from './StudioTabs'
 
 function formatTime(seconds: number): string {
@@ -39,6 +47,7 @@ function RunningCard() {
   const progress = useVoiceStudioStore((s) => s.progress)
   const live = useVoiceStudioStore((s) => s.live)
   const queue = useVoiceStudioStore((s) => s.queue)
+  const mode = useVoiceStudioStore((s) => s.mode)
   const cancelRequested = useVoiceStudioStore((s) => s.cancelRequested)
   const cancel = useVoiceStudioStore((s) => s.cancel)
 
@@ -46,12 +55,12 @@ function RunningCard() {
   const current = progress && progress.index > 0 ? queue[progress.index - 1]?.text ?? '' : ''
 
   const stageText = (() => {
-    if (!progress) return '正在发起第一批调用…'
+    if (!progress) return mode === 'local' ? '正在让本机引擎念第一段…' : '正在发起第一批调用…'
     if (progress.stage === 'assembling') return `正在把 ${progress.total} 段拼成一条音轨…`
     if (progress.stage === 'done') return '配音轨已拼好'
     if (progress.stage === 'failed') return `第 ${progress.index} 段失败：${progress.note || '未知原因'}`
-    if (progress.stage === 'skipped') return `第 ${progress.index} 段是空的，没调接口`
-    if (progress.index === 0) return '第 1 段还在接口那边…'
+    if (progress.stage === 'skipped') return `第 ${progress.index} 段是空的，没合成`
+    if (progress.index === 0) return `第 1 段还在${mode === 'local' ? '本机引擎' : '接口'}那边…`
     return `已合成 ${progress.index} / ${progress.total} 段`
   })()
 
@@ -94,7 +103,11 @@ function RunningCard() {
       <div className="processing-text">
         <span className="processing-text__title">{stageText}</span>
         <span className="processing-text__desc">
-          {current ? `正在念：${current.slice(0, 40)}${current.length > 40 ? '…' : ''}` : '逐段串行调用配音接口，一段一次请求'}
+          {current
+            ? `正在念：${current.slice(0, 40)}${current.length > 40 ? '…' : ''}`
+            : mode === 'local'
+              ? '逐段串行交给本机引擎，一段一次合成'
+              : '逐段串行调用配音接口，一段一次请求'}
         </span>
       </div>
 
@@ -114,7 +127,11 @@ function RunningCard() {
         {cancelRequested ? '正在取消…' : '取消配音'}
       </button>
 
-      <p className="voice-studio__note">取消只拦后面的段落，正在飞的那一次请求已经发出去了，钱已经花掉。</p>
+      <p className="voice-studio__note">
+        {mode === 'local'
+          ? '取消只拦后面的段落；正在念的那一段要等它跑完，这一段不花钱但省不下来。'
+          : '取消只拦后面的段落，正在飞的那一次请求已经发出去了，钱已经花掉。'}
+      </p>
     </div>
   )
 }
@@ -123,6 +140,7 @@ function RunningCard() {
 function ResultCard() {
   const result = useVoiceStudioStore((s) => s.result)
   const source = useVoiceStudioStore((s) => s.source)
+  const mode = useVoiceStudioStore((s) => s.mode)
   const saving = useVoiceStudioStore((s) => s.saving)
   const save = useVoiceStudioStore((s) => s.save)
   const clearResult = useVoiceStudioStore((s) => s.clearResult)
@@ -165,7 +183,7 @@ function ResultCard() {
             <li>
               成功 {result.clipCount} 段
               {result.skipped.length > 0 && ` · 空段落跳过 ${result.skipped.length} 段`}
-              {result.canceled && '（你取消了，后面的段没调用）'}
+              {result.canceled && (mode === 'local' ? '（你取消了，后面的段没再念）' : '（你取消了，后面的段没调用）')}
             </li>
           </ul>
           {result.abortedReason && (
@@ -194,11 +212,17 @@ function ResultCard() {
           <p className="voice-result__empty">{result.error || '一段都没合成成功，没有可以拼起来的音频。'}</p>
           {result.failures.length > 0 && (
             <div className="voice-result__failures">
-              <span className="voice-result__failures-title">接口回的原话：</span>
+              <span className="voice-result__failures-title">
+                {mode === 'local' ? '本机引擎回的原话：' : '接口回的原话：'}
+              </span>
               <p className="voice-result__failure">{result.failures[0].error}</p>
             </div>
           )}
-          <p className="voice-result__scope">地址、Key、模型、音色四样里任何一样不对，都长这样。</p>
+          <p className="voice-result__scope">
+            {mode === 'local'
+              ? '本地这一档不看地址和 Key；引擎二进制、模型、音色编号三样里任何一样不对，都长这样。'
+              : '地址、Key、模型、音色四样里任何一样不对，都长这样。'}
+          </p>
         </>
       )}
 
@@ -233,10 +257,18 @@ export function VoiceStudio() {
   const setText = useVoiceStudioStore((s) => s.setText)
   const voice = useVoiceStudioStore((s) => s.voice)
   const setVoice = useVoiceStudioStore((s) => s.setVoice)
+  const model = useVoiceStudioStore((s) => s.model)
+  const setModel = useVoiceStudioStore((s) => s.setModel)
+  const engine = useVoiceStudioStore((s) => s.engine)
+  const setEngine = useVoiceStudioStore((s) => s.setEngine)
   const speed = useVoiceStudioStore((s) => s.speed)
   const setSpeed = useVoiceStudioStore((s) => s.setSpeed)
+  const mode = useVoiceStudioStore((s) => s.mode)
   const configModel = useVoiceStudioStore((s) => s.configModel)
   const configVoice = useVoiceStudioStore((s) => s.configVoice)
+  const configEngine = useVoiceStudioStore((s) => s.configEngine)
+  const speakers = useVoiceStudioStore((s) => s.speakers)
+  const engineModelPresent = useVoiceStudioStore((s) => s.engineModelPresent)
   const phase = useVoiceStudioStore((s) => s.phase)
   const preview = useVoiceStudioStore((s) => s.preview)
   const previewing = useVoiceStudioStore((s) => s.previewing)
@@ -252,6 +284,14 @@ export function VoiceStudio() {
   const callCount = queue.length
   const charCount = queue.reduce((sum, segment) => sum + segment.text.length, 0)
   const running = phase === 'running'
+
+  const local = mode === 'local'
+  /** 下拉的当前值：界面上没改过就用设置里那一档/那个编号 */
+  const selectedEngine = engine || configEngine
+  const voiceValue = voice || (local ? (/^\d+$/.test(configVoice) ? configVoice : '0') : '')
+  const sids = voiceSidOptions(speakers, configVoice)
+  /** 当前选中的这档模型在不在磁盘上；还没查到（undefined）时按「别拦、别乱标」处理 */
+  const selectedPresent = engineModelPresent[selectedEngine] !== false
 
   return (
     <div className="voice-studio">
@@ -300,22 +340,64 @@ export function VoiceStudio() {
                 共 <strong>{subtitleQueue.length}</strong> 段可配音，约{' '}
                 <strong>{charCount.toLocaleString()}</strong> 字
               </div>
-              {emptyCount > 0 && <div className="voice-studio__hint">另外 {emptyCount} 段是空的，不会调用接口。</div>}
+              {emptyCount > 0 && <div className="voice-studio__hint">另外 {emptyCount} 段是空的，会被跳过、不占用一次合成。</div>}
               <div className="voice-studio__hint">文字要改请回转写页编辑，这里按当前段落原样念。</div>
             </div>
           )}
 
           <div className="voice-studio__fields">
             <label className="voice-studio__field">
+              <span className="voice-studio__label">模型</span>
+              {local ? (
+                <select
+                  className="settings-form-select"
+                  value={selectedEngine}
+                  onChange={(e) => setEngine(e.target.value)}
+                  disabled={running}
+                >
+                  {LOCAL_TTS_ENGINE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                      {engineModelPresent[option.value] === false ? '（模型还没下载）' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="settings-form-input"
+                  type="text"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder={configModel || '配音配置里的那个模型'}
+                  disabled={running}
+                />
+              )}
+            </label>
+            <label className="voice-studio__field">
               <span className="voice-studio__label">音色</span>
-              <input
-                className="settings-form-input"
-                type="text"
-                value={voice}
-                onChange={(e) => setVoice(e.target.value)}
-                placeholder={configVoice || '配音配置里的那个音色'}
-                disabled={running}
-              />
+              {local ? (
+                <select
+                  className="settings-form-select"
+                  value={voiceValue}
+                  onChange={(e) => setVoice(e.target.value)}
+                  disabled={running}
+                >
+                  {sids.map((sid) => (
+                    <option key={sid} value={sid}>
+                      音色 {sid}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="settings-form-input"
+                  type="text"
+                  value={voice}
+                  onChange={(e) => setVoice(e.target.value)}
+                  placeholder={configVoice || '配音配置里的那个音色'}
+                  disabled={running}
+                />
+              )}
             </label>
             <label className="voice-studio__field">
               <span className="voice-studio__label">倍速</span>
@@ -334,9 +416,30 @@ export function VoiceStudio() {
             </label>
           </div>
 
+          <p className="voice-studio__hint">
+            {local
+              ? speakers > 0
+                ? `这一档有 ${speakers} 个音色（引擎加载后自己报的数）。上游没给音色名字，只能按编号挨个试听来认。`
+                : '音色总数要等引擎把模型读进内存才知道——先点一次「试听第一句」，这里就会列出全部编号。'
+              : '云端能填哪些模型和音色由服务商决定，应用不替你猜，所以这两项手输。留空＝用配音配置里保存的那个。'}
+          </p>
+
           <div className="voice-studio__config">
-            模型 <code>{configModel || '未填写'}</code> · 音色留空＝用{' '}
-            <code>{configVoice || '（未填写）'}</code>
+            {local ? '配音引擎：本地（在你这台电脑上跑，不调接口）' : '配音引擎：云端接口（按服务商计费）'}
+            {' · '}
+            {local ? (
+              <code>{selectedEngine}</code>
+            ) : (
+              <>
+                模型 <code>{model || configModel || '未填写'}</code>
+              </>
+            )}
+            {!selectedPresent && (
+              <>
+                {' '}
+                <span className="voice-studio__hint">{missingModelHint(selectedEngine)}（现在开跑会被拦下）</span>
+              </>
+            )}
             <button
               className="voice-studio__link"
               onClick={() => useSettingsModalStore.getState().open('tts')}
@@ -353,13 +456,26 @@ export function VoiceStudio() {
             {preview ? (
               <audio className="voice-preview__audio" controls src={toMediaUrl(preview.filePath)} />
             ) : (
-              <span className="voice-studio__hint">整篇跑到第 20 段才发现音色不对，烧的是你的额度。</span>
+              <span className="voice-studio__hint">
+                {local
+                  ? '先听一句再整批跑：音色编号选错了，重跑的是几十分钟的机器活儿。'
+                  : '整篇跑到第 20 段才发现音色不对，烧的是你的额度。'}
+              </span>
             )}
           </div>
 
           <p className="voice-studio__cost">
-            将调用 <strong>{callCount}</strong> 次接口（逐段串行，按服务商计费）。倍速由接口实现，
-            个别服务商只提供固定档位或不认这个字段。
+            {local ? (
+              <>
+                本机合成 <strong>{callCount}</strong> 段（逐段串行，不调接口、不花钱）。第一次配音要多花几秒：
+                引擎进程要起来、模型要读进内存，之后就快了。
+              </>
+            ) : (
+              <>
+                将调用 <strong>{callCount}</strong> 次接口（逐段串行，按服务商计费）。倍速由接口实现，
+                个别服务商只提供固定档位或不认这个字段。
+              </>
+            )}
           </p>
 
           <button className="voice-studio__cta" onClick={() => void start()} disabled={running || callCount === 0}>

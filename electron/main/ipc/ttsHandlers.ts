@@ -4,7 +4,7 @@
  * 都应该在这一步暴露，而不是等整条稿子跑到中途。
  * 段落时间轴只由渲染层持有，主进程按 id 记账（jobId → 临时目录 → 成品轨），
  * 界面报回来的路径一律不用。
- * 音色与倍速走「单次调用参数」，不写回 settings.json：工作台上的临时试错不该变成用户的长期默认值。
+ * 音色、倍速、模型与本地引擎走「单次调用参数」，不写回 settings.json：工作台上的临时试错不该变成用户的长期默认值。
  * 本地配音那两档另外开了 tts:localStatus / tts:localRestart：引擎是懒启动的，界面得能在「不花资源」
  * 的前提下知道组件在不在场，也得能在启动失败后有个不用退出重开的出路。
  * 统一口径：不跨 IPC 抛错，失败一律走 `{ error }` 让渲染层弹 toast。
@@ -69,25 +69,37 @@ export interface LocalTtsStatusResult extends LocalTtsDetail {
 }
 
 /**
- * 单次调用可覆盖的参数：配音页让用户在开跑前挑音色、定倍速，但不写回设置——
+ * 单次调用可覆盖的参数：配音页让用户在开跑前挑模型、挑音色、定倍速，但不写回设置——
  * 「设置改动要点保存才生效」这条口径不该被工作台绕过。
  */
 interface VoiceCallOptions {
+  /** 云端档的配音模型 id；本地档没有这个概念，传了也不参与取值 */
+  model?: string
   voice?: string
+  /** 本地档用哪个引擎（VITS / Kokoro）。只认白名单，见下面 withOverrides */
+  localEngine?: string
   speed?: number
 }
 
 /**
- * 渲染层来的值一律当外部输入收口：音色空串回落设置里那个（空音色会打到 ttsConfigProblem 之前，
- * 不如按「没覆盖」处理），倍速夹进 OpenAI 标准的 0.25–4.0，NaN/字符串/越界都退回 1。
+ * 渲染层来的值一律当外部输入收口：
+ * - 模型与音色空串回落设置里那个（空值会打到 ttsConfigProblem 之前，不如按「没覆盖」处理）；
+ * - 倍速夹进 OpenAI 标准的 0.25–4.0，NaN/字符串/越界都退回 1；
+ * - 引擎 id 必须过 normalizeLocalTtsEngine 的白名单——它会被拼进模型目录名和 sidecar 的
+ *   engine 字段，不能把渲染层传来的字符串直接当值用（这条 IPC 是界面唯一能指定「跑哪档模型」的口子）。
+ * 档（云端/本地）不在这里覆盖：它决定的是「这次要不要花钱、要不要拉起本机进程」，
+ * 属于用户已经保存的长期选择，工作台只改这一档里面的参数。
  */
 function withOverrides(base: TTSConfig, raw: unknown): TTSConfig {
   const input = (raw ?? {}) as VoiceCallOptions
+  const model = typeof input.model === 'string' ? input.model.trim() : ''
   const voice = typeof input.voice === 'string' ? input.voice.trim() : ''
   const speed = Number(input.speed)
   return {
     ...base,
+    model: model || base.model,
     voice: voice || base.voice,
+    localEngine: normalizeLocalTtsEngine(input.localEngine ?? base.localEngine),
     speed: Number.isFinite(speed) && speed > 0 ? Math.min(4, Math.max(0.25, speed)) : 1,
   }
 }

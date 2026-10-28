@@ -5,8 +5,10 @@
  * 而一批合成是主进程在跑的分钟级任务。状态跟着组件走，切一次 tab 就丢了进度、
  * 也丢了那批已经花掉的钱换来的产物。
  *
- * 两条口径：
- * - 音色/倍速是「这一次任务」的参数，不写回 settings.json：工作台上的试错不该变成用户的长期默认值。
+ * 三条口径：
+ * - 音色/倍速/模型/本地引擎是「这一次任务」的参数，不写回 settings.json：工作台上的试错不该变成用户的长期默认值。
+ *   「云端还是本地」这一档不在可覆盖之列——它决定的是要不要花钱、要不要拉起本机进程，是用户保存过的长期选择。
+ * - 本地档的音色只有编号，编号的上限由引擎报（模型没读进内存前谁也不知道有几个），界面上不写死也不编名字。
  * - 中间产物由 jobId 记账，在「重新发起一批」「清空」「离开工作台」三处回收，不靠组件卸载。
  */
 import { create } from 'zustand'
@@ -14,6 +16,7 @@ import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
 import { checkVoiceReady, raiseReadinessBlock } from '@/utils/readiness'
 import { splitPlainText } from '@/utils/splitPlainText'
+import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS, missingModelHint } from '@/utils/localTtsEngines'
 import type { VoiceProgress, VoiceSegment, VoiceSynthesizeResult } from '@/types/voice'
 import { useTranscriptionStore } from './useTranscriptionStore'
 
@@ -44,9 +47,21 @@ interface VoiceStudioState {
   /** 空串＝不覆盖，按「设置 → 配音配置」里那个音色走 */
   voice: string
   speed: number
-  /** 只读展示用的那两样，来自设置 */
+  /** 云端档手输的配音模型 id；空串＝不覆盖 */
+  model: string
+  /** 本地档选的那一档模型（引擎 id）；空串＝不覆盖，用设置里保存的 */
+  engine: string
+  /** 配音引擎这一档，来自已保存设置（界面不覆盖它） */
+  mode: 'cloud' | 'local'
+  /** 只读展示用的那两样，来自设置；含义跟着 mode 变（本地档的音色是编号，模型这一项用不上） */
   configModel: string
   configVoice: string
+  /** 设置里保存的本地档引擎 id，也是模型下拉的当前值（没在界面上改过时） */
+  configEngine: string
+  /** 本地音色上限：引擎把模型读进内存后 /health 才报得出，0＝还不知道 */
+  speakers: number
+  /** 各档模型在不在磁盘上：下拉里那行「还没下载」按它标，不让用户选完才发现要下载 */
+  engineModelPresent: Record<string, boolean>
 
   phase: VoicePhase
   /** 这一批实际提交出去的段，进行中按段号回显文本用；用户中途改输入不影响它 */
@@ -64,6 +79,8 @@ interface VoiceStudioState {
   setSource: (source: VoiceSource) => void
   setText: (text: string) => void
   setVoice: (voice: string) => void
+  setModel: (model: string) => void
+  setEngine: (engine: string) => void
   setSpeed: (speed: number) => void
   loadConfig: () => Promise<void>
   previewOne: () => Promise<void>
@@ -84,12 +101,70 @@ const emptyLive: LiveCount = { done: 0, failed: 0, skipped: 0 }
 /** 进度订阅只挂一次（模块级，不放 state）：store 是单例，监听跟着它活到渲染进程结束 */
 let progressUnsubscribe: (() => void) | null = null
 
+function str(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * 单次调用的四个可覆盖参数。空串一律「不覆盖」，由主进程按已保存的设置取值——
+ * 界面没填的东西不该在这里替用户猜一个（尤其音色：VITS 的 0 和 Kokoro 的 0 不是同一个人）。
+ */
+function callOptions(state: { voice: string; speed: number; model: string; engine: string }) {
+  return {
+    voice: state.voice,
+    speed: state.speed,
+    model: state.model,
+    localEngine: state.engine,
+  }
+}
+
+/**
+ * 本地档：界面上选中的那一档模型在不在磁盘上。
+ * 这一问必须问「界面当前选的」而不是「设置里保存的」——用户在配音页换了档，
+ * 前置校验（readiness）读的还是设置那一份，两边对不上就会出现「拦下了能干的、放过了干不了的」。
+ * 不在时回它的 id，调用方据此提示去哪下载；engineModelPresent 还没填（第一次状态没读回来）时回空，
+ * 按「不拦」处理——那只是还没查到，不是查到了缺。
+ */
+function missingLocalModel(state: VoiceStudioState): string {
+  if (state.mode !== 'local') return ''
+  const selected = state.engine || state.configEngine
+  return state.engineModelPresent[selected] === false ? selected : ''
+}
+
+/** 拦下缺件时的那句 toast：说清缺哪一档模型、下一步怎么走，别让用户自己找 */
+function missingModelToast(engineId: string): string {
+  return `本地配音跑不了：${missingModelHint(engineId)}`
+}
+
 function ensureProgressSubscription() {
   if (progressUnsubscribe) return
   const api = getElectronAPI()
   if (!api) return
   progressUnsubscribe = api.onVoiceProgress((data) => {
     useVoiceStudioStore.getState().applyProgress(data)
+  })
+}
+
+/**
+ * 问一次本地档的状态：这一档的音色上限，和两档的模型各自在不在磁盘上。
+ * 查状态不会把引擎拉起来（懒启动），所以进页面就查不花钱；反过来，
+ * 引擎还没把模型读进内存时 speakers 是 0——那不是「只有 0 号音色」，是「还不知道」，
+ * 界面上得是两种说法。合成跑过一次之后再查一遍，音色列表就全了。
+ */
+async function refreshLocalVoiceState(requested: string) {
+  const api = getElectronAPI()
+  if (!api) return
+  const ids = LOCAL_TTS_ENGINE_OPTIONS.map((option) => option.value)
+  const statuses = await Promise.all(ids.map((id) => api.getLocalVoiceStatus(id).catch(() => null)))
+  const engineModelPresent: Record<string, boolean> = {}
+  ids.forEach((id, index) => {
+    engineModelPresent[id] = statuses[index]?.modelPresent === true
+  })
+  const current = statuses[ids.indexOf(requested)]
+  useVoiceStudioStore.setState({
+    engineModelPresent,
+    // 音色数量只认「当前要用的这一档」报的数：换档时上一档的数不能沿用
+    speakers: current?.speakers ?? 0,
   })
 }
 
@@ -100,8 +175,14 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   text: '',
   voice: '',
   speed: 1,
+  model: '',
+  engine: '',
+  mode: 'cloud',
   configModel: '',
   configVoice: '',
+  configEngine: LOCAL_TTS_DEFAULT_ENGINE,
+  speakers: 0,
+  engineModelPresent: {},
 
   phase: 'idle',
   queue: [],
@@ -123,19 +204,45 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   setSource: (source) => set({ source }),
   setText: (text) => set({ text }),
   setVoice: (voice) => set({ voice }),
+  setModel: (model) => set({ model }),
   setSpeed: (speed) => set({ speed }),
+
+  /**
+   * 换本地模型（引擎）时把音色清空并重新问一次状态：
+   * sid 是「这一档模型里的第几个说话人」，VITS 的 3 和 Kokoro 的 3 不是同一个声音，
+   * 带着旧引擎的编号切过去，用户听到的不是他刚才试听通过的那把嗓子。
+   */
+  setEngine: (engine) => {
+    set({ engine, voice: '', speakers: 0 })
+    void refreshLocalVoiceState(engine)
+  },
 
   loadConfig: async () => {
     const api = getElectronAPI()
     if (!api) return
+    let mode: 'cloud' | 'local' = 'cloud'
+    let requested = LOCAL_TTS_DEFAULT_ENGINE
     try {
       const settings = await api.getSettings()
-      const model = typeof settings.ttsModel === 'string' ? settings.ttsModel : ''
-      const voice = typeof settings.ttsVoice === 'string' ? settings.ttsVoice : ''
-      set({ configModel: model, configVoice: voice })
+      // 与主进程 normalizeTtsEngine 同口径：认不出的一律按云端处理，不替用户猜
+      mode = str(settings.ttsEngine) === 'local' ? 'local' : 'cloud'
+      const saved = str(settings.ttsLocalEngine)
+      // 下拉的当前值必须在选项里，否则渲染成空白：主进程那边也是这么回落到默认档的
+      requested = LOCAL_TTS_ENGINE_OPTIONS.some((option) => option.value === saved)
+        ? saved
+        : LOCAL_TTS_DEFAULT_ENGINE
+      set({
+        mode,
+        configEngine: requested,
+        // 两档各读各的字段：本地档的「音色」是编号，云端档的是服务商的音色名，
+        // 把它们混成一个 configVoice 就会把云端残留的 alloy 显示成本地编号
+        configModel: mode === 'local' ? '' : str(settings.ttsModel),
+        configVoice: mode === 'local' ? str(settings.ttsLocalVoice) : str(settings.ttsVoice),
+      })
     } catch {
-      set({ configModel: '', configVoice: '' })
+      set({ mode, configModel: '', configVoice: '', configEngine: requested })
     }
+    if (mode === 'local') await refreshLocalVoiceState(get().engine || requested)
   },
 
   buildQueue: () => {
@@ -168,10 +275,14 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       toast.info('先给它一点文本')
       return
     }
+    const absent = missingLocalModel(get())
+    if (absent) {
+      toast.error(missingModelToast(absent))
+      return
+    }
     set({ previewing: true })
     try {
-      const { voice, speed } = get()
-      const res = await api.previewVoice(queue[0].text, { voice, speed })
+      const res = await api.previewVoice(queue[0].text, callOptions(get()))
       if (res.error) {
         set({ preview: null })
         toast.error(res.error)
@@ -189,6 +300,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       toast.error(err instanceof Error ? err.message : '试听失败')
     } finally {
       set({ previewing: false })
+      // 本地档：试听跑过之后模型一定已经进内存了，这时再问一次才拿得到全部音色编号
+      if (get().mode === 'local') void refreshLocalVoiceState(get().engine || get().configEngine)
     }
   },
 
@@ -203,6 +316,11 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     const blocked = await checkVoiceReady()
     if (blocked) {
       raiseReadinessBlock(blocked)
+      return
+    }
+    const absent = missingLocalModel(get())
+    if (absent) {
+      toast.error(missingModelToast(absent))
       return
     }
 
@@ -221,8 +339,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     })
 
     try {
-      const { voice, speed } = get()
-      const res = await api.synthesizeVoice(queue, { voice, speed })
+      const res = await api.synthesizeVoice(queue, callOptions(get()))
       set({ result: res, phase: 'done', jobId: res.jobId, progress: null })
       if (res.error) toast.error(res.error)
       else if (res.abortedReason) toast.error(res.abortedReason)
@@ -231,6 +348,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     } catch (err) {
       set({ phase: 'idle', queue: [] })
       toast.error(err instanceof Error ? err.message : '字幕配音没能跑完')
+    } finally {
+      if (get().mode === 'local') void refreshLocalVoiceState(get().engine || get().configEngine)
     }
   },
 

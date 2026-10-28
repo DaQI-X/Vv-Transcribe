@@ -90,8 +90,12 @@ export interface VoiceSegment {
 
 /** 单次调用的可覆盖参数：配音页选音色/倍速时用，只作用于这一次任务，不写回 settings.json */
 export interface VoiceCallOptions {
+  /** 云端档的配音模型 id；空串＝不覆盖，按「设置 → 配音配置」里那个走。本地档没有模型这一说，传了也不取 */
+  model?: string
   /** 空串＝不覆盖，按「设置 → 配音配置」里那个音色走 */
   voice?: string
+  /** 本地档跑哪一档模型（VITS / Kokoro）；主进程按白名单收口，空串＝用设置里保存的那一档 */
+  localEngine?: string
   /** OpenAI 标准 speed 的取值范围 0.25–4.0；不填按 1，主进程会夹边界 */
   speed?: number
 }
