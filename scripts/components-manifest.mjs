@@ -102,7 +102,8 @@ const INITIAL_NOTES = {
     '落点由代码里的组件白名单决定，这个文件改不了写到哪。改这里必须同时改 .github/workflows 的发布流程，否则装不上。',
   _verify:
     '发布后用 GitHub Release 的资产 digest（GitHub 自己算的 SHA2-256）复核：node scripts/components-manifest.mjs。' +
-    '资产由 workflow_dispatch 的组件发布流程上传；清单要人工看过 diff 再合进 main——没合进 main 之前应用内读不到它。',
+    '资产由组件发布流程上传（workflow_dispatch 表单，或推一个 components/vX.Y.Z.run.<build run-id> tag，两种都必须指名那一次构建）；' +
+    '清单要人工看过 diff 再合进 main——没合进 main 之前应用内读不到它。',
 }
 
 function fail(msg) {

@@ -180,7 +180,10 @@ jobs:
           set -euo pipefail
           # --clobber：同一个 Release 重跑时先删同名资产。否则 gh 会因为「已存在」失败，
           # 而那正好发生在最需要重跑的场合（上一次传到一半断了）
-          gh release upload "$TAG" dist-components/* --clobber --repo "$GITHUB_REPOSITORY"
+          # 清单也一起挂上：它本来只作为 workflow artifact 交回，而匿名是取不到 artifact 的
+          # （本机构建链只有 SSH、没有 token），对账与复核都需要一份公开可读的副本。
+          # 应用读的还是 main 里那份文件——多一个资产不改变信任模型，只是让「谁来复核」都取得到。
+          gh release upload "$TAG" dist-components/* components-manifest.json --clobber --repo "$GITHUB_REPOSITORY"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | .name + "  " + (.size|tostring) + "  " + (.state // "?")'
 
