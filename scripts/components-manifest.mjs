@@ -5,7 +5,7 @@
  * 用法：
  *   node scripts/components-manifest.mjs                                   # 校验已提交的清单，并与 GitHub Release 上的资产对账
  *   node scripts/components-manifest.mjs --offline                          # 只做本地结构校验（不联网；改文案或 CI 无 token 时用）
- *   node scripts/components-manifest.mjs --build --staging=DIR --out=DIR --version=1.0.6
+ *   node scripts/components-manifest.mjs --build --staging=DIR --out=DIR --version=X.Y.Z
  *                                                                          # 从暂存目录产出资产 + 写 components-manifest.json
  *
  * 暂存目录的布局（CI 与手工都一样，脚本按这个布局发现资产，不做「猜哪个文件是引擎」）：
@@ -315,9 +315,9 @@ function assetNameFor(id, key, version) {
 
 async function build(args) {
   if (!args.staging || !args.out) fail('--build 需要 --staging= 与 --out=')
-  if (!VERSION_RE.test(args.version)) fail(`--build 需要 --version=1.0.6，收到 ${JSON.stringify(args.version)}`)
+  if (!VERSION_RE.test(args.version)) fail(`--build 需要 --version=X.Y.Z（三段数字），收到 ${JSON.stringify(args.version)}`)
   const tag = args.tag || `v${args.version}`
-  if (!TAG_RE.test(tag)) fail(`--tag=${args.tag} 不合规矩（应形如 v1.0.6）`)
+  if (!TAG_RE.test(tag)) fail(`--tag=${args.tag} 不合规矩（应形如 vX.Y.Z）`)
 
   mkdirSync(args.out, { recursive: true })
   const entries = {}
@@ -398,7 +398,7 @@ function validate(manifest, label = '清单') {
   const push = (msg) => problems.push(msg)
   if (manifest.component !== COMPONENT_NAME) push(`${label} 的 component 不是 ${COMPONENT_NAME}`)
   if (manifest.schema !== SCHEMA) push(`${label} 的 schema 是 ${JSON.stringify(manifest.schema)}，应用只认 ${SCHEMA}`)
-  if (typeof manifest.tag !== 'string' || !TAG_RE.test(manifest.tag)) push(`${label} 的 tag 不合规矩（应形如 v1.0.6）`)
+  if (typeof manifest.tag !== 'string' || !TAG_RE.test(manifest.tag)) push(`${label} 的 tag 不合规矩（应形如 vX.Y.Z）`)
   const components = manifest.components
   if (!components || typeof components !== 'object') {
     push(`${label} 缺 components`)
@@ -407,7 +407,7 @@ function validate(manifest, label = '清单') {
   for (const [id, item] of Object.entries(components)) {
     if (!KNOWN_IDS.includes(id)) push(`清单里有应用不认识的组件 id：${id}`)
     if (!item || typeof item !== 'object' || typeof item.version !== 'string' || !VERSION_RE.test(item.version)) {
-      push(`${id} 的版本号不合规矩（应形如 1.0.6）`)
+      push(`${id} 的版本号不合规矩（应形如 X.Y.Z，三段数字）`)
       continue
     }
     const assets = item.assets

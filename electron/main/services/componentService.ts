@@ -65,7 +65,7 @@ const RELEASE_BASE = 'https://github.com/DaQI-X/Vv-Transcribe/releases/download'
 
 /** 清单格式版本：对不上就停，别按半懂的结构去装东西 */
 const MANIFEST_SCHEMA = 1
-/** Release 标签：v1.0.6 这种。资产名与 tag 都要拼进 URL，所以字符集收得很死 */
+/** Release 标签：形如 vX.Y.Z（带不带 v 都收）。资产名与 tag 都要拼进 URL，所以字符集收得很死 */
 const TAG_RE = /^v?\d+\.\d+\.\d+(?:[-.][\w.]+)?$/
 const VERSION_RE = /^\d+\.\d+\.\d+(?:[-.][\w.]+)?$/
 const ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -443,7 +443,7 @@ function pickEntry(raw: unknown, spec: ComponentSpec, key: string): AssetEntry {
     )
   }
   if (typeof manifest.tag !== 'string' || !TAG_RE.test(manifest.tag)) {
-    throw new Error('组件清单里的发布标签不合规矩（应形如 v1.0.6）')
+    throw new Error('组件清单里的发布标签不合规矩（应形如 vX.Y.Z）')
   }
   const components = manifest.components
   if (components === null || typeof components !== 'object') throw new Error('组件清单缺少 components')
@@ -458,7 +458,7 @@ function pickEntry(raw: unknown, spec: ComponentSpec, key: string): AssetEntry {
   }
   const item = component as Record<string, unknown>
   if (typeof item.version !== 'string' || !VERSION_RE.test(item.version)) {
-    throw new Error(`组件清单里 ${spec.id} 的版本号不合规矩（应形如 1.0.0）`)
+    throw new Error(`组件清单里 ${spec.id} 的版本号不合规矩（应形如 X.Y.Z，三段数字）`)
   }
   const assets = item.assets
   if (assets === null || typeof assets !== 'object') throw new Error(`组件清单里 ${spec.id} 缺少 assets`)
@@ -723,7 +723,7 @@ async function downloadToPart(
       headers: { 'User-Agent': 'vv-transcribe' },
     })
     if (!res.ok) {
-      // 这句话两条来源都要能用，所以不写「发布」：清单那条 entry.tag 是 v1.0.6，上游那条是提交号前 7 位
+      // 这句话两条来源都要能用，所以不写「发布」：清单那条 entry.tag 是 vX.Y.Z 这种发布号，上游那条是提交号前 7 位
       throw new Error(`下载失败 ${res.status}（${entry.asset} 在 ${entry.tag} 这一版里取不到？）`)
     }
     if (!res.body) throw new Error('下载响应没有内容')
