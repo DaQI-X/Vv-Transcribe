@@ -144,6 +144,9 @@ basic_one/
 ├── .github/workflows/publish-components.yml # ⚠ 已被上面那条取代（2026-10-29）：它只能「事后往已发布的
 │                                      #   Release 加资产」，而仓库开了 Release immutability，Upload 那步必然 422。
 │                                      #   留着只作为「临时关掉 immutability 后补历史版本资产」的回收路径。
+│                                      #   触发只剩 Actions 面板手点：2026-10-29 把 components/v* 那条 tag 触发摘了
+│                                      #   （build.yml 接管资产后，它跑到底只会得到一枚 422 的红 X，
+│                                      #   代价是这条路现在需要有 gh/PAT 或直接在网页上点，推 tag 不再作数）。
 │                                      #   ⚠ 这份清单目前还不在 main 上（仓库里没有 components-manifest.json）：
 │                                      #     点「检查清单」会报「这一版还没有发布组件清单（404），本版没有对应的下载包」，
 │                                      #     引擎那一行收起下载按钮、同说这句（2026-10-28 #251：404 是服务器答清楚了

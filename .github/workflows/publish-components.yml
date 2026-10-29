@@ -9,14 +9,13 @@ name: Publish components
 #   临时取消勾选 immutability，补完再勾回去；不改设置的话这里每一步都会红在同一句上。
 #   （要不要直接删掉这份，等用户拍板。）
 #
-# 为什么是人工指名而不是自动跑（两种触发方式都遵守这条）：
+# 为什么是人工指名而不是自动跑：
 # - 这些资产是「应用内按需下载」的信任来源，传错一次就会被用户机器长期缓存，版本号还得跟着清单走；
 # - 引擎二进制只能来自某一次具体的构建（PyInstaller 不可交叉编译），所以必须人工指名 run-id。
 #   「最近一次成功」那种隐式取法会让清单里的指纹对应到一次没人看过的构建上。
-# - tag 那条触发（components/vX.Y.Z.run.<run-id>）把 run-id 写进 tag 名，指名这件事一点没放松，
-#   只是不再要求点表单的人有 API token：2026-10-28 发 1.0.6 时本机只有 SSH（无 gh、无 PAT），
-#   workflow_dispatch 匿名 curl 触发不了，资产链就断在「Release 有了、引擎传不上去」那一步。
-#   推 tag 与点 Run workflow 是同一种权力（都要仓库写权限），换的只是凭证形态。
+# - 2026-10-28 加过一条 tag 触发（components/vX.Y.Z.run.<run-id>），为的是「本机只有 SSH、无 gh 无 PAT
+#   时也能触发」。它在 2026-10-29 摘掉了：资产链挪进 build.yml 的创建过程之后，这条路一步都走不通，
+#   剩下的作用只有一个——谁推了这样一个 tag 就得到一枚 422 的红 X，把「这条路已经不作数」看成「发布坏了」。
 #
 # 为什么上传发生在 CI 而不是本地：
 # - 三平台里 Windows x64 与 macOS x64 本来只有 CI 能产，开发机只有一份本机架构；
@@ -35,19 +34,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要上传到哪个 Release（必须已存在，如 v1.0.6）'
+        description: '要补挂资产到哪个 Release（必须已存在；默认就是欠着下载包的 v1.0.6）'
         required: true
         default: 'v1.0.6'
       runId:
         description: 'TTS 引擎二进制来自哪一次 Build 工作流的 run-id'
         required: true
-  push:
-    # 与表单那两个输入完全同义，只是把值写进 tag 名，让只有 SSH 的人也能触发：
-    # components/v1.0.6.run.40712345678 → tag=v1.0.6、run-id=40712345678。
-    # 断了要重跑就在末尾加一段 .r2（同一次构建、同一个 run-id），因为同名 tag 推第二次不会再生效。
-    # build.yml 的 tags: ['v*'] 匹配的是 tag 名本身，components/... 不在它前面，不会被误触发。
-    tags:
-      - 'components/v*'
 
 permissions:
   contents: read
@@ -63,58 +55,35 @@ jobs:
     # 只有这一步需要写：上传资产与读 Release 都用这个 jobs token
     permissions:
       contents: write
-    # 两种触发给的都是自由字符串，直接拼进 run 脚本就是脚本注入的入口。
-    # 所以原始输入只在这一步读（下面 Resolve），归一成 TAG / RUN_ID 两个环境变量，
-    # 再由 Validate 把形状卡死；之后的步骤只引用这两个变量，不再碰 inputs / github.ref。
+    # 表单给的是自由字符串，直接拼进 run 脚本就是脚本注入的入口。
+    # 所以原始输入只在一处读（下面 Validate），形状卡死后归一成 TAG / RUN_ID 两个环境变量，
+    # 之后的步骤只引用这两个变量，不再碰 inputs。
     env:
       DISPATCH_TAG: ${{ inputs.tag }}
       DISPATCH_RUN_ID: ${{ inputs.runId }}
-      REF_NAME: ${{ github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Resolve trigger inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${DISPATCH_TAG:-}" ]; then
-            tag="$DISPATCH_TAG"
-            run_id="${DISPATCH_RUN_ID:-}"
-            echo "触发来源：workflow_dispatch 表单"
-          else
-            spec="${REF_NAME#components/}"
-            # 末尾那段可选的 .rN 是给重试用的：同一个 tag 名推第二次不会再生效，要让它再生效就得挪或删
-            # 远端那个 tag——那是破坏性操作。所以断在半路就换个后缀重推，run-id 指的还是同一次构建。
-            if [[ "$spec" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)\.run\.([0-9]+)(\.r[0-9]+)?$ ]]; then
-              tag="${BASH_REMATCH[1]}"
-              run_id="${BASH_REMATCH[2]}"
-              echo "触发来源：push tag ${REF_NAME}"
-            else
-              echo "::error::tag 名要写成 components/vX.Y.Z.run.<build run-id>（重跑同一次构建就再补一段 .r2；收到 ${REF_NAME}）"
-              exit 1
-            fi
-          fi
-          echo "TAG=$tag" >> "$GITHUB_ENV"
-          echo "RUN_ID=$run_id" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Validate inputs
+      - name: Validate trigger inputs
         run: |
           set -euo pipefail
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::tag 要写成 vX.Y.Z（收到 ${TAG}）"
+          if ! printf '%s' "${DISPATCH_TAG:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 要写成 vX.Y.Z（收到 ${DISPATCH_TAG:-}）"
             exit 1
           fi
-          if ! printf '%s' "$RUN_ID" | grep -Eq '^[0-9]+$'; then
-            echo "::error::run-id 只能是数字（收到 ${RUN_ID}）"
+          if ! printf '%s' "${DISPATCH_RUN_ID:-}" | grep -Eq '^[0-9]+$'; then
+            echo "::error::run-id 只能是数字（收到 ${DISPATCH_RUN_ID:-}）"
             exit 1
           fi
-          echo "输入形状合法：tag=${TAG} run-id=${RUN_ID}"
+          echo "TAG=${DISPATCH_TAG}" >> "$GITHUB_ENV"
+          echo "RUN_ID=${DISPATCH_RUN_ID}" >> "$GITHUB_ENV"
+          echo "输入形状合法：tag=${DISPATCH_TAG} run-id=${DISPATCH_RUN_ID}"
 
       # 打包脚本只用 node 内置模块，所以这里不 pnpm install：省掉两分钟，也少一条能挂的依赖
       - name: Check the release exists
