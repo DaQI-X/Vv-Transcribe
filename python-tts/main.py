@@ -63,8 +63,9 @@ SPEED_MIN, SPEED_MAX = 0.25, 4.0
 id 也只接受这里列出的值，绝不能拿外部输入拼目录名（ASR 那边档位名直接拼 HF repo 名，
 同样的口子不开第二次）。
 
-weightsMb 是「这档模型有多大」的参考账（du -shL 口径，MiB 进位），2026-10-28 本机 VITS 实测 129；
-Kokoro 那份 409 是更早一轮本机实测，此刻不在这台机器上、没法重测，只当参考。
+weightsMb 是「这档模型有多大」的参考账（按宿主食指表逐文件求和、MiB 进位）：
+VITS 是 2026-10-28 本机实测的 129（135,454,939 字节），Kokoro 是 2026-10-29 实测的 407
+（426,573,262 字节 / 375 个文件；磁盘 du 报 408M 是按块取整，别拿它对账）。
 服务里没有任何代码读它——要下多少由宿主的下载器按它自己钉死的指纹表算，两边单位不同，别拿这里的数对账。
 files 与 fsts 都是硬要求：少一个 .fst 不会报错，只会让「2026 年」这类读法悄悄退化成逐字念，
 那种降级比失败更难发现。speakers 不写死，以引擎加载后的 num_speakers 为准
@@ -84,7 +85,7 @@ ENGINES = {
     },
     "kokoro-multi-lang-v1_1": {
         "kind": "kokoro",
-        "weightsMb": 409,
+        "weightsMb": 407,
         "files": {
             "model": "model.onnx",
             "tokens": "tokens.txt",
@@ -156,6 +157,13 @@ def load_engine():
         )
         kwargs = {"vits": model_cfg}
     elif spec["kind"] == "kokoro":
+        # 三份 lexicon 一份都不能少，这是 2026-10-29 本机实测出来的：
+        # - 三份都给：一段 90 词的真实英文旁白出 27.2 秒声，只跳 3 个词（subtitles / SRT / VTT）；
+        # - 只给 lexicon-zh.txt：同一句 14 词的英文只剩 0.9 秒——词表查不到的词是**静默跳过**，
+        #   只往 stderr 写一行 "OOV word skipped"，不报错也不返回失败；
+        # - 一份都不给：引擎直接拒绝这段文本（"No lexicon available"），espeak-ng-data 顶不上这一层。
+        # 所以「品牌名、缩写、部分复数不进音轨」是这份模型的固有行为，界面提示里已经写明，
+        # 别把它当回归去「修」——能做的只有先试听一句。
         model_cfg = sherpa_onnx.OfflineTtsKokoroModelConfig(
             model=paths["model"],
             tokens=paths["tokens"],
@@ -163,6 +171,9 @@ def load_engine():
             lexicon=paths["lexicon"],
             dict_dir=paths.get("dict_dir", ""),
             data_dir=paths.get("data_dir", ""),
+            # c-api.h 管这一位叫 "Optional language hint"。实测 ""/zh/en/en-us/cmn 五种取值
+            # 下 OOV 数、时长、峰值全一样，改它不动任何行为；留 zh 只表示这份模型按中英混排用。
+            # 想靠换这一位修好上面那个跳过行为是修不掉的。
             lang="zh",
         )
         kwargs = {"kokoro": model_cfg}

@@ -31,7 +31,13 @@ import { dirname, join } from 'node:path'
 import { net } from 'electron'
 import { logger } from './logger'
 import { ArchiveError, extractTarGz } from './componentArchive'
-import { LOCAL_TTS_ENGINES, componentsDir, isLocalTtsEngineRunning, modelRootDir } from './localTtsEngine'
+import {
+  COMPONENT_ROW_TITLES,
+  LOCAL_TTS_ENGINES,
+  componentsDir,
+  isLocalTtsEngineRunning,
+  modelRootDir,
+} from './localTtsEngine'
 import { hasActiveTTSSynthesis } from './ttsService'
 import {
   UPSTREAM_MODEL_SOURCES,
@@ -158,9 +164,10 @@ const MODEL_REQUIRED: Record<(typeof LOCAL_TTS_ENGINES)[number], string[]> = {
 }
 
 /**
- * 三个组件，两种来源：引擎那条要读清单才知道版本，模型这条的版本与指纹就是 ttsModelUpstream.ts 里
- * 钉死的那个提交（135,454,939 字节 / 17 个文件，2026-10-28 本机实测）——所以「未安装，下载约 135.5MB」
- * 这句在没点「检查清单」时也答得出来，不拿 0 或「不知道」冒充已知。
+ * 三个组件，两种来源：引擎那条要读清单才知道版本，两份模型条的版本与指纹是 ttsModelUpstream.ts 里
+ * 钉死的那个提交（VITS 17 个文件 / 135,454,939 字节，Kokoro 375 个文件 / 426,573,262 字节，
+ * 都是 2026-10-28~29 本机逐文件算出来的）——所以「未安装，下载约 135.5MB」这句在没点「检查清单」时
+ * 也答得出来，不拿 0 或「不知道」冒充已知。
  * hint 里一律不重复体积：那一格由表算，写死了就会出现「129MB」与「135.5MB」并排（同一份东西、
  * 一个按 1024 进位一个按 1000 进位），用户只会当成两个不同的包。
  * maxExtractBytes / maxFiles 这两位目前没人设：它们属于「清单指一个归档」那条路（还留在 doInstall 里，
@@ -169,7 +176,7 @@ const MODEL_REQUIRED: Record<(typeof LOCAL_TTS_ENGINES)[number], string[]> = {
 const SPECS: ComponentSpec[] = [
   {
     id: 'vv-tts-server',
-    title: '本地配音引擎',
+    title: COMPONENT_ROW_TITLES.engineBinary,
     kind: 'binary',
     hint: '引擎二进制，三平台各一份，体积按平台差异较大',
     manifestKey: PLATFORM_KEY,
@@ -178,7 +185,7 @@ const SPECS: ComponentSpec[] = [
   },
   {
     id: `tts-model-${LOCAL_TTS_ENGINES[0]}`,
-    title: 'VITS（推荐中文）',
+    title: COMPONENT_ROW_TITLES.models[LOCAL_TTS_ENGINES[0]].row,
     kind: 'archive',
     hint: '中文配音模型，取自 HuggingFace 上游仓库里钉死的那个提交',
     upstream: UPSTREAM_MODEL_SOURCES[LOCAL_TTS_ENGINES[0]],
@@ -188,13 +195,13 @@ const SPECS: ComponentSpec[] = [
   },
   {
     id: `tts-model-${LOCAL_TTS_ENGINES[1]}`,
-    title: 'Kokoro（推荐英文）',
+    title: COMPONENT_ROW_TITLES.models[LOCAL_TTS_ENGINES[1]].row,
     kind: 'archive',
-    hint: '英文配音模型，本版未开放应用内下载',
-    // 既不指清单也不钉上游指纹：1.0.6 的范围只发 VITS 中文（拍板过的），而 Kokoro 的
-    // espeak-ng-data/ 有几百个文件，指纹表要另做一轮实测，不能凭记忆填。
-    // 于是界面按「这一版没有发布对应的下载包」处理——把按钮按下再让用户看它失败是更坏的答案。
-    // 真要手工放入这份模型：放进 modelRootDir()/<引擎 id>，sidecar 与这里的落点用的是同一个函数。
+    hint: '中英文配音模型，取自 HuggingFace 上游仓库里钉死的那个提交',
+    // 与 VITS 同一套路：钉 commit + 逐文件 sha256，不碰清单。这份表 375 个文件、426,573,262 字节
+    // （2026-10-29 本机逐个算的，其中 7 个 LFS 还实下过一遍），espeak-ng-data/ 那几百个文件全在里面。
+    // 手工放的那份也认：落点与 sidecar 用的是同一个 modelRootDir()/<引擎 id>。
+    upstream: UPSTREAM_MODEL_SOURCES[LOCAL_TTS_ENGINES[1]],
     target: () => join(modelRootDir(), LOCAL_TTS_ENGINES[1]),
     required: MODEL_REQUIRED[LOCAL_TTS_ENGINES[1]],
     busy: busyReason,
@@ -614,6 +621,19 @@ export async function listComponents(): Promise<ComponentState[]> {
     out.push(await buildState(spec, cached.entry, cached.inManifest))
   }
   return out
+}
+
+/**
+ * 引擎二进制这一条在本版清单里到底有没有（只读会话缓存，不联网）。
+ * 独立开这一个口子，是因为「去按需组件下载引擎」这句话在好几处要说，而按需组件那一行
+ * 有没有下载按钮恰好由同一位决定：404 的那一版按钮是收着的，把人领过去等于让他对着
+ * 一行点不动的按钮自己发现。三份状态接口里只有本地配音那份是配音页/设置页必读的，
+ * 所以这一位搭在那份上，不再让渲染层自己猜。
+ * null＝这一轮还没读过清单，此时既不能说「下得到」，也不能说「下不到」。
+ */
+export function engineBinaryInManifest(): boolean | null {
+  const spec = SPEC_BY_ID.get('vv-tts-server')
+  return spec ? cachedRemote(spec).inManifest : null
 }
 
 /**

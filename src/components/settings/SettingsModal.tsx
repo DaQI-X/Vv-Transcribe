@@ -40,8 +40,12 @@ import { ASR_LANGUAGE_OPTIONS } from '@/utils/asrLanguage'
 import {
   LOCAL_TTS_DEFAULT_ENGINE,
   LOCAL_TTS_ENGINE_OPTIONS,
+  ENGINE_BINARY_ROW_NAME,
+  binaryManifestTag,
   hasInAppDownload,
+  localTtsEngineCaveat,
   localTtsEngineLabel,
+  missingBinaryHint,
   missingModelHint,
   modelPresenceTag,
   voiceSidLabel,
@@ -591,6 +595,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const ttsLocal = values.ttsEngine === 'local'
   /** 界面当前问的那一档：用户在下拉里换了但没保存，也要按新档去查状态、给建议 */
   const selectedTtsEngine = values.ttsLocalEngine || LOCAL_TTS_DEFAULT_ENGINE
+  /** 这一档「用得起来才知道的坑」，空串＝没有 */
+  const selectedTtsCaveat = localTtsEngineCaveat(selectedTtsEngine)
   /**
    * 本地档的状态快照（问一次不拉起引擎）：下拉里每一行都得标得出「这一档的模型还没下载」，
    * 所以两档一起问，而不是只问当前选中的那档。null＝还没读到，界面上不许把它当「都不缺」渲染。
@@ -599,6 +605,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const [localVoiceState, setLocalVoiceState] = useState<{
     speakers: number
     binaryPresent: boolean
+    /** 本版清单里有没有引擎这一条：null＝还没读过清单，false＝这一版没有它的下载包 */
+    binaryInManifest: boolean | null
     modelPresent: Record<string, boolean>
   } | null>(null)
   /** 测连接、重启跑完引擎就活了，音色数能按 /health 实报的数校正一遍；不留神这里会一直停在档位表那份 */
@@ -628,6 +636,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         setLocalVoiceState({
           speakers: current.speakers,
           binaryPresent: current.binaryPresent,
+          binaryInManifest: current.binaryInManifest,
           modelPresent,
         })
       }
@@ -1156,8 +1165,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <option value="local">本地配音（需下载引擎和模型）</option>
                 </select>
                 <span className="settings-form-hint">
-                  本地这一档是实验功能：引擎二进制和模型都不在安装包里，要先在「设置 → 关于与更新 → 按需组件」里下载。
-                  切到这里不会立刻拉起引擎——第一次配音时才启动，那时第一次会多花几秒解包和读模型。
+                  {/* 整句写成一个模板字符串：JSX 里的换行会变成一个空格，落在中文标点后头特别显眼 */}
+                  {`本地这一档是实验功能：引擎二进制和模型都不在安装包里，要先在「设置 → 关于与更新 → 按需组件」里下载。引擎是「${ENGINE_BINARY_ROW_NAME}」那一行（${binaryManifestTag(localVoiceState?.binaryInManifest ?? null)}），模型那一行的名字就是下面「本地模型」里选中的那一档。切到这里不会立刻拉起引擎——第一次配音时才启动，那时第一次会多花几秒解包和读模型。`}
                 </span>
               </div>
 
@@ -1185,12 +1194,14 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       {!localVoiceState
                         ? '还没读到本机的组件状态——这一档暂时不能配音。'
                         : !localVoiceState.binaryPresent
-                          ? '这台机器上还没有引擎二进制，配音跑不起来——去「关于与更新 → 按需组件」下载。'
+                          ? `${missingBinaryHint(localVoiceState.binaryInManifest)}。`
                           : localVoiceState.modelPresent[selectedTtsEngine] === false
                             ? `${missingModelHint(selectedTtsEngine)}。`
                             : `${localTtsEngineLabel(selectedTtsEngine)}的模型已在磁盘上。换档要点「保存设置」才生效；配音页那次换档只对本次调用有效，不会写回这里。`}
                       {localVoiceState &&
-                        (!localVoiceState.binaryPresent ||
+                        // 引擎那一行只在「清单里确实有它」或「还没查过清单」时才值得跳过去；
+                        // 明确没有包时这一跳就是把人领到一行收着按钮的记录前面
+                        ((!localVoiceState.binaryPresent && localVoiceState.binaryInManifest !== false) ||
                           (localVoiceState.modelPresent[selectedTtsEngine] === false &&
                             hasInAppDownload(selectedTtsEngine))) && (
                           <button
@@ -1219,11 +1230,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     <span className="settings-form-hint">
                       {(localVoiceState?.speakers ?? 0) > 0
                         ? `这一档共 ${localVoiceState?.speakers} 个音色，从 1 开始编号。上游没给音色名字，只能挨个试听来认。`
-                        : // 「点测试连接让引擎报一次」只有在模型真的在盘上才是条出路：这一档连下载包
-                          // 都没有时答应它，等于把用户推向一个必然失败的按钮
-                          localVoiceState?.modelPresent[selectedTtsEngine] === true
-                          ? '这一档的音色总数还没核实，所以现在只列得出默认那一个。换回 VITS，或先点下面的「测试连接」让引擎报一次。'
-                          : '这一档的音色总数还没核实，所以现在只列得出默认那一个。换回 VITS。'}
+                        : // 不写「点测试连接让引擎报一次」这种出路：这一档的模型在不在盘上、能不能下载，
+                          // 这一句都答不上来，答应一条会被当场拦下的出路比不答应更糟
+                          '这一档的音色总数还没报上来，所以现在只列得出默认那一个。'}
+                      {selectedTtsCaveat && <><br />{selectedTtsCaveat}</>}
                     </span>
                   </div>
                 </>

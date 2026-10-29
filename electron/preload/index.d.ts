@@ -148,6 +148,11 @@ export interface LocalTtsStatus {
   mode: 'cloud' | 'local'
   configuredEngine: string
   requestedEngine: string
+  /**
+   * 引擎二进制在本版清单里有没有这一条（主进程的会话缓存，不联网）。
+   * false＝这一版没有它的下载包，界面不能说「去按需组件下载它」；null＝还没读过清单。
+   */
+  binaryInManifest: boolean | null
 }
 
 /**

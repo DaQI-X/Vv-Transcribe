@@ -24,6 +24,7 @@ import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
 import {
   LOCAL_TTS_ENGINE_OPTIONS,
+  localTtsEngineCaveat,
   missingModelHint,
   modelPresenceTag,
   voiceSidLabel,
@@ -312,6 +313,8 @@ export function VoiceStudio() {
   const sids = voiceSidOptions(speakers, configVoice)
   /** 当前选中的这档模型在不在磁盘上；还没查到（undefined）时按「别拦、别乱标」处理 */
   const selectedPresent = engineModelPresent[selectedEngine] !== false
+  /** 这一档「用得起来才知道的坑」，空串＝没有 */
+  const engineCaveat = localTtsEngineCaveat(selectedEngine)
 
   return (
     <div className="voice-studio">
@@ -440,11 +443,13 @@ export function VoiceStudio() {
             {local
               ? speakers > 0
                 ? `这一档有 ${speakers} 个音色，从 1 开始编号。上游没给音色名字，只能挨个试听来认。`
-                : // 这一档既没核实过音色数、本版又没有下载包，那「先试听一下」不是条出路——
-                  // 模型不在盘上，点下去只会被前置检查拦下
-                  '这一档的音色总数还没核实，本版也没有它的应用内下载包——换回 VITS 才有得选。'
+                : // 只报数、不给出路：这一档的模型在不在盘上、能不能下载，这句话都猜不到，
+                  // 写一条会被前置检查当场拦下的出路比不写更糟
+                  '这一档的音色总数还没报上来，所以现在只列得出默认那一个。'
               : '云端能填哪些模型和音色由服务商决定，应用不替你猜，所以这两项手输。留空＝用配音配置里保存的那个。'}
           </p>
+
+          {local && engineCaveat && <p className="voice-studio__hint">{engineCaveat}</p>}
 
           <div className="voice-studio__config">
             {local ? '配音引擎：本地（在你这台电脑上跑，不调接口）' : '配音引擎：云端接口'}
@@ -489,13 +494,11 @@ export function VoiceStudio() {
           <p className="voice-studio__cost">
             {local ? (
               <>
-                本机合成 <strong>{callCount}</strong> 段（逐段串行，不调接口、不花钱）。第一次配音要多花几秒：
-                引擎进程要起来、模型要读进内存，之后就快了。
+                本机合成 <strong>{callCount}</strong> 段（逐段串行，不调接口、不花钱）。第一次配音要多花几秒：引擎进程要起来、模型要读进内存，之后就快了。
               </>
             ) : (
               <>
-                将调用 <strong>{callCount}</strong> 次接口（逐段串行，按服务商计费）。倍速由接口实现，
-                个别服务商只提供固定档位或不认这个字段。
+                将调用 <strong>{callCount}</strong> 次接口（逐段串行，按服务商计费）。倍速由接口实现，个别服务商只提供固定档位或不认这个字段。
               </>
             )}
           </p>

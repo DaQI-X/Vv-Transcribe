@@ -20,15 +20,14 @@ import { logger } from './logger'
 import { normalizeApiBase, normalizeTtsEngine } from './settingsService'
 import { getLocalEngineDetail } from './asrServiceManager'
 import {
-  componentsSizeHint,
   getLocalTtsStatus,
-  modelSizeHint,
+  missingComponentsMessage,
   normalizeLocalTtsEngine,
   parseLocalTtsSid,
   synthesizeLocally,
 } from './localTtsEngine'
 import { hasActiveTTSSynthesis } from './ttsService'
-import { hasInAppModelDownload } from './ttsModelUpstream'
+import { engineBinaryInManifest } from './componentService'
 import { DEFAULT_PROMPT } from './ai/openaiCompatible'
 
 export type TestLevel = 'pass' | 'warn' | 'fail'
@@ -401,20 +400,14 @@ async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestO
   const engine = normalizeLocalTtsEngine(rawEngine)
   const status = getLocalTtsStatus(engine)
   if (!status.binaryPresent || !status.modelPresent) {
-    // 缺哪一样报哪一样的体积：二进制已经在磁盘上时再附一句「另需下载引擎二进制」，
-    // 用户会去下一个已经下好的包。缺模型更要紧——Kokoro 本版没放下载包，
-    // 把它说成「去按需组件下载」是答应做不到的事。
-    const onlyModelMissing = status.binaryPresent && !status.modelPresent
+    // 这句话与「第一次配音时启动失败」弹的是同一份（localTtsEngine.missingComponentsMessage）：
+    // 缺哪样报哪样、点名「按需组件」里的那一行，模型已在磁盘上时明说不用重下。
+    // 自检这一路拿得到清单会话缓存，所以把 binaryInManifest 传进去——
+    // false＝那一行收着按钮，就不说「去下载」，给的是换回云端档这条出路。
     return {
       level: 'fail',
       title: '本地配音组件还没下载',
-      message: onlyModelMissing
-        ? `还缺模型：${modelSizeHint(engine)}。${
-            hasInAppModelDownload(engine)
-              ? '下载入口在「设置 → 关于与更新 → 按需组件」，下完再测'
-              : '这一版没放它的下载包——先在「设置 → 配音配置」换回 VITS，或改用云端档'
-          }`
-        : `还缺引擎二进制：${componentsSizeHint(engine)}。下载入口在「设置 → 关于与更新 → 按需组件」，下完再测`,
+      message: missingComponentsMessage(engine, status.binaryPresent, status.modelPresent, engineBinaryInManifest(), '下完再测'),
     }
   }
 

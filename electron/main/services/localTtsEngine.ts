@@ -76,12 +76,32 @@ export function normalizeLocalTtsEngine(raw: unknown): LocalTtsEngineId {
  * 真报上来一个更大的数时，`getLocalTtsDetail` 认实时的，这里只兜「还没加载」那一段。
  *
  * VITS 的 5 是 2026-10-28 本机实测（第一次真合成后 /health 回 num_speakers=5）。
- * Kokoro 写 0 是「还不知道」：本版没有它的应用内下载包（见 `ttsModelUpstream.ts` 那段范围决定），
- * 103 那个数出自更早一轮、此刻这台机器上验不了，把一个没复核的数摆成 103 行比少摆几行更糟。
+ * Kokoro 的 103 是 2026-10-29 本机实测：把那份钉死 sha256 的模型直接喂给 sherpa-onnx 2.0.1，
+ * 加载后 num_speakers=103、sample_rate=24000、模型进内存 0.75s。
  */
 const LOCAL_TTS_MODEL_SPEAKERS: Record<LocalTtsEngineId, number> = {
   'sherpa-onnx-vits-zh-ll': 5,
-  'kokoro-multi-lang-v1_1': 0,
+  'kokoro-multi-lang-v1_1': 103,
+}
+
+/**
+ * 「设置 → 关于与更新 → 按需组件」里那三行的名字。
+ * 缺件文案要说清「下的是哪一行」，就必须和界面显示的是同一个字符串——所以行名只写在这里一份，
+ * componentService 的 SPECS 标题从这里取，两处不会各自漂移（那一栏印的就是 `s.title`）。
+ * `name` 是文案里提到这一档时的叫法：直接把 id 摆进 toast（「sherpa-onnx-vits-zh-ll 的模型」）
+ * 是给人看机器话，用户在那一栏里认的是 VITS / Kokoro。
+ * 渲染层那份档位名在 src/utils/localTtsEngines.ts 的 LOCAL_TTS_ENGINE_OPTIONS，改档名时两处一起改
+ * （主进程不能反向 import 渲染层，硬要共用就得把表挪进 preload，不值当）。
+ */
+export const COMPONENT_ROW_TITLES: {
+  engineBinary: string
+  models: Record<LocalTtsEngineId, { name: string; row: string }>
+} = {
+  engineBinary: '本地配音引擎',
+  models: {
+    'sherpa-onnx-vits-zh-ll': { name: 'VITS', row: 'VITS（体积小，音色支持少）' },
+    'kokoro-multi-lang-v1_1': { name: 'Kokoro', row: 'Kokoro（体积大，音色支持多）' },
+  },
 }
 
 /**
@@ -271,31 +291,68 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
 /**
  * 模型体积的口径。下载引导（#230/#233）、启动失败与自检文案都从这里取，
  * 免得同一个数字在三处各写一遍、改的时候只改对一处。
- * 单位按 1000 进位（与界面的 formatBytes 同一把尺），VITS 那份直接算自钉死的指纹表——
+ * 出来的是一个名词短语「VITS 的模型（约 135.5MB）」，调用方直接接在动词后面，
+ * 不再出现「缺 sherpa-onnx-vits-zh-ll 的模型约 135.5MB」这种要用户自己翻译的说法。
+ * 单位按 1000 进位（与界面的 formatBytes 同一把尺）：数字只能算自钉死的指纹表——
  * 表里的字节数变了，这句话跟着变，不会再出现「129MB」和「135.5MB」并排。
- * Kokoro 本版不开放应用内下载，没有可算的表，用 2026-10-28 上游 tree 接口实测的
- * 426,584,620 字节（不含 README 与 .gitattributes）。
+ * 两档都钉了表（VITS 2026-10-28 / 135,454,939 字节，Kokoro 2026-10-29 / 426,573,262 字节），
+ * 所以底下那个「没钉表」的分支本机走不到；真加了第三档时它说「不知道」，不拿另一档的数冒充。
  */
 export function modelSizeHint(engine: LocalTtsEngineId): string {
+  const name = COMPONENT_ROW_TITLES.models[engine].name
   const source = UPSTREAM_MODEL_SOURCES[engine]
-  const modelBytes = source ? upstreamTotalBytes(source) : 426_584_620
-  return `${engine} 的模型约 ${(modelBytes / 1e6).toFixed(1)}MB`
-}
-
-/** 两份组件一起缺时的说法：模型体积 + 引擎二进制 */
-export function componentsSizeHint(engine: LocalTtsEngineId): string {
-  return `${modelSizeHint(engine)}，另需下载对应平台的引擎二进制`
+  if (!source) return `${name} 的模型（这一档本版还没钉体积）`
+  return `${name} 的模型（约 ${(upstreamTotalBytes(source) / 1e6).toFixed(1)}MB）`
 }
 
 /**
- * 缺件时给人看的那句话。缺的若是模型，还得看这一档本版有没有应用内下载包：
- * Kokoro 只钉了体积、没钉指纹，按需组件那一行下不了，指过去等于答应了做不到的事。
+ * 缺件时给人看的那句话，只报真缺的那一样。启动失败（本文件的兜底）与设置页的「测试连接」
+ * 共用这一份，两处不再各写各的：同一个缺失，两处说的话得一样。
+ *
+ * 为什么要把「另一样已经在磁盘上」说出来：这句以前不分情况都带上模型体积，于是磁盘上明明有模型、
+ * 只差一个引擎二进制的机器上，用户会照着提示去下一个已经下好的 135.5MB 包。
+ * 「缺哪样报哪样、并点出按需组件里的行名」才是他能一步做完的说法——行名就是那一栏显示的标题，
+ * 点进去对得上号，不用在三行里猜哪一行是引擎。
+ *
+ * 两个位各自决定一句话能不能说：
+ * - 模型看这一档本版钉没钉上游指纹表（`hasInAppModelDownload`）。两档现在都钉了（VITS 2026-10-28、
+ *   Kokoro 2026-10-29），所以「去按需组件下载」指得动；哪天新加一档只写了 id 没写表，指过去就是
+ *   答应了做不到的事——所以位仍然按表算，不写死 true。
+ * - 引擎看本版清单里有没有那一条（`binaryInManifest`，由调用方传：这一位在 services/componentService，
+ *   本文件是它的依赖，反过来问就成了环）。false 时那一行是收着按钮的，只能给出路（换回云端档）；
+ *   null 是这一轮还没读过清单，所以只说「那一行会写明本版有没有包」，不替它答应下得到。
+ * 启动失败那条路拿不到清单位（它就在 componentService 的依赖里），传 null 走最后一档说法。
  */
-function missingComponentsMessage(engine: LocalTtsEngineId, missingModel: boolean): string {
-  if (missingModel && !hasInAppModelDownload(engine)) {
-    return `本地配音缺 ${modelSizeHint(engine)}，而这一版没有放它的下载包——先在「设置 → 配音配置」换回 VITS，或改用云端档`
+export function missingComponentsMessage(
+  engine: LocalTtsEngineId,
+  binaryPresent: boolean,
+  modelPresent: boolean,
+  binaryInManifest: boolean | null = null,
+  tail = '下完才能配音',
+): string {
+  const { name, row } = COMPONENT_ROW_TITLES.models[engine]
+  const binaryRow = COMPONENT_ROW_TITLES.engineBinary
+  const fallback = `先在「设置 → 配音配置」换回 ${COMPONENT_ROW_TITLES.models[DEFAULT_LOCAL_TTS_ENGINE].name}，或改用云端档`
+
+  if (!modelPresent && binaryPresent) {
+    if (!hasInAppModelDownload(engine)) return `本地配音只缺 ${modelSizeHint(engine)}，而这一版没有放它的下载包——${fallback}`
+    return `本地配音只缺 ${modelSizeHint(engine)}，引擎二进制已经在磁盘上了。请在「设置 → 关于与更新 → 按需组件」的「${row}」那一行下载，${tail}`
   }
-  return `本地配音组件还没下载完（${componentsSizeHint(engine)}）。下载入口在「设置 → 关于与更新 → 按需组件」，下完才能配音`
+  if (modelPresent && !binaryPresent) {
+    if (binaryInManifest === false) {
+      return `${name} 的模型已经在磁盘上了，不用重下——本地配音还差引擎二进制，而这一版没有它的下载包。要现在就配音，请在「设置 → 配音配置」改用云端接口`
+    }
+    const note = binaryInManifest === true ? '' : '（那一行会写明本版有没有它的下载包）'
+    return `${name} 的模型已经在磁盘上了，不用重下——本地配音还差引擎二进制。请在「设置 → 关于与更新 → 按需组件」的「${binaryRow}」那一行下载${note}，${tail}`
+  }
+  const modelNote = hasInAppModelDownload(engine)
+    ? `模型在「${row}」那一行`
+    : `${name} 这一版没放它的下载包（${fallback}）`
+  const binaryNote =
+    binaryInManifest === false
+      ? '引擎这一版也没有它的下载包（要现在就配音请改用云端接口）'
+      : `引擎在「${binaryRow}」那一行${binaryInManifest === true ? '' : '（那一行会写明本版有没有它的下载包）'}`
+  return `本地配音两样都还没下载：${modelSizeHint(engine)}和引擎二进制。下载入口在「设置 → 关于与更新 → 按需组件」，${modelNote}、${binaryNote}，${tail}`
 }
 
 /**
@@ -304,15 +361,16 @@ function missingComponentsMessage(engine: LocalTtsEngineId, missingModel: boolea
  */
 async function startEngine(engine: LocalTtsEngineId): Promise<void> {
   const binaryPath = getBinaryPath()
+  const modelPresent = existsSync(join(modelRootDir(), engine))
   if (!existsSync(binaryPath)) {
-    lastError = missingComponentsMessage(engine, false)
+    lastError = missingComponentsMessage(engine, false, modelPresent)
     logger.warn(TAG, 'Engine binary missing', { path: basename(binaryPath), devMode: !!process.env.VITE_DEV_SERVER_URL })
     throw new Error(lastError)
   }
-  if (!existsSync(join(modelRootDir(), engine))) {
+  if (!modelPresent) {
     // 只查目录在不在：里面缺哪个文件由 sidecar 自己报（它有真清单，这边再抄一份必然对不齐），
     // 而「整个模型没下载」是另一种事——那种情况用户要的是「去下载」，不是「重装」
-    lastError = missingComponentsMessage(engine, true)
+    lastError = missingComponentsMessage(engine, true, false)
     logger.warn(TAG, 'Model directory missing', { engine, root: modelRootDir() })
     throw new Error(lastError)
   }
@@ -351,8 +409,8 @@ async function startEngine(engine: LocalTtsEngineId): Promise<void> {
   })
   enginePid = engineProcess.pid ?? null
 
-  engineProcess.stdout?.on('data', (data) => logger.info(TAG, data.toString().trim()))
-  engineProcess.stderr?.on('data', (data) => logger.warn(TAG, data.toString().trim()))
+  engineProcess.stdout?.on('data', (data) => logSidecarOutput(String(data)))
+  engineProcess.stderr?.on('data', (data) => logSidecarOutput(String(data)))
   engineProcess.on('exit', (code, signal) => {
     exitInfo = `code=${code} signal=${signal}`
     logger.info(TAG, 'Process exited', { exitInfo })
@@ -375,6 +433,32 @@ async function startEngine(engine: LocalTtsEngineId): Promise<void> {
     logger.error(TAG, 'Failed to become ready', { outcome, exitInfo: exitInfo ?? '', engine })
     await stopLocalTtsEngine()
     throw new Error(lastError || '本地配音引擎没能启动，请重试')
+  }
+}
+
+/**
+ * sidecar 两条管道的内容按行分级，不再一刀切。
+ *
+ * 之前 stdout 全落 INFO、stderr 全落 WARN，而 uvicorn 的生命周期与访问日志走的是 stderr——
+ * 本机 app.log 实测有「WARN LocalTTS: INFO:     Uvicorn running on http://127.0.0.1:8010」
+ * 这种条目，一次启动+一次停机就刷六七条 WARN。用户「打开日志文件夹」拿来的那一堆里，
+ * 真警告和正常起停长得一样，等于把警告埋在自己的噪声里。
+ *
+ * 只降两类：uvicorn 自己打了 `INFO:` 前缀的那些，和本应用 sidecar 用 `[TTS]` 前缀写的
+ * 起停/加载横幅（`log()` 走 stdout，一次成功启动就三条，把它们记成 WARN 等于让用户以为
+ * 引擎出过事）。sherpa-onnx 的 C++ 输出（如 `Ignore OOV '：'`，确实是读音退化的信号）
+ * 与 PyInstaller 引导器的话一律保持 WARN——宁可吵，不吞。
+ * `[TTS]` 里唯二是真事故的是「模型加载失败」和「启动被拒」（白名单没过），那两条落 ERROR。
+ */
+function logSidecarOutput(raw: string): void {
+  for (const line of raw.split('\n')) {
+    const body = line.trim()
+    if (!body) continue
+    if (/^ERROR:/.test(body) || /^Traceback \(most recent call last\)/.test(body)) logger.error(TAG, body)
+    else if (/^INFO:/.test(body)) logger.info(TAG, body)
+    else if (/^\[TTS\] (load failed|启动被拒)/.test(body)) logger.error(TAG, body)
+    else if (/^\[TTS\] /.test(body)) logger.info(TAG, body)
+    else logger.warn(TAG, body)
   }
 }
 

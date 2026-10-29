@@ -16,7 +16,7 @@ import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
 import { checkVoiceReady, raiseReadinessBlock } from '@/utils/readiness'
 import { splitPlainText } from '@/utils/splitPlainText'
-import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS, missingModelHint } from '@/utils/localTtsEngines'
+import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS } from '@/utils/localTtsEngines'
 import type { VoiceProgress, VoiceSegment, VoiceSynthesizeResult } from '@/types/voice'
 import { useTranscriptionStore } from './useTranscriptionStore'
 
@@ -60,7 +60,11 @@ interface VoiceStudioState {
   configEngine: string
   /** 本地音色上限：引擎把模型读进内存后 /health 才报得出，0＝还不知道 */
   speakers: number
-  /** 各档模型在不在磁盘上：下拉里那行「还没下载」按它标，不让用户选完才发现要下载 */
+  /**
+   * 各档模型在不在磁盘上：只给下拉里那行「（模型还没下载）」用，不让用户选完才发现要下载。
+   * 它是进页面/跑完一次时缓存的那一份，所以不拿它当闸门——闸门走 checkVoiceReady 的现问，
+   * 否则用户在别处下载完或手工挪走目录之后，这里会一直按旧账拦人或放人。
+   */
   engineModelPresent: Record<string, boolean>
 
   phase: VoicePhase
@@ -110,6 +114,8 @@ function str(value: unknown): string {
 /**
  * 单次调用的四个可覆盖参数。空串一律「不覆盖」，由主进程按已保存的设置取值——
  * 界面没填的东西不该在这里替用户猜一个（尤其音色：VITS 的 0 和 Kokoro 的 0 不是同一个人）。
+ * 同一份也交给 checkVoiceReady：拦人的那道问的参数，必须和真跑起来用的参数是同一份，
+ * 否则会出现「按设置拦下、按界面跑通」这种两头都说不清的失败。
  */
 function callOptions(state: { voice: string; speed: number; model: string; engine: string }) {
   return {
@@ -118,24 +124,6 @@ function callOptions(state: { voice: string; speed: number; model: string; engin
     model: state.model,
     localEngine: state.engine,
   }
-}
-
-/**
- * 本地档：界面上选中的那一档模型在不在磁盘上。
- * 这一问必须问「界面当前选的」而不是「设置里保存的」——用户在配音页换了档，
- * 前置校验（readiness）读的还是设置那一份，两边对不上就会出现「拦下了能干的、放过了干不了的」。
- * 不在时回它的 id，调用方据此提示去哪下载；engineModelPresent 还没填（第一次状态没读回来）时回空，
- * 按「不拦」处理——那只是还没查到，不是查到了缺。
- */
-function missingLocalModel(state: VoiceStudioState): string {
-  if (state.mode !== 'local') return ''
-  const selected = state.engine || state.configEngine
-  return state.engineModelPresent[selected] === false ? selected : ''
-}
-
-/** 拦下缺件时的那句 toast：说清缺哪一档模型、下一步怎么走，别让用户自己找 */
-function missingModelToast(engineId: string): string {
-  return `本地配音跑不了：${missingModelHint(engineId)}`
 }
 
 function ensureProgressSubscription() {
@@ -277,9 +265,12 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       toast.info('先给它一点文本')
       return
     }
-    const absent = missingLocalModel(get())
-    if (absent) {
-      toast.error(missingModelToast(absent))
+    // 试听与「开始配音」撞同一道门：#265 之前这里只看模型，引擎二进制没下载时点试听
+    // 会一路掉到主进程的兜底文案——那句是给人看机器话的最后一道保险，不该是用户第一次
+    // 看到「还差引擎」的地方。走 readiness 才能给出「去哪一行下载」并把设置页开到那一栏。
+    const blocked = await checkVoiceReady(callOptions(get()))
+    if (blocked) {
+      raiseReadinessBlock(blocked)
       return
     }
     set({ previewing: true })
@@ -315,14 +306,9 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       toast.info(get().source === 'subtitle' ? '没有非空段落，没什么可以配音' : '先输入要配音的文本')
       return
     }
-    const blocked = await checkVoiceReady()
+    const blocked = await checkVoiceReady(callOptions(get()))
     if (blocked) {
       raiseReadinessBlock(blocked)
-      return
-    }
-    const absent = missingLocalModel(get())
-    if (absent) {
-      toast.error(missingModelToast(absent))
       return
     }
 

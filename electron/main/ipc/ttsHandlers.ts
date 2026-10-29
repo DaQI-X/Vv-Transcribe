@@ -34,6 +34,7 @@ import {
   type LocalTtsDetail,
 } from '../services/localTtsEngine'
 import { logger } from '../services/logger'
+import { engineBinaryInManifest } from '../services/componentService'
 
 export interface TTSPreviewResult {
   clip: { filePath: string; bytes: number; duration: number } | null
@@ -66,6 +67,11 @@ export interface LocalTtsStatusResult extends LocalTtsDetail {
   mode: TtsEngineMode
   configuredEngine: LocalTtsEngineId
   requestedEngine: LocalTtsEngineId
+  /**
+   * 引擎二进制在本版清单里有没有这一条（会话缓存，不联网）。false＝这一版压根没有它的下载包，
+   * 界面就不能说「去按需组件下载它」；null＝还没读过清单，只能把人导向检查清单的地方。
+   */
+  binaryInManifest: boolean | null
 }
 
 /**
@@ -87,6 +93,9 @@ interface VoiceCallOptions {
  * - 倍速夹进 OpenAI 标准的 0.25–4.0，NaN/字符串/越界都退回 1；
  * - 引擎 id 必须过 normalizeLocalTtsEngine 的白名单——它会被拼进模型目录名和 sidecar 的
  *   engine 字段，不能把渲染层传来的字符串直接当值用（这条 IPC 是界面唯一能指定「跑哪档模型」的口子）。
+ *   空串同样按「没覆盖」处理，和上面 model/voice 一个写法：配音页的引擎下拉没动过时存的是空串，
+ *   用 `??` 就只挡 null/undefined，空串会一路走到白名单外、落回 VITS 默认档，
+ *   于是界面显示 Kokoro、实际合成用的是另一档模型（2026-10-29 本机试听时踩实过）。
  * 档（云端/本地）不在这里覆盖：它决定的是「这次要不要花钱、要不要拉起本机进程」，
  * 属于用户已经保存的长期选择，工作台只改这一档里面的参数。
  */
@@ -94,12 +103,13 @@ function withOverrides(base: TTSConfig, raw: unknown): TTSConfig {
   const input = (raw ?? {}) as VoiceCallOptions
   const model = typeof input.model === 'string' ? input.model.trim() : ''
   const voice = typeof input.voice === 'string' ? input.voice.trim() : ''
+  const localEngine = typeof input.localEngine === 'string' ? input.localEngine.trim() : ''
   const speed = Number(input.speed)
   return {
     ...base,
     model: model || base.model,
     voice: voice || base.voice,
-    localEngine: normalizeLocalTtsEngine(input.localEngine ?? base.localEngine),
+    localEngine: normalizeLocalTtsEngine(localEngine || base.localEngine),
     speed: Number.isFinite(speed) && speed > 0 ? Math.min(4, Math.max(0.25, speed)) : 1,
   }
 }
@@ -273,6 +283,8 @@ export function registerTTSHandlers() {
    * 本地配音引擎的状态快照（只读，不会因此拉起引擎）。
    * 引擎 id 由界面传（可能是设置表单里还没保存的那个选择），但必须先过白名单：
    * 这个值会被拼进模型目录名，不能把渲染层传来的字符串直接当路径用。
+   * 空串同样按「没指定」处理，跟 tts:preview/synthesize 一个口径——不然设置页还没选过时
+   * 这里会回一份 VITS 的状态，界面却按保存的那一档显示。
    * 「检查状态」不主动 ensure 是刻意的——本地档懒启动，用户只是想知道组件下没下好，
    * 不该因为打开设置页就吃掉一次 8 秒解包和几百 MB 内存。
    */
@@ -280,9 +292,16 @@ export function registerTTSHandlers() {
     'tts:localStatus',
     async (_event, requestedEngine?: unknown): Promise<LocalTtsStatusResult> => {
       const config = await getTTSConfig()
-      const engine = normalizeLocalTtsEngine(requestedEngine ?? config.localEngine)
+      const requested = typeof requestedEngine === 'string' ? requestedEngine.trim() : ''
+      const engine = normalizeLocalTtsEngine(requested || config.localEngine)
       const detail = await getLocalTtsDetail(engine)
-      return { ...detail, mode: config.engine, configuredEngine: config.localEngine, requestedEngine: engine }
+      return {
+        ...detail,
+        mode: config.engine,
+        configuredEngine: config.localEngine,
+        requestedEngine: engine,
+        binaryInManifest: engineBinaryInManifest(),
+      }
     }
   )
 
