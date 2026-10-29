@@ -193,6 +193,13 @@ async def health():
     }
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    # PyInstaller onefile 下 multiprocessing 的子进程（本机实测是 resource_tracker，argv 为
+    # `-c from multiprocessing.resource_tracker import main;main(14)`）会把这份入口脚本从头再跑
+    # 一遍，包括下面的 uvicorn.run：于是每次转写都多冒一个抢 8000 失败才退出的进程。
+    multiprocessing.freeze_support()
+
     import uvicorn
     print("[ASR] Starting Vv Transcribe ASR service on http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
