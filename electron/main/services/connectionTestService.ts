@@ -20,6 +20,7 @@ import { logger } from './logger'
 import { normalizeApiBase, normalizeTtsEngine } from './settingsService'
 import { getLocalEngineDetail } from './asrServiceManager'
 import {
+  COMPONENT_ROW_TITLES,
   getLocalTtsStatus,
   missingComponentsMessage,
   normalizeLocalTtsEngine,
@@ -429,10 +430,12 @@ async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestO
     logger.info('ConnTest', 'local tts probe done', { engine, sid, latencyMs, bytes: clip.bytes })
     // 时长读不出来时不报「0.0 秒」：那看起来像坏了，而真实情况只是引擎没回 X-Vv-Duration
     const sizeNote = clip.duration > 0 ? `${clip.duration.toFixed(1)} 秒、${audioSize(clip.bytes)}` : audioSize(clip.bytes)
+    // 档位名与音色编号都按界面上的叫法给：sherpa 的 sid 从 0 数起、用户在「本地音色」里从 1 数起，
+    // 这里若直出「音色 0」，看着就像跟下拉里选的那一个对不上。
     return {
       level: 'pass',
       title: '本地配音可用',
-      message: `耗时 ${formatLatency(latencyMs)}，用「${engine} · 音色 ${sid}」合成出 ${sizeNote}（首次启动含引擎解包，之后会快很多）。本地档不花钱、不走网络`,
+      message: `耗时 ${formatLatency(latencyMs)}，用「${COMPONENT_ROW_TITLES.models[engine].name} · 音色 ${sid + 1}」合成出 ${sizeNote}（首次启动含引擎解包，之后会快很多）。本地档不花钱、不走网络`,
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
