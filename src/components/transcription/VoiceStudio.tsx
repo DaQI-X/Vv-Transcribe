@@ -25,6 +25,7 @@ import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudi
 import {
   LOCAL_TTS_ENGINE_OPTIONS,
   localTtsEngineCaveat,
+  localTtsEngineLabel,
   missingModelHint,
   modelPresenceTag,
   voiceSidLabel,
@@ -369,7 +370,7 @@ export function VoiceStudio() {
           )}
 
           <div className="voice-studio__fields">
-            <label className="voice-studio__field">
+            <label className="voice-studio__field voice-studio__field--wide">
               <span className="voice-studio__label">模型</span>
               {local ? (
                 <select
@@ -455,7 +456,7 @@ export function VoiceStudio() {
             {local ? '配音引擎：本地（在你这台电脑上跑，不调接口）' : '配音引擎：云端接口'}
             {' · '}
             {local ? (
-              <code>{selectedEngine}</code>
+              <code>{localTtsEngineLabel(selectedEngine)}</code>
             ) : (
               <>
                 模型 <code>{model || configModel || '未填写'}</code>

@@ -2125,6 +2125,17 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   gap: 6px;
 }
 
+/* 模型那一格要装「Kokoro（体积大，音色支持多）」这样的整句档位名。select 是 padding 0 12px
+   加右侧自绘箭头（appearance:none），能写字的只有 clientWidth−40，所以 201px 的文字要 241px 控件宽。
+   最小窗宽 1100 下这一行实测 476px：三列等分只留 108px（尾巴整个被箭头吃掉），只给 flex:2 是 183px
+   还是不够，所以再钉一条 min-width——250px 时留 207px，比 201px 多 6px 余量（字号一变就是亚像素误差）。
+   让出去的音色/倍速各剩 58px，最坏的「音色 103」（Kokoro 有 103 个音色）56px、「0.75×」37px，都装得下。
+   宽窗口时 flex:2 只管比例；云端档手输的模型名同样吃这点宽度。 */
+.voice-studio__field--wide {
+  flex: 2;
+  min-width: 250px;
+}
+
 .voice-studio__config {
   display: flex;
   align-items: center;
