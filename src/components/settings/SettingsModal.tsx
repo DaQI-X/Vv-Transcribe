@@ -36,6 +36,7 @@ import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useThemeStore } from '@/stores/useThemeStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
+import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { ASR_LANGUAGE_OPTIONS } from '@/utils/asrLanguage'
 import {
   LOCAL_TTS_DEFAULT_ENGINE,
@@ -563,6 +564,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
           encryptable: result.settings.keyEncryptionAvailable !== false,
         })
       if (tab === 'theme') setTheme(themeValue as 'light' | 'dark')
+      // 配音页抬头的档位只在「进页」时读一次设置（useVoiceStudioStore.setTab → loadConfig），
+      // 就地保存不重读就会继续显示刚换掉的那一档，看着像没保存上。这里替用户补读一次。
+      if (tab === 'tts') void useVoiceStudioStore.getState().loadConfig()
       // 换档位要重启引擎（离线标志只能在启动时定），没重启成功就等于新档位还没吃到，必须说
       if (result?.error) {
         toast.error(result.error, 9000)
