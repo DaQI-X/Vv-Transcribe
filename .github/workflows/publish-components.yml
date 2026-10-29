@@ -7,7 +7,7 @@ name: Publish components
 #   run 40721273648）。资产现在只能在「创建 Release」时一起传，而那只有 build.yml 做得到。
 #   这份文件留着只作为一种回收路径：真要往历史版本补资产，得先在 Settings → General → Releases
 #   临时取消勾选 immutability，补完再勾回去；不改设置的话这里每一步都会红在同一句上。
-#   （要不要直接删掉这份，等用户拍板。）
+#   2026-10-29 拍板：不删。补挂别的版本的资产只有这条路，删了连「怎么补」都没地方记。
 #
 # 为什么是人工指名而不是自动跑：
 # - 这些资产是「应用内按需下载」的信任来源，传错一次就会被用户机器长期缓存，版本号还得跟着清单走；
@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要补挂资产到哪个 Release（必须已存在；默认就是欠着下载包的 v1.0.6）'
+        description: '要补挂资产到哪个 Release：必须是已存在、且此刻缺着这套包的那一枚。默认 v1.0.6（引擎包就是欠在它身上的）；新版本别填这里，它的资产由 build.yml 在创建 Release 那一刻一起带上'
         required: true
         default: 'v1.0.6'
       runId:
