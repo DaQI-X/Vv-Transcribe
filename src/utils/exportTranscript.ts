@@ -7,6 +7,7 @@
  * 本应用认的私有格式有用。
  */
 import type { TranscriptionSegment, ExportFormat } from '@/types/transcription'
+import { formatTime } from './formatTime'
 
 function formatSRTTime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -19,15 +20,6 @@ function formatSRTTime(seconds: number): string {
 /** WebVTT 的时间戳分隔符是点，不是 SRT 的逗号——写成逗号会被当坏文件 */
 function formatVTTTime(seconds: number): string {
   return formatSRTTime(seconds).replace(',', '.')
-}
-
-/** Markdown 里的短时码：满一小时才补上小时位，否则一小时的节目会写出 62:05 这种没人认的读数 */
-function formatDisplayTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  const mmss = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-  return h > 0 ? `${h.toString().padStart(2, '0')}:${mmss}` : mmss
 }
 
 export function exportTranscript(
@@ -77,11 +69,12 @@ export function exportTranscript(
         2,
       )
 
+    /** Markdown 台词稿里的短时码走界面那把尺：用户导出来对的就是字幕行上那个落点，两边不能是两个数 */
     case 'md':
       return segments
         .map(
           (seg) =>
-            `**[${formatDisplayTime(seg.startTime)} - ${formatDisplayTime(seg.endTime)}]**\n\n${seg.text}`,
+            `**[${formatTime(seg.startTime)} - ${formatTime(seg.endTime)}]**\n\n${seg.text}`,
         )
         .join('\n\n---\n\n')
 

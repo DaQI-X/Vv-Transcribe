@@ -20,7 +20,13 @@
     "ignoreDeprecations": "6.0",
 
     "baseUrl": ".",
+    /*
+      "@/*" 这条和 tsconfig.app.json 必须一致：测试按相对路径把 src 下的模块拉进本程序时，
+      那些模块自己内部的 import 用的是这个别名（例如 utils/exportTranscript 引 types 目录）。
+      少这一条就是「构建绿、测试类型检查红」的第二套真相。
+    */
     "paths": {
+      "@/*": ["src/*"],
       "@electron/*": ["electron/*"]
     }
   },

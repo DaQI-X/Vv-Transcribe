@@ -23,6 +23,7 @@ import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
 import { formatBytes } from '@/utils/formatBytes'
+import { formatTime } from '@/utils/formatTime'
 import {
   LOCAL_TTS_ENGINE_OPTIONS,
   localTtsEngineCaveat,
@@ -34,10 +35,15 @@ import {
 } from '@/utils/localTtsEngines'
 import { StudioTabs } from './StudioTabs'
 
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+/**
+ * 「这条轨比原时间轴长多少」那一格不能直接套 formatTime：那把尺 floor 到整秒，2026-10-30
+ * 那批 12 段的实测差是 0.11 秒（轨 58.31 / 原时间轴 58.42，见 app.log 的 Voice track assembled），
+ * 落进界面就成了「这条不比它长（差 00:00）」。这行的用途是告诉用户要不要拿这条轨去重铺字幕，
+ * 而 00:00 读起来像严丝合缝——1 秒以内的差在这儿不是零。
+ */
+function formatDrift(delta: number): string {
+  const abs = Math.abs(delta)
+  return abs < 1 ? '差不到 1 秒' : `差 ${formatTime(abs)}`
 }
 
 /** file:// 前缀与播放器同源（依赖 webSecurity: false，见 AudioPlayer） */
@@ -179,7 +185,7 @@ function ResultCard() {
               <li>
                 原时间轴到 {formatTime(track.originalEnd)}，这条
                 {track.duration > track.originalEnd ? '比它长' : '不比它长'}
-                （差 {formatTime(Math.abs(track.duration - track.originalEnd))}）
+                （{formatDrift(track.duration - track.originalEnd)}）
               </li>
             ) : (
               <li>纯文本连续朗读，按顺序首尾相接，没有字幕时间轴</li>

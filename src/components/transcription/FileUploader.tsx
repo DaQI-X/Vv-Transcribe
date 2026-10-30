@@ -13,6 +13,7 @@ import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { frontendLogger } from '@/utils/logger'
 import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
 import { formatBytes } from '@/utils/formatBytes'
+import { formatTime } from '@/utils/formatTime'
 import { StudioTabs } from './StudioTabs'
 
 /** 链接这条链路的状态机：input（还没解析）→ resolving → ready（二选一）→ downloading */
@@ -51,15 +52,14 @@ function sizeLabel(bytes: number | null): string {
   return bytes === null ? '大小未知' : formatBytes(bytes)
 }
 
+/**
+ * 链接解析回来的时长。改之前这里自己拼了一套：四舍五入到整秒、分钟不补零，
+ * 于是同一个文件在这张卡上是 `1:00`、进了播放器是 `00:59`（那边 floor）。现在只剩「未知」这一句
+ * 是本地话术，读数交给全仓那把尺。注意它抹掉的是这条链路上第二套取整规则，不是所有差值——
+ * 卡片这个数来自解析接口的容器时长，播放器那个来自抽出来的音频，两边本来就可能差零点几秒。
+ */
 function formatDuration(seconds: number | null): string {
-  if (seconds === null) return '时长未知'
-  const s = Math.round(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  return h > 0
-    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-    : `${m}:${String(sec).padStart(2, '0')}`
+  return seconds === null ? '时长未知' : formatTime(seconds)
 }
 
 export function FileUploader() {

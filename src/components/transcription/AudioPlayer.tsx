@@ -10,12 +10,7 @@ import { toast } from '@/components/ui/Toast'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { formatBytes } from '@/utils/formatBytes'
-
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-}
+import { formatTime } from '@/utils/formatTime'
 
 function WaveformDisplay({ currentTime, duration }: { currentTime: number; duration: number }) {
   const bars = Array.from({ length: 60 }, (_, i) => {
