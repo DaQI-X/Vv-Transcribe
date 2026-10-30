@@ -289,4 +289,28 @@ describe('判据：写日志文件只有 logger 这一处', () => {
     }
     expect(holders).toEqual(['electron/main/services/logger.ts'])
   })
+
+  /**
+   * #284 把主进程最后 40 处裸 `console.*` 收进 logger 之后，这里钉住「不再回来」：
+   * console 这个口在 redactEntry 之外，调用点写什么就是什么——密钥、用户文稿、音频全路径都会
+   * 以原文出去。logger.ts 里那 8 处是它自己的两个口：consoleLine / errorSync 打的是 compose
+   * 之后的值（已脱敏），init 与写盘失败那几句打的是日志目录自己的路径和 fs 报错，那是给用户
+   * 找日志用的，本来就不是被记录的业务数据。
+   * 判断只看代码行：注释里提一句「以前这里是 console.log」不该把测试弄红。
+   */
+  it('console.* 调用只存在于 logger.ts 的 console 输出口', async () => {
+    const files = await collectTs(join(process.cwd(), 'electron'))
+    const holders: string[] = []
+    for (const file of files) {
+      const source = await readFile(file, 'utf-8')
+      const inCode = source
+        .split('\n')
+        .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+        .join('\n')
+      if (/console\.(log|warn|error|info|debug|trace|table)\(/.test(inCode)) {
+        holders.push(file.replace(`${process.cwd()}/`, ''))
+      }
+    }
+    expect(holders).toEqual(['electron/main/services/logger.ts'])
+  })
 })

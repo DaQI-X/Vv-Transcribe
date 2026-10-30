@@ -20,6 +20,9 @@ import { homedir } from 'node:os'
 import { existsSync, readdirSync } from 'node:fs'
 import { app } from 'electron'
 import { loadSettings, normalizeLocalModel } from './settingsService'
+import { logger } from './logger'
+
+const TAG = 'ASRService'
 
 const ASR_PORT = 8000
 const ASR_URL = `http://localhost:${ASR_PORT}`
@@ -201,7 +204,7 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
     if (Number.isInteger(ppid) && ppid > 1 && (await isOurEngine(ppid))) targets.push(ppid)
   }
 
-  console.warn('[ASR Service] Reaping leftover engine processes:', targets.join(', '))
+  logger.warn(TAG, 'Reaping leftover engine processes', { pids: targets.join(', ') })
   for (const pid of targets) {
     if (process.platform === 'win32') {
       spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
@@ -221,6 +224,36 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
   return 'still-held'
 }
 
+/**
+ * 引擎两条管道的内容按行分级，不再一刀切。
+ *
+ * 「stderr 全落 WARN」是把警告埋进自己的噪声里：本机一次正常启动，stderr 上就是 4 条
+ * uvicorn 自己打了 `INFO:` 前缀的起停行（Started server process / Waiting for application
+ * startup / Application startup complete / Uvicorn running），停机时再来一条。
+ * `ERROR:` 与 traceback 落 ERROR；uvicorn 的 `INFO:` 与引擎用 `[ASR] ` 前缀写的横幅落 INFO；
+ * 认不出前缀的一律保持 WARN——本机停机时那句 resource_tracker 的 UserWarning 就收在这里，
+ * 宁可吵，不吞。
+ *
+ * 走 logger 而不只是挑级别，还多了一道脱敏：`[ASR] Transcribing: <audio_path>` 打的是提取出的
+ * wav 全路径，本机实测落盘时已经收成文件名。
+ *
+ * 一个别当证据看的限度：引擎那句 print 走 stdout，而 Python 在非 tty 下按块缓冲。本机一次
+ * 31 秒的转写里，stdout 只有 `[ASR] Transcribing: ...` 进了盘，`Loading Whisper model` 和
+ * `Transcription completed` 直到引擎被终止都没露面（整份 app.log 里这三条各 0 次），那句
+ * 启动横幅也是攒到 /health 握手前 4 毫秒才涌出。想拿到「引擎自己说它加载完了」，得先让
+ * 引擎按行 flush，那是 python-asr 那侧的事。
+ */
+function logSidecarOutput(raw: string): void {
+  for (const line of raw.split('\n')) {
+    const body = line.trim()
+    if (!body) continue
+    if (/^ERROR:/.test(body) || /^Traceback \(most recent call last\)/.test(body)) logger.error(TAG, body)
+    else if (/^\[ASR\] Error:/.test(body)) logger.error(TAG, body)
+    else if (/^INFO:/.test(body) || /^\[ASR\] /.test(body)) logger.info(TAG, body)
+    else logger.warn(TAG, body)
+  }
+}
+
 /** 轮询 health 接口，等待本次拉起的 ASR 服务就绪 */
 async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'> {
   const start = Date.now()
@@ -231,11 +264,11 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
     const info = await probeHealth()
     if (info) {
       if (info.boot_id === bootId && info.protocol === ASR_PROTOCOL) {
-        console.log('[ASR Service] Ready')
+        logger.info(TAG, 'Engine ready', { model: info.model || 'not loaded yet' })
         return 'ready'
       }
       if (++foreignAnswers >= FOREIGN_ANSWER_LIMIT) {
-        console.warn('[ASR Service] Port answered by a service that is not ours', {
+        logger.warn(TAG, 'Port answered by a service that is not ours', {
           protocol: info.protocol,
           bootIdMatch: info.boot_id === bootId,
         })
@@ -255,12 +288,16 @@ export async function startASRService(): Promise<boolean> {
 
   if (!existsSync(binaryPath)) {
     asrError = '本地转写引擎文件缺失，请重新安装 Vv Transcribe 后再试'
-    console.warn(`[ASR Service] Binary not found at ${binaryPath}, local ASR unavailable`)
+    logger.warn(TAG, 'Engine binary missing', {
+      binary: basename(binaryPath),
+      devMode: !!process.env.VITE_DEV_SERVER_URL,
+      arch: process.arch,
+    })
     return false
   }
 
   if (asrProcess) {
-    console.log('[ASR Service] Already running')
+    logger.info(TAG, 'Engine already running', { ready: asrReady })
     return asrReady
   }
 
@@ -268,20 +305,24 @@ export async function startASRService(): Promise<boolean> {
   // 但它很可能只是上一次强杀留下的残尸，所以先试着收掉，收不掉才把问题推给用户
   const resident = await probeHealth()
   if (resident) {
-    console.warn('[ASR Service] Port', ASR_PORT, 'answered before spawn, trying to reap it', resident)
+    logger.warn(TAG, 'Port answered before spawn, trying to reap it', {
+      protocol: resident.protocol,
+      model: resident.model || 'not loaded',
+      bootIdMatch: resident.boot_id === bootId,
+    })
     const reaped = await reapForeignEngine()
     if (reaped !== 'cleared') {
       asrError =
         reaped === 'not-ours'
           ? '8000 端口被其他程序占用，本地转写无法启动，请关闭占用该端口的程序后重新启动'
           : '上一代本地转写服务未能自动清理，请在活动监视器中结束 vv-asr-server 进程后重新启动 Vv Transcribe'
-      console.warn('[ASR Service] Port', ASR_PORT, 'still occupied after reap:', reaped)
+      logger.warn(TAG, 'Port still occupied after reap', { port: ASR_PORT, outcome: reaped })
       return false
     }
-    console.log('[ASR Service] Port freed by reaping leftover engine')
+    logger.info(TAG, 'Port freed by reaping leftover engine')
   }
 
-  console.log('[ASR Service] Starting:', binaryPath)
+  logger.info(TAG, 'Starting engine', { binary: basename(binaryPath) })
 
   // 换一份身份标识再 spawn：新引擎只会由新 id 认领，重启前留在端口上的残尸
   // 再也过不了握手这道关（见 bootId 上方注释）
@@ -289,11 +330,17 @@ export async function startASRService(): Promise<boolean> {
 
   const ffmpegPath = getFfmpegBinaryPath('ffmpeg')
   const ffprobePath = getFfmpegBinaryPath('ffprobe')
-  console.log('[ASR Service] FFmpeg paths:', { ffmpegPath, ffprobePath })
+  // 只报「有没有导出」：引擎侧那一串「找不到 ffmpeg」的根因就是这两个环境变量没设上，
+  // 至于它们解析到哪一层，AudioProcessor 那几条日志已经说了，重复贴一遍绝对路径也没意义
+  logger.info(TAG, 'FFmpeg env handed to engine', {
+    ffmpeg: !!ffmpegPath,
+    ffprobe: !!ffprobePath,
+  })
 
   const tier = normalizeLocalModel((await loadSettings()).asrLocalModel)
   const modelCached = isModelCached(tier)
-  console.log('[ASR Service] Whisper tier:', tier, '| cached:', modelCached ? 'online check skipped' : 'first run will download')
+  // cached=false 意味着这次启动没给 HF_HUB_OFFLINE=1，首次转写会先去 hf-mirror 拉权重
+  logger.info(TAG, 'Whisper tier', { tier, cached: modelCached })
 
   asrProcess = spawn(binaryPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -312,23 +359,19 @@ export async function startASRService(): Promise<boolean> {
   })
   asrPid = asrProcess.pid ?? null
 
-  asrProcess.stdout?.on('data', (data) => {
-    console.log(`[ASR Service] ${data.toString().trim()}`)
-  })
+  asrProcess.stdout?.on('data', (data) => logSidecarOutput(String(data)))
 
-  asrProcess.stderr?.on('data', (data) => {
-    console.error(`[ASR Service] ${data.toString().trim()}`)
-  })
+  asrProcess.stderr?.on('data', (data) => logSidecarOutput(String(data)))
 
   asrProcess.on('exit', (code, signal) => {
     asrExitInfo = `code=${code} signal=${signal}`
-    console.log(`[ASR Service] Process exited (${asrExitInfo})`)
+    logger.info(TAG, 'Process exited', { exitInfo: asrExitInfo })
     asrProcess = null
     asrReady = false
   })
 
   asrProcess.on('error', (err) => {
-    console.error('[ASR Service] Process error:', err.message)
+    logger.error(TAG, 'Process error', { message: err.message })
     asrProcess = null
     asrReady = false
   })
@@ -344,7 +387,7 @@ export async function startASRService(): Promise<boolean> {
   }
 
   if (!asrReady) {
-    console.error('[ASR Service] Failed to become ready:', outcome, asrExitInfo ?? '')
+    logger.error(TAG, 'Failed to become ready', { outcome, exitInfo: asrExitInfo ?? '' })
     await stopASRService()
     return false
   }
@@ -393,11 +436,11 @@ async function ensureTreeGone(): Promise<void> {
     const info = await probeHealth()
     if (info?.boot_id !== bootId) return
     if (i === 2) {
-      console.warn('[ASR Service] Engine still answering after exit, killing whole process group')
+      logger.warn(TAG, 'Engine still answering after exit, killing whole process group')
       signalAsrTree('SIGKILL')
     }
   }
-  console.warn('[ASR Service] Engine process may still hold port', ASR_PORT)
+  logger.warn(TAG, 'Engine process may still hold port', { port: ASR_PORT })
 }
 
 /** 优雅关闭 Python ASR 服务 */
@@ -408,11 +451,11 @@ export async function stopASRService(): Promise<void> {
     return
   }
 
-  console.log('[ASR Service] Shutting down...')
+  logger.info(TAG, 'Shutting down')
 
   const exited = new Promise<void>((resolve) => {
     const killTimer = setTimeout(() => {
-      console.warn('[ASR Service] Graceful shutdown timed out, killing process group')
+      logger.warn(TAG, 'Graceful shutdown timed out, killing process group')
       signalAsrTree('SIGKILL')
     }, SHUTDOWN_TIMEOUT_MS)
 
@@ -420,7 +463,7 @@ export async function stopASRService(): Promise<void> {
       clearTimeout(killTimer)
       asrProcess = null
       asrReady = false
-      console.log('[ASR Service] Stopped')
+      logger.info(TAG, 'Stopped')
       resolve()
     })
 

@@ -9,6 +9,9 @@
 import { readFile, writeFile, mkdir, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { dictionaryDir } from './userDataStore'
+import { logger } from './logger'
+
+const TAG = 'Dictionary'
 
 interface DictionaryData {
   words: Map<string, string>
@@ -73,7 +76,8 @@ async function loadDictionaryFile(filePath: string): Promise<Map<string, string>
       }
     }
   } catch (error) {
-    console.error(`Failed to load dictionary file ${filePath}:`, error)
+    // 路径原样交出去：脱敏那一步把它收成文件名（#123 那种「调用点自己记得写 basename」在这里不再需要）
+    logger.error(TAG, 'Failed to load dictionary file', { file: filePath, error })
   }
   return map
 }
@@ -94,7 +98,7 @@ async function initializeFromBuiltin(): Promise<void> {
 
   dictionaryCache = { words, idioms }
   currentVersion = versionInfo?.version || '1.0.0'
-  console.log(`[Dictionary] Loaded builtin v${currentVersion}: ${words.size} words, ${idioms.size} idioms`)
+  logger.info(TAG, 'Loaded builtin dictionary', { version: currentVersion, words: words.size, idioms: idioms.size })
 }
 
 async function initializeFromUpdate(): Promise<boolean> {
@@ -117,7 +121,8 @@ async function initializeFromUpdate(): Promise<boolean> {
 
   dictionaryCache = { words, idioms }
   currentVersion = versionInfo.version
-  console.log(`[Dictionary] Loaded updated v${currentVersion} (commit: ${versionInfo.commitHash.slice(0, 7)}): ${words.size} words, ${idioms.size} idioms`)
+  // 版本号本身就是 commit 短哈希（见下面写入 version.json 那一段），不必再重复一遍 commit
+  logger.info(TAG, 'Loaded updated dictionary', { version: currentVersion, words: words.size, idioms: idioms.size })
   return true
 }
 
@@ -237,10 +242,10 @@ export async function downloadUpdate(): Promise<{ success: boolean; error?: stri
     dictionaryCache = null
     await initDictionary()
 
-    console.log(`[Dictionary] Updated to commit ${latestCommit.slice(0, 7)}`)
+    logger.info(TAG, 'Dictionary updated', { commit: latestCommit.slice(0, 7) })
     return { success: true }
   } catch (error) {
-    console.error('[Dictionary] Failed to download update:', error)
+    logger.error(TAG, 'Failed to download dictionary update', { error })
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
   }
 }

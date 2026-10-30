@@ -6,6 +6,9 @@
 import { basename } from 'node:path'
 import type { ASRModelInfo, ASRProvider, ASRSegment, ASRProgress, ASRStage } from './types'
 import { toSimplified } from './simplifyChinese'
+import { logger } from '../logger'
+
+const TAG = 'LocalASR'
 
 const PYTHON_ASR_URL = 'http://localhost:8000'
 
@@ -16,7 +19,7 @@ const PYTHON_ASR_URL = 'http://localhost:8000'
  */
 function explainLocalFailure(detail: string, stage: string | null, modelInfo: ASRModelInfo | null): string {
   if (stage !== 'loading_model') return detail || '本地转写失败'
-  console.error('[LocalASR] Whisper model load failed:', detail)
+  logger.error(TAG, 'Whisper model load failed', { detail })
   const size = modelInfo?.weightsMb ? `（${modelInfo.tier} 档约 ${modelInfo.weightsMb}MB）` : ''
   return (
     `首次使用需要下载语音模型${size}，这一步没有完成。` +
@@ -38,7 +41,13 @@ export class LocalASRProvider implements ASRProvider {
       })
       return response.ok
     } catch (err) {
-      console.warn('[LocalASR] Python service not available:', err)
+      // 只记 message 的话盘上永远是那句 'fetch failed'；真原话在 cause 上（本机实测端口无人
+      // 监听时 cause.code=ECONNREFUSED 而 cause.message 是空串，两处都得读）
+      const cause = err instanceof Error ? (err.cause as { code?: string; message?: string } | undefined) : undefined
+      logger.warn(TAG, 'Python service not available', {
+        message: err instanceof Error ? err.message : String(err),
+        cause: cause ? `${cause.code ?? ''} ${cause.message ?? ''}`.trim() : undefined,
+      })
       return false
     }
   }
@@ -63,8 +72,8 @@ export class LocalASRProvider implements ASRProvider {
     options.onProgress?.({ percent: 10 })
 
     const tier = options.localModel || 'base'
-    console.log('[LocalASR] Calling Python ASR service:', {
-      name: basename(audioFilePath),
+    logger.info(TAG, 'Calling Python ASR service', {
+      file: basename(audioFilePath),
       language: options.language,
       model: tier,
     })
@@ -159,7 +168,7 @@ export class LocalASRProvider implements ASRProvider {
     // 没收到 done 就断流说明服务中途挂了，把半截结果当成功返回比报错更糟
     if (!completed) throw new Error('本地转写服务中断，结果不完整')
 
-    console.log('[LocalASR] Transcription completed, segments:', segments.length)
+    logger.info(TAG, 'Transcription completed', { segments: segments.length })
     options.onProgress?.({ percent: 100 })
 
     return segments

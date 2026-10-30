@@ -8,6 +8,9 @@ import type { ASRSegment, ASROptions, ASRProgress } from './types'
 import { CloudASRProvider } from './cloudASR'
 import { LocalASRProvider } from './localASR'
 import { getASRServiceStatus } from '../asrServiceManager'
+import { logger } from '../logger'
+
+const TAG = 'ASRManager'
 
 let localProvider: LocalASRProvider | null = null
 
@@ -45,18 +48,23 @@ export async function runTranscription(
   let cloudError: string | null = null
 
   if (cloudProvider && (await cloudProvider.isAvailable())) {
-    console.log('[ASR] cloud provider available, trying cloud first...')
+    logger.info(TAG, 'Cloud provider available, trying cloud first')
     try {
       options.onProgress?.({ percent: 2 })
       const segments = await cloudProvider.transcribe(wavPath, options)
-      console.log('[ASR] cloud transcription succeeded')
+      logger.info(TAG, 'Cloud transcription succeeded', { segments: segments.length })
       return { segments, provider: 'cloud' }
     } catch (err) {
       cloudError = err instanceof Error ? err.message : '云端转写失败'
-      console.warn('[ASR] cloud transcription failed, falling back to local:', err)
+      // 只取 message：云端那次失败的 stack 里带的是上传用的临时 wav 路径，对本机排查没别的作用
+      logger.warn(TAG, 'Cloud transcription failed, falling back to local', { message: cloudError })
     }
   } else {
-    console.log('[ASR] cloud not selected or unavailable (provider=%s), using local transcription', config.provider)
+    // provider 是设置里的「转写模式」，用户以为自己选了云端时这一条就能看出是没选还是没配 Key
+    logger.info(TAG, 'Cloud not selected or unavailable, using local transcription', {
+      provider: config.provider,
+      hasApiKey: !!config.apiKey,
+    })
   }
 
   const status = getASRServiceStatus()
@@ -69,7 +77,7 @@ export async function runTranscription(
     )
   }
 
-  console.log('[ASR] using local Whisper model, tier=%s', config.localModel || 'base')
+  logger.info(TAG, 'Using local Whisper model', { tier: config.localModel || 'base' })
   const local = getLocalProvider()
   // 档位来自设置的 asrLocalModel，不是 asrModel：后者是云端模型名，用户填的是 API 服务商的型号
   const segments = await local.transcribe(wavPath, { ...options, localModel: config.localModel as string | undefined })

@@ -16,7 +16,10 @@ import { runTranscription } from '../services/asr/asrManager'
 import { restartLocalEngine } from '../services/asrServiceManager'
 import { getASRConfig } from '../services/settingsService'
 import type { ASRModelInfo, ASRSegment, ASRStage } from '../services/asr/types'
+import { logger } from '../services/logger'
 import { failOkError, ipcHandle } from './guard'
+
+const TAG = 'ASRJob'
 
 /** 活跃的转写任务映射表，jobId → 任务状态 */
 interface TranscriptionState {
@@ -69,13 +72,13 @@ export function registerASRHandlers() {
       }
 
       try {
-        console.log('[ASR] start job:', jobId, 'file:', basename(filePath))
+        logger.info(TAG, 'Start job', { jobId, file: basename(filePath), language: options?.language ?? 'zh' })
         sendProgress(0)
         // 界面一次只放一条转写：开工就把上一份素材的临时媒体回收掉，本次这份留着给播放器回放
         releaseMediaSessionsExcept(options?.mediaSessionId ?? null)
 
         const extractResult = await extractAudio(filePath)
-        console.log('[ASR] audio extracted for job:', jobId)
+        logger.info(TAG, 'Audio extracted', { jobId })
         await dropCookies()
         const state = activeJobs.get(jobId)
         if (state) state.tempDir = extractResult.tempDir
@@ -83,7 +86,8 @@ export function registerASRHandlers() {
         sendProgress(5)
 
         const config = await getASRConfig()
-        console.log('[ASR] config:', { provider: config.provider, hasApiKey: !!config.apiKey })
+        // 只报模式与「有没有 Key」这两个布尔：apiKey 本身和它的长度都不能进日志
+        logger.info(TAG, 'Transcription config', { provider: config.provider, hasApiKey: !!config.apiKey })
 
         const result = await runTranscription(extractResult.wavPath, config, {
           language: options?.language ?? 'zh',
@@ -98,11 +102,16 @@ export function registerASRHandlers() {
         activeJobs.delete(jobId)
 
         sendProgress(100)
-        console.log('[ASR] job completed:', jobId, 'provider:', result.provider, 'segments:', result.segments.length)
+        logger.info(TAG, 'Job completed', { jobId, provider: result.provider, segments: result.segments.length })
 
         return { jobId, success: true, segments: result.segments, provider: result.provider }
       } catch (err) {
-        console.error('[ASR] job failed:', jobId, err)
+        // 取消是用户按的，不是故障：canceled 标出来，读日志的人才不会把它当成一次转写失败找上门
+        logger.error(TAG, 'Job failed', {
+          jobId,
+          message: err instanceof Error ? err.message || err.name : String(err),
+          canceled: signal.signal.aborted,
+        })
         // 提取阶段就失败、或中途被取消：cookies 一样要删，媒体留着（界面上的转写结果还在，
         // 这份媒体会在下次开工或应用退出时被回收，不会一直摊在 /tmp）
         await dropCookies()
