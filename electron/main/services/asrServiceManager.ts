@@ -237,11 +237,11 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
  * 走 logger 而不只是挑级别，还多了一道脱敏：`[ASR] Transcribing: <audio_path>` 打的是提取出的
  * wav 全路径，本机实测落盘时已经收成文件名。
  *
- * 一个别当证据看的限度：引擎那句 print 走 stdout，而 Python 在非 tty 下按块缓冲。本机一次
- * 31 秒的转写里，stdout 只有 `[ASR] Transcribing: ...` 进了盘，`Loading Whisper model` 和
- * `Transcription completed` 直到引擎被终止都没露面（整份 app.log 里这三条各 0 次），那句
- * 启动横幅也是攒到 /health 握手前 4 毫秒才涌出。想拿到「引擎自己说它加载完了」，得先让
- * 引擎按行 flush，那是 python-asr 那侧的事。
+ * 时间戳现在能按「引擎说出口的那一刻」读（#285）：`python-asr/main.py` 那几句 print 全走带
+ * flush 的 `log()`。改前本机一次 36.40 秒的转写里，三句打印时刻隔着几十秒、落盘时间戳却全同，
+ * 比那句请求晚了 13 分 24 秒；改后同一条链路是 Loading 13:40:46.150 → loaded 13:41:16.379 →
+ * completed 13:41:22.217（与宿主自己那句 `Transcription completed` 只差 1 毫秒）。
+ * 数字与判据见 README「日志只有一个写入口」那条。
  */
 function logSidecarOutput(raw: string): void {
   for (const line of raw.split('\n')) {

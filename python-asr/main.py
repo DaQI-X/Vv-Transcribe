@@ -15,6 +15,7 @@ from typing import Optional, Iterator
 import gc
 import json
 import os
+import sys
 import time
 import subprocess
 import tempfile
@@ -23,6 +24,11 @@ import wave
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 os.environ['HF_HUB_DISABLE_XET'] = '1'
+
+# 宿主用管道接管引擎 stdout，此时 Python 是块缓冲：print 不带 flush，这几句要等缓冲区满了
+# 才成批发出去，app.log 里落的时刻是「送达」而不是「发生」（本机实测同一批行时间戳全同，见 README）
+def log(msg: str):
+    print(msg, file=sys.stdout, flush=True)
 
 app = FastAPI(title="Vv Transcribe ASR Service")
 
@@ -63,11 +69,11 @@ def load_model(name: str):
         loaded_model_name = ""
         gc.collect()
 
-    print(f"[ASR] Loading Whisper model '{name}' (first run downloads ~{MODEL_WEIGHTS_MB[name]}MB)...")
+    log(f"[ASR] Loading Whisper model '{name}' (first run downloads ~{MODEL_WEIGHTS_MB[name]}MB)...")
     from faster_whisper import WhisperModel
     model = WhisperModel(name, device="cpu", compute_type="int8")
     loaded_model_name = name
-    print(f"[ASR] Model loaded successfully: {name}")
+    log(f"[ASR] Model loaded successfully: {name}")
 
 def convert_to_16k_wav(input_path: str) -> str:
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -150,12 +156,12 @@ def _transcribe_events(audio_path: str, language: Optional[str], model_name: str
             })
 
         elapsed = time.time() - started
-        print(f"[ASR] Transcription completed in {elapsed:.2f}s, {count} segments")
+        log(f"[ASR] Transcription completed in {elapsed:.2f}s, {count} segments")
         yield _event({"type": "done", "segments": count, "elapsed": round(elapsed, 2)})
 
     except Exception as e:
         # 响应头早已发出（200 + 流），失败只能作为事件下发，由上层转成用户可见的报错
-        print(f"[ASR] Error: {e}")
+        log(f"[ASR] Error: {e}")
         yield _event({"type": "error", "detail": str(e), "stage": stage})
     finally:
         if wav_path and os.path.exists(wav_path):
@@ -174,7 +180,7 @@ def transcribe(request: TranscribeRequest):
             detail=f"Unsupported model '{tier}', expected one of: {', '.join(sorted(MODEL_WEIGHTS_MB))}",
         )
 
-    print(f"[ASR] Transcribing: {request.audio_path} (language: {request.language}, model: {tier})")
+    log(f"[ASR] Transcribing: {request.audio_path} (language: {request.language}, model: {tier})")
     # 模型加载与推理都在生成器里做：响应头立刻发出，进度才能逐句流回宿主
     return StreamingResponse(
         _transcribe_events(request.audio_path, request.language, tier),
@@ -201,5 +207,5 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     import uvicorn
-    print("[ASR] Starting Vv Transcribe ASR service on http://localhost:8000")
+    log("[ASR] Starting Vv Transcribe ASR service on http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
