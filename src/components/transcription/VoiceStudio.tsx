@@ -22,6 +22,7 @@ import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
+import { formatBytes } from '@/utils/formatBytes'
 import {
   LOCAL_TTS_ENGINE_OPTIONS,
   localTtsEngineCaveat,
@@ -37,12 +38,6 @@ function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-}
-
-function formatBytes(bytes: number): string {
-  return bytes >= 1024 * 1024
-    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
-    : `${Math.max(1, Math.round(bytes / 1024))} KB`
 }
 
 /** file:// 前缀与播放器同源（依赖 webSecurity: false，见 AudioPlayer） */

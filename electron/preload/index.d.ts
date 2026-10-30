@@ -272,6 +272,8 @@ export interface ConnectionTestValues {
 }
 
 export interface ElectronAPI {
+  /** preload 里取的 `process.platform`（darwin / win32 / linux / …），窗口那侧的 hiddenInset 看的就是它 */
+  platform: string
   getDroppedFilePath: (file: File) => string
   selectFile: () => Promise<string | null>
   getFileMetadata: (filePath: string) => Promise<FileMetadata | null>

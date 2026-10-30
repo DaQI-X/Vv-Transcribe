@@ -9,6 +9,7 @@ import { Play, Pause, Volume2 } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
+import { formatBytes } from '@/utils/formatBytes'
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -183,7 +184,7 @@ export function AudioPlayer() {
 
   if (!filePath) return null
 
-  const sizeMB = fileSize ? (fileSize / (1024 * 1024)).toFixed(1) : '0'
+  const size = formatBytes(fileSize ?? 0)
   const totalDuration = duration || fileDuration || 0
 
   return (
@@ -200,7 +201,7 @@ export function AudioPlayer() {
         </div>
         <div className="audio-player__file-info">
           <span className="audio-player__file-name">{fileName}</span>
-          <span className="audio-player__file-meta">{sizeMB} MB · {formatTime(totalDuration)}</span>
+          <span className="audio-player__file-meta">{size} · {formatTime(totalDuration)}</span>
         </div>
       </div>
 

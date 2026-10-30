@@ -12,6 +12,7 @@ import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { frontendLogger } from '@/utils/logger'
 import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
+import { formatBytes } from '@/utils/formatBytes'
 import { StudioTabs } from './StudioTabs'
 
 /** 链接这条链路的状态机：input（还没解析）→ resolving → ready（二选一）→ downloading */
@@ -45,13 +46,9 @@ interface MediaProgress {
   eta: string | null
 }
 
-/** 体积：视频可能是几个 GB，只到 MB 的换算会把 3.4GB 写成 3481.6MB */
-function formatSize(bytes: number | null): string {
-  if (bytes === null) return '大小未知'
-  if (bytes < 1024) return `${bytes} B`
-  const mb = bytes / (1024 * 1024)
-  if (mb < 1024) return `${mb.toFixed(1)} MB`
-  return `${(mb / 1024).toFixed(2)} GB`
+/** 站点可能不报某一档的体积，这时按钮上要说「大小未知」，不能拿 0B 冒充一个已知的小数 */
+function sizeLabel(bytes: number | null): string {
+  return bytes === null ? '大小未知' : formatBytes(bytes)
 }
 
 function formatDuration(seconds: number | null): string {
@@ -537,7 +534,7 @@ export function FileUploader() {
                 <button className="media-choice-btn media-choice-btn--primary" onClick={handleTranscribeAudio}>
                   <AudioLines size={14} />
                   <span>转写音频</span>
-                  <span className="media-choice-btn__size">{formatSize(media.info.audioApproxBytes)}</span>
+                  <span className="media-choice-btn__size">{sizeLabel(media.info.audioApproxBytes)}</span>
                 </button>
 
                 {media.info.videoOptions.length > 0 ? (
@@ -549,7 +546,7 @@ export function FileUploader() {
                     >
                       {media.info.videoOptions.map((opt) => (
                         <option key={String(opt.height)} value={String(opt.height)}>
-                          {opt.label} · {formatSize(opt.approxBytes)}
+                          {opt.label} · {sizeLabel(opt.approxBytes)}
                         </option>
                       ))}
                     </select>

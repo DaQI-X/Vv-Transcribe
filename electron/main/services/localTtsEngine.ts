@@ -26,6 +26,8 @@ import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { logger } from './logger'
 import { componentsDir } from './userDataStore'
 import { UPSTREAM_MODEL_SOURCES, hasInAppModelDownload, upstreamTotalBytes } from './ttsModelUpstream'
+// 相对路径而非 @/ 别名：主进程这条 build 链没有配别名，用 @/ 只有打包时才炸，tsc 却是过的
+import { formatBytes } from '../../../src/utils/formatBytes'
 
 const TAG = 'LocalTTS'
 
@@ -284,7 +286,9 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
  * 免得同一个数字在三处各写一遍、改的时候只改对一处。
  * 出来的是一个名词短语「VITS 的模型（约 135.5MB）」，调用方直接接在动词后面，
  * 不再出现「缺 sherpa-onnx-vits-zh-ll 的模型约 135.5MB」这种要用户自己翻译的说法。
- * 单位按 1000 进位（与界面的 formatBytes 同一把尺）：数字只能算自钉死的指纹表——
+ * 单位走 src/utils/formatBytes.ts（1000 进位）：下载引导、按需组件列表、关于页里的体积都出自
+ * 同一个函数，不再一处按 1000、一处按 1024。
+ * 数字只能算自钉死的指纹表——
  * 表里的字节数变了，这句话跟着变，不会再出现「129MB」和「135.5MB」并排。
  * 两档都钉了表（VITS 2026-10-28 / 135,454,939 字节，Kokoro 2026-10-29 / 426,573,262 字节），
  * 所以底下那个「没钉表」的分支本机走不到；真加了第三档时它说「不知道」，不拿另一档的数冒充。
@@ -293,7 +297,7 @@ export function modelSizeHint(engine: LocalTtsEngineId): string {
   const name = COMPONENT_ROW_TITLES.models[engine].name
   const source = UPSTREAM_MODEL_SOURCES[engine]
   if (!source) return `${name} 的模型（这一档本版还没钉体积）`
-  return `${name} 的模型（约 ${(upstreamTotalBytes(source) / 1e6).toFixed(1)}MB）`
+  return `${name} 的模型（约 ${formatBytes(upstreamTotalBytes(source))}）`
 }
 
 /**

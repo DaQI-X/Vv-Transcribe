@@ -55,6 +55,7 @@ import {
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import { openUserDataDirectory } from '@/utils/userData'
 import type { KeyStatus } from '@/utils/readiness'
+import { formatBytes } from '@/utils/formatBytes'
 
 interface SettingsValues {
   asrProvider: string
@@ -181,13 +182,6 @@ const YTDLP_SOURCE_LABEL: Record<YtDlpLocal['source'], string> = {
   bundled: '安装包内置',
   system: '本机安装的 yt-dlp',
   path: '系统 PATH 上的 yt-dlp',
-}
-
-/** 字节数只显示实测值，不四舍五入成「约 40MB」这种谁都对不上的说法；不到 1MB 的别说成 0.0MB */
-function formatBytes(bytes: number): string {
-  return bytes >= 1e6
-    ? `${(bytes / 1e6).toFixed(1)}MB`
-    : `${Math.max(1, Math.round(bytes / 1e3))}KB`
 }
 
 interface SettingsModalProps {

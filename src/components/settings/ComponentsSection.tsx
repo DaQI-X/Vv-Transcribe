@@ -10,7 +10,7 @@
  *   界面只印 id/title/hint，未知 id 到不了主进程。
  * - 版本与体积谁说了算看来源：钉了上游指纹的模型不读清单，打开这一栏就答得出「未安装，下载约 135.5MB」；
  *   引擎那一条要等用户点「检查清单」才有远端版本，没查过时那两位是 null，界面就说「还没和清单对过」，
- *   不拿 0 冒充已知。体积数字只有一处算法（主进程按表内字节数报，界面按 1000 进位显示），
+ *   不拿 0 冒充已知。体积数字只有一处算法（主进程按表内字节数报，界面走 utils/formatBytes.ts），
  *   所以组件行和提示语不会出现「129MB」与「135.5MB」并排这种同一份东西两个数。
  * - 下载体积的分母可能是 0（清单没写 bytes），这时只显示已下载的字节数，不给假百分比。
  */
@@ -19,6 +19,7 @@ import { Download, RefreshCw, Square, Trash2 } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import type { ComponentPhase, ComponentProgress, ComponentResult, ComponentState } from '@/types/component'
+import { formatBytes } from '@/utils/formatBytes'
 
 /** 阶段名按主进程真正在做的事分三种说；「下载中 30%」套在解压上是骗人 */
 const PHASE_LABEL: Record<ComponentPhase, string> = {
@@ -32,14 +33,6 @@ const ACTION_LABEL: Record<ComponentState['action'], string> = {
   update: '更新',
   repair: '重新下载',
   none: '',
-}
-
-/** 字节数只显示实测值，和关于页其余地方同一口径 */
-function formatBytes(bytes: number): string {
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)}GB`
-  return bytes >= 1e6
-    ? `${(bytes / 1e6).toFixed(1)}MB`
-    : `${Math.max(1, Math.round(bytes / 1e3))}KB`
 }
 
 /**

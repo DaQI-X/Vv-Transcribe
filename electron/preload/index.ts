@@ -43,6 +43,13 @@ interface VoiceProgressEvent {
 }
 
 const api = {
+  /**
+   * 平台标识直接带过来，不走 IPC：创建窗口时 `titleBarStyle: 'hiddenInset'` 看的也是这一个值
+   * （`electron/main/index.ts`），界面要避让的红绿灯在不在场，得和那个决定同源。
+   * 渲染层自己嗅 `navigator.userAgent` 也能猜，但猜错了没人报错——同一类误判在开屏页上已经
+   * 赔过一次（那条改成主进程判定，见 README「开屏动画」）。
+   */
+  platform: process.platform,
   getDroppedFilePath: (file: File) => webUtils.getPathForFile(file),
   selectFile: () => ipcRenderer.invoke('dialog:selectFile'),
   getFileMetadata: (filePath: string) => ipcRenderer.invoke('file:getMetadata', filePath),

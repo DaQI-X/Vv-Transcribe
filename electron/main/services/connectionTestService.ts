@@ -30,6 +30,9 @@ import {
 import { hasActiveTTSSynthesis } from './ttsService'
 import { engineBinaryInManifest } from './componentService'
 import { DEFAULT_PROMPT } from './ai/openaiCompatible'
+// 相对路径而非 @/ 别名：主进程这条 build 链（vite.config.ts 里 electron 那两项）没有配别名，
+// 用 @/ 会在打包时才炸，tsc 却是过的
+import { formatBytes } from '../../../src/utils/formatBytes'
 
 export type TestLevel = 'pass' | 'warn' | 'fail'
 
@@ -137,9 +140,14 @@ function formatLatency(ms: number): string {
   return ms < 1000 ? `${Math.max(10, Math.round(ms / 10) * 10)} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`
 }
 
-/** 自检产物的体积：两档共用一句话，0 字节在上面已经被拦成失败了 */
+/**
+ * 自检产物的体积：两档共用一句话，0 字节在上面已经被拦成失败了。
+ * 尺子用 src/utils/formatBytes.ts 那一把（1000 进位），和界面「按需组件」「关于」里念出来的体积
+ * 同源。以前这里自己按 1024 除一遍，结果是同一份产物在自检弹窗里和在设置页里数字对不上——
+ * 用户只会当成应用自己不清楚自己在说什么。
+ */
 function audioSize(bytes: number): string {
-  return `${Math.max(1, Math.round(bytes / 1024))} KB 音频`
+  return `${formatBytes(bytes)} 音频`
 }
 
 /** 校验地址是否可作为请求前缀；返回 null 表示通过，否则返回该改什么 */

@@ -23,6 +23,14 @@ const SPLASH_DONE_KEY = 'vv_splash_done'
 type AppState = 'loading' | 'ready' | 'error'
 
 /**
+ * 首帧之前把平台写到 <html> 上：`.harder_top` 的左留白要按红绿灯在不在场取值
+ * （见 index.css 的 `--header-pad-left`），而这件事只能由主进程那侧的事实决定——preload 带过来的
+ * `process.platform` 和创建窗口时用的 `titleBarStyle` 是同一个来源。写在模块作用域、render 之前，
+ * 晚一步 header 就会先按别的平台的留白画一次再跳位。
+ */
+document.documentElement.dataset.platform = window.electronAPI?.platform ?? 'other'
+
+/**
  * 冷启动由主进程判定并随 URL 下发：应用没被完全杀掉时（macOS 关窗后从 Dock 重开）
  * 新窗口拿到的是 cold=0，不该重放动画。
  * sessionStorage 只用来挡同一窗口内的手动刷新，它随窗口销毁自动清空，

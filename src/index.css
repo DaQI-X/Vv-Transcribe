@@ -73,6 +73,27 @@
 }
 
 /* ============================================
+ * header 左留白：按平台取值
+ *
+ * 这个留白只有一个来源：macOS 的红绿灯（交通灯）盖在 header 上，logo 得往右让开 108px。
+ * 别的平台左侧没有窗口按钮，108px 就成了一段说不清来路的空白。
+ * 值由 src/main.tsx 在首帧前写到 <html data-platform> 上，读的是 preload 带过来的
+ * `process.platform`——和 electron/main/index.ts 里那句 `titleBarStyle: 'hiddenInset'` 同一个来源，
+ * 这样「避让的按钮在不在场」和「窗口那侧的决定」不会各说各话。
+ *
+ * 非 mac 取 24px 是为了和 padding-right 对齐（没有东西要避让时，左右对称即可）。
+ * Windows / Linux 上 'hiddenInset' 这一档实际渲染成什么样还没实测，结论随 #235 三平台冒烟给；
+ * 在那之前先不再细分，至少不会出现「照 mac 让出一段谁也不占的地方」。
+ * ============================================ */
+:root {
+  --header-pad-left: 24px;
+}
+
+:root[data-platform="darwin"] {
+  --header-pad-left: 108px;
+}
+
+/* ============================================
  * 全局重置
  * ============================================ */
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -144,7 +165,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border-color);
-  padding-left: 108px; /* 为 macOS 交通灯按钮留出空间 */
+  padding-left: var(--header-pad-left); /* mac 上让开红绿灯，见上方「header 左留白」 */
   padding-right: 24px;
   -webkit-app-region: drag; /* 允许拖拽窗口 */
 }
@@ -2728,7 +2749,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .diff-panel__toggle {
   font-size: 10px;
   width: 12px;
-  color: var(--text-tertiary);
+  color: var(--text-muted);
 }
 
 .diff-panel__count {
@@ -2738,7 +2759,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 .diff-panel__label {
   margin-left: auto;
-  color: var(--text-tertiary);
+  color: var(--text-muted);
   font-size: 11px;
 }
 
@@ -2863,7 +2884,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .diff-panel__no-explanation {
-  color: var(--text-tertiary);
+  color: var(--text-muted);
   font-size: 12px;
   display: flex;
   align-items: center;
@@ -2916,7 +2937,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 .diff-panel__issue-label {
   font-size: 11px;
-  color: var(--text-tertiary);
+  color: var(--text-muted);
   font-weight: 500;
 }
 
@@ -2928,7 +2949,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .diff-panel__issue-arrow {
-  color: var(--text-tertiary);
+  color: var(--text-muted);
   font-size: 12px;
 }
 
@@ -2952,7 +2973,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   background: rgba(27, 85, 245, 0.06);
   border-radius: 4px;
   font-size: 11px;
-  color: var(--text-tertiary);
+  color: var(--text-muted);
 }
 
 /* ===== Dropdown ===== */

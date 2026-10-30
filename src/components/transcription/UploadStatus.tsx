@@ -10,15 +10,10 @@ import { X, Volume2, Loader2, Ban } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-}
+import { formatBytes } from '@/utils/formatBytes'
 
 function UploadingView({ fileName, fileSize }: { fileName: string | null; fileSize: number | null }) {
-  const sizeText = fileSize ? formatFileSize(fileSize) : ''
+  const sizeText = fileSize ? formatBytes(fileSize) : ''
 
   return (
     <div className="status-container">
