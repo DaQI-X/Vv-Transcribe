@@ -349,7 +349,7 @@ export function normalizeTtsEngine(raw: unknown): TtsEngineMode {
  * 让 ttsService 的校验报出「音色得是编号」——在这儿悄悄换成 0，用户会以为自己的选择生效了，
  * 听到的却是另一个人的声音。
  */
-function normalizeLocalVoice(raw: string): string {
+export function normalizeLocalVoice(raw: string): string {
   const trimmed = (raw || '').trim()
   return trimmed || '0'
 }

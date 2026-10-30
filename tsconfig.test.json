@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "module": "esnext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "ignoreDeprecations": "6.0",
+
+    "baseUrl": ".",
+    "paths": {
+      "@electron/*": ["electron/*"]
+    }
+  },
+  /*
+    electron/main/types 也要一起进来：测试通过相对路径把主进程源码拉进本程序，
+    而那些源码依赖的环境声明（fluent-ffmpeg 之类）物理上就住在这个目录里，
+    不列进来会出现「pnpm build 是绿的、pnpm test 类型检查是红的」两套真相。
+  */
+  "include": ["tests", "electron/main/types"]
+}

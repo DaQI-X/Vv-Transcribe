@@ -99,7 +99,7 @@ interface VoiceCallOptions {
  * 档（云端/本地）不在这里覆盖：它决定的是「这次要不要花钱、要不要拉起本机进程」，
  * 属于用户已经保存的长期选择，工作台只改这一档里面的参数。
  */
-function withOverrides(base: TTSConfig, raw: unknown): TTSConfig {
+export function withOverrides(base: TTSConfig, raw: unknown): TTSConfig {
   const input = (raw ?? {}) as VoiceCallOptions
   const model = typeof input.model === 'string' ? input.model.trim() : ''
   const voice = typeof input.voice === 'string' ? input.voice.trim() : ''
@@ -115,7 +115,7 @@ function withOverrides(base: TTSConfig, raw: unknown): TTSConfig {
 }
 
 /** 时间轴字段只能由渲染层给（主进程没有第二份时间轴），这里只做「是不是个数」的最低限度收口 */
-function toSegments(input: unknown): TTSSegmentInput[] {
+export function toSegments(input: unknown): TTSSegmentInput[] {
   if (!Array.isArray(input)) return []
   return input
     .map((item) => {

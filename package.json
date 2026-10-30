@@ -32,6 +32,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -86,7 +88,8 @@
     "typescript-eslint": "^8.59.2",
     "vite": "^8.0.12",
     "vite-plugin-electron": "^1.1.2",
-    "vite-plugin-electron-renderer": "^1.0.0"
+    "vite-plugin-electron-renderer": "^1.0.0",
+    "vitest": "^5.0.5"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

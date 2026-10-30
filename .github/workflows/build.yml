@@ -24,8 +24,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 测试闸门：纯函数单测 + 全量类型检查，ubuntu 上跑，装完依赖十几秒出结果。
+  # 用 needs 卡在三平台矩阵前面是为了「红在便宜的地方」：build job 每个都要装两份 Python venv、
+  # 下 Electron 与 yt-dlp，一个类型错误不该烧那三份时间。
+  # 装依赖的命令与 build job 保持一致（不加 --ignore-scripts、不设跳过二进制的环境变量）：
+  # electron@44 的 install.js 根本没有 SKIP_BINARY 这类开关（本机 grep 过），
+  # 而这类「省时间的变体」一旦在 CI 上炸，报错会和被测代码毫无关系，反而更难查。
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 四个 project（app / node / electron / test）一起过：测试自己也在类型检查范围内，
+      # 否则闸门会慢慢退化成一堆「跑得通但签名早改了」的用例。
+      - name: Type check
+        run: pnpm exec tsc -b --force
+
+      - name: Unit tests
+        run: pnpm test
+
   build:
     name: ${{ matrix.label }}
+    needs: test
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # 统一用 bash，避免 Windows pwsh 对相对可执行路径（venv/Scripts/python.exe）的解析问题
