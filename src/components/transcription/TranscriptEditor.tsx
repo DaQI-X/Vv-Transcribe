@@ -259,8 +259,15 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
       const diffs = new Map<string, SegmentDiff>()
 
       if (mode === 'local') {
-        const results = await api.proofreadLocal(segments.map((s) => ({ id: s.id, text: s.text })))
-        for (const result of results) {
+        const local = await api.proofreadLocal(segments.map((s) => ({ id: s.id, text: s.text })))
+        // 与云端那一支同一个口径：本地校对没跑成不能走到下面那句「未发现需要纠正的内容」——
+        // 那是磁盘/词库读失败，不是这份稿子真的没得改
+        if (local.error) {
+          setStatus('idle')
+          toast.error(local.error)
+          return
+        }
+        for (const result of local.results) {
           const seg = segments.find((s) => s.id === result.segmentId)
           if (!seg || result.corrected === seg.text) continue
           diffs.set(result.segmentId, computeSegmentDiff(seg.text, result.corrected, seg.id))

@@ -204,6 +204,30 @@ export interface ComponentCheckResult {
   components: ComponentState[]
 }
 
+/**
+ * component:list 的返回。`[]` 在这几行界面里等于「还没装」，
+ * 而磁盘读不出来时真实情况是「读不出来」，所以这条自己带一个 error 槽。
+ */
+export interface ComponentListResult {
+  components: ComponentState[]
+  error: string | null
+}
+
+/**
+ * 链接解析组件（yt-dlp）的本机探测结果，包一层信封。
+ * 这一栏界面只显示「读到了什么」，探测本身要 spawn 一次组件进程，是会失败的：
+ * 回 null 会让界面永远停在「读取中...」，回一份 source 齐全的快照是编造来源，
+ * 所以失败时 info=null + error=原因，界面把版本栏停在真话上、同时把原因弹出来。
+ */
+export interface YtDlpLocalSnapshot {
+  info: {
+    version: string | null
+    source: 'updated' | 'bundled' | 'system' | 'path'
+    bytes: number | null
+  } | null
+  error: string | null
+}
+
 export interface TTSSynthesizeResult {
   /** 取消与释放都按这个 id 找主进程自己的记录；一段都没成时为 null */
   jobId: string | null
@@ -252,7 +276,8 @@ export interface ElectronAPI {
   selectFile: () => Promise<string | null>
   getFileMetadata: (filePath: string) => Promise<FileMetadata | null>
   extractAudio: (filePath: string) => Promise<ExtractAudioResult>
-  cleanupTemp: (tempDir: string) => Promise<void>
+  /** 清理临时目录：删不掉时主进程回错误而不抛，界面可以不管，但这一句得能被拿到 */
+  cleanupTemp: (tempDir: string) => Promise<{ ok: boolean; error: string | null }>
   probeAudio: (filePath: string) => Promise<ProbeAudioResult>
   /** 解析链接：只拿标题/时长/清晰度，不落媒体。成功后返回 sessionId，后续步骤都靠它 */
   resolveMedia: (url: string) => Promise<ResolveMediaResult>
@@ -262,9 +287,9 @@ export interface ElectronAPI {
     kind: 'audio' | 'video',
     height?: number | null
   ) => Promise<MediaDownloadResult>
-  cancelMediaDownload: (sessionId: string) => Promise<{ success: boolean }>
+  cancelMediaDownload: (sessionId: string) => Promise<{ success: boolean; error?: string }>
   /** 临时目录归会话管：不释放就等于把 cookies 和几十 MB 媒体留在 /tmp 里 */
-  releaseMediaSession: (sessionId: string) => Promise<{ success: boolean }>
+  releaseMediaSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>
   saveMediaAs: (
     sessionId: string
   ) => Promise<{ success: boolean; savedPath?: string; canceled?: boolean; error?: string }>
@@ -281,7 +306,8 @@ export interface ElectronAPI {
     filePath: string,
     options: unknown
   ) => Promise<{
-    jobId: string
+    /** null＝任务根本没起来（连 jobId 都没生成），界面据此不要拿它去调取消 */
+    jobId: string | null
     success: boolean
     provider?: 'local' | 'cloud'
     /** 云端不逐段推流，整份结果只在这里；本地已经流式填好时界面不再覆盖 */
@@ -289,7 +315,8 @@ export interface ElectronAPI {
     canceled?: boolean
     error?: string
   }>
-  cancelTranscription: (jobId: string) => Promise<void>
+  /** 取消这一步自己不会失败（找不到 jobId 算已跑完）；ok 只在主进程真的炸过时为 false */
+  cancelTranscription: (jobId: string) => Promise<{ ok: boolean; error: string | null }>
   /** 应用内重启本地引擎。转写进行中会被拒绝；最长可能等 60 秒（首次要下载模型） */
   restartLocalEngine: () => Promise<{ ok: boolean; error: string | null }>
 
@@ -324,13 +351,19 @@ export interface ElectronAPI {
     error: string | null
   }>
 
-  proofreadLocal: (segments: Array<{ id: string; text: string }>) => Promise<
-    Array<{
+  /**
+   * 本地校对：逐段返回改后的文本。
+   * 空数组在这条通道里不等于「没发现需要纠正的内容」，所以带 error 槽——读盘失败时
+   * 界面若按 `[]` 显示，说的是句谎（信封与 component:list、ytDlp:getLocal 同一个写法）。
+   */
+  proofreadLocal: (segments: Array<{ id: string; text: string }>) => Promise<{
+    results: Array<{
       segmentId: string
       corrected: string
       changes: Array<{ before: string; after: string; reason: string; dictionaryHint?: string }>
     }>
-  >
+    error: string | null
+  }>
   proofreadExplain: (
     differences: Array<{ original: string; corrected: string; context: string }>
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
@@ -347,7 +380,7 @@ export interface ElectronAPI {
     error: string | null
   }>
   /** 离开配音工作台时回收试听临时目录；漏调也会被启动清扫兜住 */
-  releaseVoicePreview: () => Promise<{ ok: boolean }>
+  releaseVoicePreview: () => Promise<{ ok: boolean; error?: string | null }>
 
   /**
    * 整批配音：逐段合成后由 ffmpeg 铺成一条对齐时间轴的音轨。
@@ -359,21 +392,30 @@ export interface ElectronAPI {
    * 取消：正在飞出去的那次请求不打断，从下一段起不再调用；已成功的片段照常拼。
    * reason 是 'late' 时说明逐段循环已经跑完、现在只剩本地 ffmpeg 在拼轨——这一步没有可拦的东西，
    * 界面要据此把取消入口收起来，不能显示「正在取消…」。
+   * error 非 null 时优先按它说话：那种情况下 reason 只是为了让分支有个落点，不代表这批真的不在了。
    */
-  cancelVoiceJob: (jobId: string) => Promise<{ success: boolean; reason: 'stopped' | 'late' | 'gone' }>
-  /** 成品另存为用户选的位置（走系统保存框，主进程写盘） */
+  cancelVoiceJob: (jobId: string) => Promise<{
+    success: boolean
+    reason: 'stopped' | 'late' | 'gone'
+    error?: string | null
+  }>
+  /** 成品另存为用户选的位置（走系统保存框，主进程写盘）；canceled 缺省＝这一步自己失败了 */
   saveVoiceTrack: (jobId: string) => Promise<{
     success: boolean
-    canceled: boolean
+    canceled?: boolean
     name?: string
-    error: string | null
+    error?: string | null
   }>
   /** 没另存就清空这批时回收整批中间产物（另存成功后同样回收） */
-  releaseVoiceBatch: (jobId: string) => Promise<{ ok: boolean }>
+  releaseVoiceBatch: (jobId: string) => Promise<{ ok: boolean; error?: string | null }>
   onVoiceProgress: (callback: (data: VoiceProgress) => void) => () => void
 
-  /** 本地配音引擎状态快照（只读，不拉起引擎）；engine 传界面当前选中的那个引擎 id */
-  getLocalVoiceStatus: (engine?: string) => Promise<LocalTtsStatus>
+  /**
+   * 本地配音引擎状态快照（只读，不拉起引擎）；engine 传界面当前选中的那个引擎 id。
+   * null＝这一份快照没能读出来（不是「什么都缺」），界面按「还没读到本机组件状态」那一支说话，
+   * 不许照着 false 的 binaryPresent 去说「引擎二进制没下载」。
+   */
+  getLocalVoiceStatus: (engine?: string) => Promise<LocalTtsStatus | null>
   /**
    * 应用内重启本地配音引擎。引擎只取已保存的设置——设置页「点保存才生效」这条口径不在这儿破例。
    * 首次启动要解包，最长可能等两分钟。
@@ -389,7 +431,7 @@ export interface ElectronAPI {
    * 按需组件：只读磁盘在场情况与占用体积，不联网。打开「关于与更新」先吃这一份，
    * 要不要下载由用户点「检查」触发——直连 GitHub 时清单可能要十几秒。
    */
-  listComponents: () => Promise<ComponentState[]>
+  listComponents: () => Promise<ComponentListResult>
   checkComponents: () => Promise<ComponentCheckResult>
   installComponent: (id: string) => Promise<ComponentResult>
   cancelComponentInstall: (id: string) => Promise<{ ok: boolean; error: string | null }>
@@ -398,8 +440,14 @@ export interface ElectronAPI {
   getComponentBusy: () => Promise<{ engineRunning: boolean; synthesizing: boolean }>
   onComponentProgress: (callback: (data: ComponentProgress) => void) => () => void
 
-  lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string }>
-  lookupMultipleWords: (words: string[]) => Promise<Record<string, string>>
+  /** error 非 null 是「查不了」，与 found:false 的「词库里没有这个词」是两句话 */
+  lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string; error?: string | null }>
+  /**
+   * 查不到与查失败都可能是一张空表，所以失败时主进程在表上挂一个 error 键。
+   * 查询词恰好叫 "error" 时这一位会混——这两条 lookup 现在没有界面调用点（释义走主进程本地校对直查），
+   * 真要让界面用它们时先改成 { results, error } 信封。
+   */
+  lookupMultipleWords: (words: string[]) => Promise<Record<string, string> & { error?: string | null }>
   checkDictionaryUpdate: () => Promise<{
     hasUpdate: boolean
     latestCommit?: string
@@ -415,16 +463,19 @@ export interface ElectronAPI {
    * 与 keyEncryptionAvailable，见 SettingsModal 的 KeyStatus。
    * storageProblem 非 null 时说明这份配置不是从磁盘读出来的（解析失败或读不了），
    * 界面必须把这句话原样弹给用户——此时「密钥全是 none」是读失败，不是用户没填。
+   * 整个返回值为 null 是更坏的一档：主进程连脱敏视图都没能给出来（收口后不抛错，见 ipc/guard.ts），
+   * 界面同样不能按「全是 none」显示，得单独说一句。
    */
-  getSettings: () => Promise<Record<string, unknown>>
+  getSettings: () => Promise<Record<string, unknown> | null>
   /**
    * tierRestart：本次保存改了本地档位时的引擎重启结果。
    * busy / failed 时 error 是必须展示给用户的原因——这两种情况下新档位其实还没生效。
    * saveError 非 null 时这次压根没写进磁盘，界面必须留在原状（不许清空 Key 输入框、不许报已保存）。
+   * settings 为 null 是更坏的一档：连脱敏视图都没读出来，界面不许据此把密钥状态标成「全是 none」。
    * 密钥字段按「留空＝不改、null＝清除、非空＝替换」处理，返回值同样是脱敏视图。
    */
   saveSettings: (settings: Record<string, unknown>) => Promise<{
-    settings: Record<string, unknown>
+    settings: Record<string, unknown> | null
     tierRestart: 'not-needed' | 'done' | 'busy' | 'failed'
     error: string | null
     saveError: string | null
@@ -445,18 +496,16 @@ export interface ElectronAPI {
   }>
 
   getAppVersion: () => Promise<string>
+  /** error 非 null 是「没问到新版本」，此时 latestVersion 是空串、hasUpdate 是 false——界面不许据此说「已是最新」 */
   checkAppUpdate: () => Promise<{
     currentVersion: string
     latestVersion: string
     hasUpdate: boolean
     downloadUrl: string
+    error: string | null
   }>
-  /** 本机当前生效的链接解析组件：version 探不到是 null（不要把未知显示成「未知版本」以外的任何说法） */
-  getYtDlpLocal: () => Promise<{
-    version: string | null
-    source: 'updated' | 'bundled' | 'system' | 'path'
-    bytes: number | null
-  }>
+  /** 本机当前生效的链接解析组件；见 YtDlpLocalSnapshot（version 为 null 是探不出来，不是「没装」） */
+  getYtDlpLocal: () => Promise<YtDlpLocalSnapshot>
   checkYtDlpUpdate: () => Promise<{
     ok: boolean
     error: string | null

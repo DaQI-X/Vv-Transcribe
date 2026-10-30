@@ -67,6 +67,8 @@ function describe(s: ComponentState): string {
 
 export function ComponentsSection() {
   const [states, setStates] = useState<ComponentState[] | null>(null)
+  /** 磁盘那一份读不出来时给的原因；不能只留 null，否则这一栏会一直「读取中...」而没人知道为什么 */
+  const [listError, setListError] = useState<string | null>(null)
   const [checking, setChecking] = useState(false)
   /** id → 在跑的阶段进度；不在这里就说明没在下载 */
   const [progress, setProgress] = useState<Record<string, ComponentProgress>>({})
@@ -85,9 +87,13 @@ export function ComponentsSection() {
 
   const refresh = useCallback(async () => {
     if (!api) return
-    const [list, busyNow] = await Promise.all([api.listComponents(), api.getComponentBusy()])
+    const [snapshot, busyNow] = await Promise.all([api.listComponents(), api.getComponentBusy()])
     if (!mounted.current) return
-    setStates(list)
+    setListError(snapshot.error)
+    // 读失败时不回那一份 []：表格里「一个组件都没有」和「磁盘读不出来」是两句话，
+    // 后者只有顶部那一行加 toast 能说清
+    if (snapshot.error === null) setStates(snapshot.components)
+    else toast.error(`按需组件状态读不出来：${snapshot.error}`, 10000)
     setBusy(busyNow)
   }, [api])
 
@@ -133,7 +139,8 @@ export function ComponentsSection() {
     try {
       const result = await api.checkComponents()
       if (!mounted.current) return
-      setStates(result.components)
+      // 清单那一步整个炸了时 components 是空的，不能拿它覆盖已经读到的那一份磁盘状态
+      if (result.ok || result.components.length > 0) setStates(result.components)
       if (!result.ok) {
         // 清单读不通时组件列表仍是有用的那一份，所以只报原因，不假装磁盘也坏了
         toast.error(`检查清单失败：${result.error || '未知原因'}`, 10000)
@@ -254,7 +261,11 @@ export function ComponentsSection() {
           </button>
         )}
         <span style={{ fontSize: 11, color: '#9AA5B8' }}>
-          {states === null ? '读取中...' : `合计占用 ${formatBytes(totalBytes)}`}
+          {states === null
+            ? listError
+              ? '组件状态读不出来'
+              : '读取中...'
+            : `合计占用 ${formatBytes(totalBytes)}`}
         </span>
       </div>
       <span className="settings-form-hint">

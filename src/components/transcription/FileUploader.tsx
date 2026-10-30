@@ -174,11 +174,17 @@ export function FileUploader() {
 
       // 语言以设置里的「转写语言」为准，不再写死中文；同时记进 store，
       // 校对那条分支要靠它判断中文规则是否成立
+      // 读设置失败回的是 null（IPC 收口后不再 reject，见 ipc/guard.ts）：回落 zh 能继续跑，
+      // 但必须说一声——用户明明选过英语，静默按中文转出来的稿子他第一眼看不出问题出在哪一步
       const settings = await api.getSettings()
-      const language = typeof settings.asrLanguage === 'string' && settings.asrLanguage
-        ? settings.asrLanguage
-        : 'zh'
+      const language =
+        typeof settings?.asrLanguage === 'string' && settings.asrLanguage ? settings.asrLanguage : 'zh'
       setAsrLanguage(language)
+      if (settings === null) {
+        frontendLogger.warn('FileUploader', '设置读不出来，本次转写按默认语言处理', { language })
+        // 回落的必然是 zh（设置整份没读到），这句话要说死，别写成「按 ${language}」演成读到了似的
+        toast.info('设置读不出来，本次按默认的中文转写；如果素材不是中文，转完请先检查', 10000)
+      }
 
       frontendLogger.serviceCall('ASR', 'startTranscription', { fileName, language })
       // 带上会话 id：主进程提取完音频就地还会话目录（里面还有 cookies），不用这边记着清
@@ -446,7 +452,9 @@ export function FileUploader() {
     if (!api || !sessionRef.current) return
     setCanceling(true)
     try {
-      await api.cancelMediaDownload(sessionRef.current)
+      const result = await api.cancelMediaDownload(sessionRef.current)
+      // 收口后这条不 reject 了，失败是回值（见 ipc/guard.ts）。不读它，「点了取消还在下」就只能干等
+      if (!result.success) toast.error(result.error || '取消下载失败')
     } finally {
       // 不在这里收尾：downloadMedia 以 canceled 结束时由上面两条链路统一回到「二选一」
       setCanceling(false)

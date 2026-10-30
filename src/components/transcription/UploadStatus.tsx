@@ -171,7 +171,13 @@ export function UploadStatus() {
     }
     setCancelling(true)
     try {
-      await api.cancelTranscription(jobId)
+      const result = await api.cancelTranscription(jobId)
+      // 收口后这条通道不再 reject（见 ipc/guard.ts），失败长成回值里的 ok:false。
+      // 不读它，用户点「取消」看到的只是转圈停了一下，而任务照旧在跑、照旧花钱
+      if (!result.ok) {
+        setCancelling(false)
+        toast.error(result.error || '取消转写失败')
+      }
     } catch (err) {
       setCancelling(false)
       toast.error(err instanceof Error ? err.message : '取消转写失败')

@@ -52,6 +52,7 @@ basic_one/
 │   │   ├── index.ts                   # 入口：建窗、开屏阶段状态、随应用启动/关闭本地引擎
 │   │   ├── types/ffmpeg.d.ts          #   @ffmpeg-installer / @ffprobe-installer 的类型声明
 │   │   ├── ipc/                       # IPC 处理器层（ipc/index.ts 统一注册）
+│   │   │   ├── guard.ts               #   唯一的 ipcMain.handle 调用点：每条通道必须声明自己失败回什么形状
 │   │   │   ├── fileHandlers.ts        #   文件选择/元数据/音频提取/参考稿读取/另存为/打开日志目录
 │   │   │   ├── asrHandlers.ts         #   转写任务：开始、取消、应用内重启引擎、进度推送
 │   │   │   ├── aiHandlers.ts          #   AI 校对、差异解释、参考稿分析
@@ -351,7 +352,9 @@ basic_one/
 
 ### IPC 通道一览
 
-preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层拿不到 `ipcRenderer` 本身。下表是主进程注册的全部 53 条（49 条 `ipcMain.handle` + 4 条主 → 渲染推送）。
+preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层拿不到 `ipcRenderer` 本身。下表是主进程注册的全部 65 条（59 条渲染 → 主的调用 + 6 条主 → 渲染推送；`component:cancel` 与 `component:remove` 合写成一行，所以表里 64 行）。
+
+注册只有一处入口：`ipcHandle(channel, handler, fail)`（`electron/main/ipc/guard.ts`），`ipcMain.handle` 在整个 `electron/` 下只出现在那个文件里——这条由 `tests/ipcGuard.test.ts` 守着。「不跨 IPC 抛错」原先只是两个 handler 文件头上的注释，而收口前 59 条注册里有 40 条函数体连一个 `try` 都搜不到；现在每条通道必须当场声明自己失败回什么形状（没有默认值），任何同步抛出、Promise reject、连失败值都造不出来的情况都收成一趟 `logger.error` 加一个值。统一给一个通用形状是不行的：有的通道回 `[]` 会被界面念成「一个组件都没装」，回 `null` 会让某一栏永远停在「读取中...」——那是谎，不是兜底。日志只记通道名和原因，不记入参（`file:saveText` 的入参是用户的整份文稿）。
 
 | 通道 | 方向 | 说明 |
 |------|------|------|
@@ -399,6 +402,7 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `component:check` | 渲染 → 主 | 取自家组件清单对版本（`components-manifest.json`，两条读法：raw.githubusercontent 直连 → api.github.com contents）。国内直连可能要十几秒，界面得有「检查中...」；取不到清单不等于「已是最新」，会如实报错。两类失败分开说：连不上（网络/超时）只报「读不到、可开加速重试」，下载按钮留着；两个入口都答 404 就顺手记下「这一版没发布清单」，靠清单找包的那个组件（引擎）下一行改说「这个版本没有发布对应的下载包」并收起按钮，钉了上游指纹的两份模型不受牵连 |
 | `component:install` | 渲染 → 主 | 下载并装上一个组件（id 之外的东西全在主进程决定：从哪读、落到哪、要不要解压），进度经 `component:progress` 推回界面。同一组件重复发起会复用前一份任务并接上同一条进度流，连点不会产生两条下载。落点 `userData/components/` |
 | `component:cancel` / `component:remove` | 渲染 → 主 | 取消正在跑的下载 / 删掉已装组件。这个组件没在下载时 `cancel` 直接回错误，不谎报「已取消」 |
+| `component:progress` | 主 → 渲染 | 推 `{ id, phase, done, total }`，`phase` 三态：`download` / `extract` / `verify`。129MB 的模型在慢网里要跑几分钟，`total` 未知时是 0，界面按「不显示百分比」处理，不给假百分比 |
 | `component:busy` | 渲染 → 主 | 回 `{ engineRunning, synthesizing }`：这两种占用分开报——引擎进程还活着有「停止本地配音引擎」可点，一批正在逐段合成则只能等它跑完或去配音页取消，因为在这里停引擎会让剩下的段落全失败 |
 | `dictionary:lookup` | 渲染 → 主 | 查单个词释义。词库现在由主进程在校对/prompt 组装时内部使用，界面暂无调用点 |
 | `dictionary:lookupMultiple` | 渲染 → 主 | 批量查词，同上 |
@@ -471,7 +475,7 @@ pnpm test:watch    # 边改边跑
 
 跑的是 vitest（`vitest.config.ts` 单独一份，不复用 `vite.config.ts`：那份挂着 `vite-plugin-electron`，它的 `onstart` 会在每次跑测试时把应用拉起来）。`electron` 模块由 `tests/setup.ts` 逐个成员给出显式替身——不是 Proxy 兜万能，漏了哪个成员就响亮地失败，免得把真缺陷测成通过。
 
-当前覆盖四块。一是主进程里「收口的纯函数」：配置归一化（接口地址 / 本地档位 / 配音档位 / 音色 / 引擎白名单）与配音单次调用参数（`withOverrides`、`toSegments`）——这些地方的失败方式不是报错，而是「界面显示 A、实际跑的是 B」，正适合用断言钉住，`tests/ttsCallOptions.test.ts` 里那条「引擎空串必须保住设置里那档」就是 2026-10-29 本机试听踩实的 bug 的回归锚。二是 `userData` 这一层本身：`tests/userDataStore.test.ts` 钉路径收口（各处目录都在 userData 下且互不重合、`settings.json` 平铺在根层）与读写机制（四种读盘结局分得清、原子写留下的文件、`.bak` 存的是上一份、备份失败不影响写成功、历史副本按前缀只留最新 keep 份），`tests/settingsSchema.test.ts` 钉迁移链（走链的三种结局、多步顺序、断链判 gap、比本版新的一份字节不动）；这几份都落在真临时目录里（每用例一份 `mkdtemp` + 替身 `app.getPath`），写盘逻辑用 mock 的 `fs` 测等于测了自己骗自己，`safeStorage` 则由一对可逆的假加解密（`fake:` 前缀）替掉，不碰系统密钥库。三是 `settings.json` 的读写端到端（`tests/settingsPersistence.test.ts`）：钉「解不开会留档并说出去」「读不出内容会拦住落盘」「密钥留空＝不改、`null`＝清除」「首次运行不凭空造文件」「旧字段与明文 Key 一次读盘都办完」「v2 的文件读得懂界面但不许写」。迁移链的多步顺序与断链没法靠只有一步的生产注册表证明，所以 `migrateSettingsDocument` 的 target / steps 做成入参。四是崩溃兜底（`tests/crashWatch.test.ts`）：钉每一种 Electron 原因码都落在一句人话上（oom、memory-eviction、integrity-failure 三件事说成一句，人就照着错的那句做）、该静默的那几种真的静默（`clean-exit`、`killed`、开发模式热重载那次 `ERR_ABORTED`），以及「按钮写着重新加载就不能替用户按回车」——点「知道了」不许重载、连拒两次不占用后面那两次机会、60 秒内真重载满两次就改口让人重启应用。重载计数是模块级数组，所以每用例都要 `vi.resetModules()` 加换一份临时目录重灌模块（logger 的路径在构造时算死，换目录必须赶在 import 之前），不然限流那条永远测不准。另有两条钉的是同一件事的两个时刻：崩溃现场必须先落盘再谈界面——常规日志走 `fs/promises`，而 `dialog.showMessageBoxSync` 会把事件循环按住到用户点掉为止，实测那条 ERROR 就是这么丢的；断言因此写在对话框的 mock 里（弹窗还挂着的那一刻读 `app.log` 就该有那一行）。UI 与安装包链路仍由人工冒烟覆盖。
+当前覆盖五块。一是主进程里「收口的纯函数」：配置归一化（接口地址 / 本地档位 / 配音档位 / 音色 / 引擎白名单）与配音单次调用参数（`withOverrides`、`toSegments`）——这些地方的失败方式不是报错，而是「界面显示 A、实际跑的是 B」，正适合用断言钉住，`tests/ttsCallOptions.test.ts` 里那条「引擎空串必须保住设置里那档」就是 2026-10-29 本机试听踩实的 bug 的回归锚。二是 `userData` 这一层本身：`tests/userDataStore.test.ts` 钉路径收口（各处目录都在 userData 下且互不重合、`settings.json` 平铺在根层）与读写机制（四种读盘结局分得清、原子写留下的文件、`.bak` 存的是上一份、备份失败不影响写成功、历史副本按前缀只留最新 keep 份），`tests/settingsSchema.test.ts` 钉迁移链（走链的三种结局、多步顺序、断链判 gap、比本版新的一份字节不动）；这几份都落在真临时目录里（每用例一份 `mkdtemp` + 替身 `app.getPath`），写盘逻辑用 mock 的 `fs` 测等于测了自己骗自己，`safeStorage` 则由一对可逆的假加解密（`fake:` 前缀）替掉，不碰系统密钥库。三是 `settings.json` 的读写端到端（`tests/settingsPersistence.test.ts`）：钉「解不开会留档并说出去」「读不出内容会拦住落盘」「密钥留空＝不改、`null`＝清除」「首次运行不凭空造文件」「旧字段与明文 Key 一次读盘都办完」「v2 的文件读得懂界面但不许写」。迁移链的多步顺序与断链没法靠只有一步的生产注册表证明，所以 `migrateSettingsDocument` 的 target / steps 做成入参。四是崩溃兜底（`tests/crashWatch.test.ts`）：钉每一种 Electron 原因码都落在一句人话上（oom、memory-eviction、integrity-failure 三件事说成一句，人就照着错的那句做）、该静默的那几种真的静默（`clean-exit`、`killed`、开发模式热重载那次 `ERR_ABORTED`），以及「按钮写着重新加载就不能替用户按回车」——点「知道了」不许重载、连拒两次不占用后面那两次机会、60 秒内真重载满两次就改口让人重启应用。重载计数是模块级数组，所以每用例都要 `vi.resetModules()` 加换一份临时目录重灌模块（logger 的路径在构造时算死，换目录必须赶在 import 之前），不然限流那条永远测不准。另有两条钉的是同一件事的两个时刻：崩溃现场必须先落盘再谈界面——常规日志走 `fs/promises`，而 `dialog.showMessageBoxSync` 会把事件循环按住到用户点掉为止，实测那条 ERROR 就是这么丢的；断言因此写在对话框的 mock 里（弹窗还挂着的那一刻读 `app.log` 就该有那一行）。五是 IPC 收口这一层本身（`tests/ipcGuard.test.ts`，10 条）：这一层存在的理由只有一条——「不跨 IPC 抛错」以前只是注释，所以钉的是三种抛出（同步就炸、handler reject、连失败值构造器自己也抛）最后都必须以 resolve 收场，且回的是这条通道自己声明的形状；构造器抛的那条还要求落**两句**日志（一句「通道没跑成」、一句「它的失败形状也没造出来」），只留后者就查不到源头。另外三条钉细节：非 Error 的抛出物转字符串、空 message 的 Error 退回 `name`、两者都拿不到时回一句通用文案；失败值收得到原因**和原始入参**（`proofread:explain` 要按 `differences` 的条数回等长清单，只给原因造不出那个形状）；落盘的载荷键集合恰好等于 `channel` + `message`——判据是键集合而不是「不含某个字符串」，机制自己不往日志里加入参。最后一条是结构判据：递归扫 `electron/` 下的 `.ts`，`ipcMain.handle(` 只许出现在 `guard.ts` 一处，防止下一个通道绕过收口自己注册。UI 与安装包链路仍由人工冒烟覆盖。
 
 闸门位置：`build.yml` 的 `test` job（ubuntu，装依赖 + `tsc -b --force` + `pnpm test`）用 `needs` 卡在三平台矩阵之前，红在这里就不用再花三份构建时间。UI 与安装包链路仍由人工冒烟覆盖（见上面的「开发模式」与下面的「构建打包」），单测不碰。
 

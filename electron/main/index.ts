@@ -3,9 +3,10 @@
  * 负责创建应用窗口、注册 IPC 处理器、设置应用图标和名称
  * 应用启动时自动拉起 Python ASR 服务，退出时优雅关闭
  */
-import { app, BrowserWindow, nativeImage, ipcMain, powerSaveBlocker } from 'electron'
+import { app, BrowserWindow, nativeImage, powerSaveBlocker } from 'electron'
 import { join } from 'node:path'
 import { registerAllHandlers } from './ipc'
+import { ipcHandle } from './ipc/guard'
 import { startASRService, stopASRService, getASRServiceStatus } from './services/asrServiceManager'
 import { stopLocalTtsEngine } from './services/localTtsEngine'
 import { initDictionary } from './services/dictionaryService'
@@ -71,18 +72,36 @@ function asrFailureReason(): string | null {
 }
 
 /** 查询服务就绪状态 */
-ipcMain.handle('app:getServiceReady', () => ({
-  ready: serviceReady,
-  error: serviceError,
-  asrDone: asrTaskDone && getASRServiceStatus().ready,
-  asrError: asrFailureReason(),
-  dictionaryDone: dictionaryTaskDone,
-}))
+ipcHandle(
+  'app:getServiceReady',
+  () => ({
+    ready: serviceReady,
+    error: serviceError,
+    asrDone: asrTaskDone && getASRServiceStatus().ready,
+    asrError: asrFailureReason(),
+    dictionaryDone: dictionaryTaskDone,
+  }),
+  // 开屏页本来就读 result.error 并把这一轮判成失败，所以失败值不用改界面：把原因递过去就行
+  (message) => ({
+    ready: false,
+    error: `读不出服务状态：${message}`,
+    asrDone: false,
+    asrError: message,
+    dictionaryDone: false,
+  })
+)
 
 /** 接收前端日志并写入日志文件 */
-ipcMain.handle('app:log', (_event, entry: any) => {
-  if (entry) {
-    const { level = 'INFO', module = 'Renderer', message, data } = entry
+ipcHandle(
+  'app:log',
+  (_event, entry: unknown) => {
+    if (!entry || typeof entry !== 'object') return
+    const { level = 'INFO', module = 'Renderer', message = '', data } = entry as {
+      level?: string
+      module?: string
+      message?: string
+      data?: unknown
+    }
     if (level === 'ERROR') {
       logger.error(module, message, data)
     } else if (level === 'WARN') {
@@ -92,8 +111,11 @@ ipcMain.handle('app:log', (_event, entry: any) => {
     } else {
       logger.info(module, message, data)
     }
-  }
-})
+  },
+  // 渲染进程这条是 fire-and-forget（void api.log(...)）：原先写盘失败就是一个没人接的 rejection。
+  // 界面拿到失败也做不了什么——「日志写不进去」这件事 guard 已经落进主进程日志了，所以回 undefined
+  () => undefined
+)
 
 /** 创建主窗口，配置 preload 和安全策略 */
 function createWindow() {

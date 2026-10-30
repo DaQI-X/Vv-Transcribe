@@ -151,6 +151,8 @@ interface UpdateInfo {
   latestVersion: string
   hasUpdate: boolean
   downloadUrl: string
+  /** 问不出新版本时的原话；null＝这次真的问到了。不读它就会把「查不到」演成「已是最新版」 */
+  error: string | null
 }
 
 /** 链接解析组件（yt-dlp）的本机状态；version 为 null 是「那个二进制跑不起来或读不出版本」，不是「没装」 */
@@ -158,6 +160,12 @@ interface YtDlpLocal {
   version: string | null
   source: 'updated' | 'bundled' | 'system' | 'path'
   bytes: number | null
+}
+
+/** 探测要 spawn 一次组件进程，这条路是会失败的，所以快照包了一层信封（见 ipc/updateHandlers.ts） */
+interface YtDlpLocalSnapshot {
+  info: YtDlpLocal | null
+  error: string | null
 }
 
 interface YtDlpCheckResult {
@@ -380,7 +388,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   }>({ asr: false, ai: false, tts: false })
   const [restarting, setRestarting] = useState(false)
   const [restartingVoice, setRestartingVoice] = useState(false)
-  const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocal | null>(null)
+  const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocalSnapshot | null>(null)
   const [ytDlpRemote, setYtDlpRemote] = useState<YtDlpCheckResult['remote'] | null>(null)
   const [ytDlpHasUpdate, setYtDlpHasUpdate] = useState(false)
   const [ytDlpChecking, setYtDlpChecking] = useState(false)
@@ -479,7 +487,18 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       let loaded: SettingsValues = DEFAULT_VALUES
       try {
         const saved = await api.getSettings()
-        if (saved && Object.keys(saved).length > 0) {
+        if (saved === null) {
+          // 读失败现在回 null（IPC 收口后不再 reject，见 ipc/guard.ts）。表单会落满默认值，
+          // 用户看着像「磁盘上本来就是这些」，顺手点保存就把真那份盖掉了——这句必须在他动手前说
+          toast.error(
+            '设置读不出来。下面显示的是默认值，先别保存，否则会覆盖磁盘上那份。',
+            15000,
+            {
+              label: '打开数据目录',
+              onClick: () => void openUserDataDirectory(),
+            }
+          )
+        } else if (Object.keys(saved).length > 0) {
           // 密钥字段在返回值里只有状态，三个 Key 输入框永远从空开始（留空＝不修改）
           loaded = {
             ...DEFAULT_VALUES,
@@ -524,9 +543,15 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       setYtDlpLocal(null)
       ;(async () => {
         try {
-          setYtDlpLocal(await api.getYtDlpLocal())
-        } catch {
-          /* ignore */
+          const snapshot = await api.getYtDlpLocal()
+          setYtDlpLocal(snapshot)
+          // 版本栏只会说「读不出来」，原因（多半是那份二进制被系统拦住执行）得靠 toast 才看得到
+          if (snapshot.error) toast.error(`链接解析组件读不出来：${snapshot.error}`, 10000)
+        } catch (err) {
+          setYtDlpLocal({
+            info: null,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       })()
     }
@@ -793,7 +818,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     setYtDlpChecking(true)
     try {
       const result = await api.checkYtDlpUpdate()
-      if (result.local) setYtDlpLocal(result.local)
+      // 检查那一步顺带把本机快照也带回来了；信封里的 error 是「清单/网络」的原因，与本机探测无关，故留 null
+      if (result.local) setYtDlpLocal({ info: result.local, error: null })
       if (!result.ok) {
         toast.error(result.error || '检查链接解析组件更新失败', 8000)
         return
@@ -831,7 +857,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         toast.success(`链接解析组件已更新到 ${result.version}，下次解析链接就用它`, 8000)
         // 换的是 userData/bin 里的那一份，本机生效版本随之改变，要重新探一次再显示
         setYtDlpHasUpdate(false)
-        setYtDlpLocal(await api.getYtDlpLocal())
+        const snapshot = await api.getYtDlpLocal()
+        setYtDlpLocal(snapshot)
+        if (snapshot.error) toast.error(`更新装上了，但本机这版读不出来：${snapshot.error}`, 10000)
       } else if (result.systemSettingsHint) {
         // 与链接解析失败同一套处理：主进程判定「像是系统拦住执行」时才给一键直达隐私设置的入口
         toast.error(result.error || '链接解析组件更新失败', 10000, {
@@ -852,36 +880,47 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     }
   }
 
+  /**
+   * 「问不出新版本」有两条来路：主进程回值里的 error（IPC 收口后走这条，见 ipc/guard.ts）
+   * 和渲染层自己吃到的 reject（通道压根没注册）。两条共用同一个出口——
+   * 失败几乎都是国内直连 GitHub 慢/被拦，只甩一句「请检查网络」用户手里没有第二个入口，
+   * 所以给可复制的发布页直链，让他开加速或换官网下载。
+   */
+  const toastReleasePageUnavailable = (reason?: string | null) => {
+    const releasePage = 'https://github.com/DaQI-X/Vv-Transcribe/releases/latest'
+    toast.error(
+      `连不上发布服务器（多为国内直连 GitHub 过慢所致）${reason ? `，主进程那边的原话是：${reason}` : ''}。可复制发布页地址，开网络加速后用浏览器下载，或访问官网 vvscribe.com`,
+      9000,
+      {
+        label: '复制发布页',
+        onClick: async () => {
+          try {
+            await navigator.clipboard.writeText(releasePage)
+            toast.success('发布页地址已复制，可在浏览器粘贴打开')
+          } catch {
+            void handleOpenExternal(releasePage)
+          }
+        },
+      }
+    )
+  }
+
   const handleCheckUpdate = async () => {
     if (!api || checking) return
     setChecking(true)
     try {
       const info = await api.checkAppUpdate()
       setUpdateInfo(info)
-      if (info.hasUpdate) {
+      if (info.error) {
+        // 绝不能落到下面那句「当前已是最新版本」——那是没查出来，不是查过了发现没有新版
+        toastReleasePageUnavailable(info.error)
+      } else if (info.hasUpdate) {
         toast.info(`发现新版本 v${info.latestVersion}`)
       } else {
         toast.info(`当前已是最新版本（v${info.currentVersion}）`)
       }
     } catch {
-      // 检查更新失败几乎都是「国内直连 GitHub 慢/被拦」，不该只甩一句「请检查网络」——
-      // 用户手里没有第二个入口。给可复制的发布页直链，让他开加速或换官网下载。
-      const releasePage = 'https://github.com/DaQI-X/Vv-Transcribe/releases/latest'
-      toast.error(
-        '连不上发布服务器（多为国内直连 GitHub 过慢所致）。可复制发布页地址，开网络加速后用浏览器下载，或访问官网 vvscribe.com',
-        9000,
-        {
-          label: '复制发布页',
-          onClick: async () => {
-            try {
-              await navigator.clipboard.writeText(releasePage)
-              toast.success('发布页地址已复制，可在浏览器粘贴打开')
-            } catch {
-              void handleOpenExternal(releasePage)
-            }
-          },
-        }
-      )
+      toastReleasePageUnavailable()
     } finally {
       setChecking(false)
     }
@@ -1407,9 +1446,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <span style={{ fontSize: 11, color: '#9AA5B8' }}>
                     {ytDlpLocal === null
                       ? '读取中...'
-                      : `${ytDlpLocal.version ?? '版本未知'}（${YTDLP_SOURCE_LABEL[ytDlpLocal.source]}${
-                          ytDlpLocal.bytes !== null ? `，${formatBytes(ytDlpLocal.bytes)}` : ''
-                        }）`}
+                      : ytDlpLocal.info === null
+                        ? // 探测这一步炸了（原先这里根本没有失败分支，界面会永远停在「读取中...」演成还在查）
+                          '本机那份读不出来'
+                        : `${ytDlpLocal.info.version ?? '版本未知'}（${
+                            YTDLP_SOURCE_LABEL[ytDlpLocal.info.source]
+                          }${
+                            ytDlpLocal.info.bytes !== null
+                              ? `，${formatBytes(ytDlpLocal.info.bytes)}`
+                              : ''
+                          }）`}
                   </span>
                   <button
                     type="button"

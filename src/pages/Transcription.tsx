@@ -62,7 +62,21 @@ export function Transcription() {
     api
       .getSettings()
       .then((saved) => {
-        const problem = saved?.storageProblem
+        // 整份读不出来时回的是 null（IPC 收口后不再 reject，见 ipc/guard.ts）。
+        // 这一种比 storageProblem 还安静：设置页会显示「几把 Key 全是 none」，
+        // 用户以为是自己漏填，其实磁盘那份根本没读到——此时最不该做的就是让他顺手保存覆盖
+        if (saved === null) {
+          toast.error(
+            '设置读不出来。界面里那些空的配置项不代表你没填过，先别急着保存覆盖。',
+            20000,
+            {
+              label: '打开数据目录',
+              onClick: () => void openUserDataDirectory(),
+            }
+          )
+          return
+        }
+        const problem = saved.storageProblem
         if (typeof problem !== 'string' || !problem) return
         toast.error(problem, 20000, {
           label: '打开数据目录',

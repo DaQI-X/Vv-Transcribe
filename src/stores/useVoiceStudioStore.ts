@@ -215,8 +215,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     try {
       const settings = await api.getSettings()
       // 与主进程 normalizeTtsEngine 同口径：认不出的一律按云端处理，不替用户猜
-      mode = str(settings.ttsEngine) === 'local' ? 'local' : 'cloud'
-      const saved = str(settings.ttsLocalEngine)
+      mode = str(settings?.ttsEngine) === 'local' ? 'local' : 'cloud'
+      const saved = str(settings?.ttsLocalEngine)
       // 下拉的当前值必须在选项里，否则渲染成空白：主进程那边也是这么回落到默认档的
       requested = LOCAL_TTS_ENGINE_OPTIONS.some((option) => option.value === saved)
         ? saved
@@ -226,9 +226,15 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
         configEngine: requested,
         // 两档各读各的字段：本地档的「音色」是编号，云端档的是服务商的音色名，
         // 把它们混成一个 configVoice 就会把云端残留的 alloy 显示成本地编号
-        configModel: mode === 'local' ? '' : str(settings.ttsModel),
-        configVoice: mode === 'local' ? str(settings.ttsLocalVoice) : str(settings.ttsVoice),
+        configModel: mode === 'local' ? '' : str(settings?.ttsModel),
+        configVoice: mode === 'local' ? str(settings?.ttsLocalVoice) : str(settings?.ttsVoice),
       })
+      // 读设置失败回的是 null（IPC 收口后不再 reject，见 ipc/guard.ts），而 null 会落成上面那个云端档：
+      // 设置里明明选了本地配音，这里却显示走云端接口。不说这一句，用户会去云端的地址框里
+      // 找一个根本不存在的问题
+      if (settings === null) {
+        toast.info('配音设置读不出来，本页先按云端档显示；去设置里重新保存一次可恢复', 10000)
+      }
     } catch {
       set({ mode, configModel: '', configVoice: '', configEngine: requested })
     }
@@ -351,7 +357,11 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       return
     }
     const res = await api.cancelVoiceJob(jobId)
-    if (res.reason === 'stopped') {
+    if (res.error) {
+      // 取消这一步自己出错了，不能塞进下面那三条分支：
+      // 分支是按 reason 走的，收口后的失败值只能给一个占位的 'gone'，说出来就是「这批任务已经不在了」那句谎
+      toast.error(`取消没落进去：${res.error}`)
+    } else if (res.reason === 'stopped') {
       set({ cancelRequested: true })
       toast.info('已请求取消，正在收尾')
     } else if (res.reason === 'late') {
