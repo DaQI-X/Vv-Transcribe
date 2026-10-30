@@ -88,6 +88,17 @@ export function ttsConfigProblem(config: TTSConfig): string | null {
   return null
 }
 
+/**
+ * 日志里「这一趟是谁在念」要按档分叉：本地档没有云端模型名，照抄 `config.model` 只会留下一串
+ * `model:""`，而 VITS 和 Kokoro 念出来的东西差别是用户报障时最需要先排掉的一条。引擎只在冷启动
+ * 那一条里报档位，热着跑完的一批若不写 localEngine，app.log 里就查无此人。
+ */
+function tierForLog(config: TTSConfig): { engine: 'cloud' | 'local'; model?: string; localEngine?: string } {
+  return config.engine === 'local'
+    ? { engine: 'local', localEngine: config.localEngine }
+    : { engine: 'cloud', model: config.model }
+}
+
 /** 临时目录名沿用 transcribe- 前缀：1.0.5 起的启动清扫按这个前缀删，崩溃与强杀遗留能被兜住 */
 function newTempDir(): string {
   return join(tmpdir(), `transcribe-tts-${randomUUID()}`)
@@ -215,8 +226,7 @@ export async function previewSpeech(text: string, config: TTSConfig): Promise<Sy
   logger.userAction('TTS preview synthesized', {
     bytes: clip.bytes,
     duration: Number(clip.duration.toFixed(2)),
-    engine: config.engine,
-    model: config.model,
+    ...tierForLog(config),
     voice: config.voice,
   })
   return clip
@@ -361,8 +371,7 @@ export async function synthesizeSegments(
   logger.info('TTS', 'Batch started', {
     jobId,
     total,
-    engine: config.engine,
-    model: config.model,
+    ...tierForLog(config),
     voice: config.voice,
   })
 
