@@ -2502,6 +2502,81 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* ===== 渲染层崩溃兜底卡片（ErrorBoundary）===== */
+/* 整页换成这张卡片时顶栏也没了，所以背景可拖窗、卡片本体不拖 */
+.crash-card {
+  position: fixed;
+  inset: 0;
+  z-index: 1900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+  background: var(--bg-page);
+  -webkit-app-region: drag;
+}
+.crash-card__inner {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08), 0 2px 8px rgba(0, 0, 0, 0.04);
+  -webkit-app-region: no-drag;
+}
+.crash-card__head { display: flex; align-items: center; gap: 10px; }
+.crash-card__icon { flex-shrink: 0; color: var(--error-color); }
+.crash-card__title { font-size: 17px; font-weight: 600; color: var(--text-primary); }
+.crash-card__lead { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
+.crash-card__message {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.crash-card__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.crash-card__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.crash-card__btn:hover { background: var(--bg-hover); }
+.crash-card__btn:focus-visible { outline: 2px solid var(--border-active); outline-offset: 1px; }
+.crash-card__btn--primary { border-color: var(--brand-blue); color: var(--brand-blue); }
+.crash-card__btn--primary:hover { background: var(--brand-teal-light); }
+.crash-card__notice { font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.crash-card__details { font-size: 12px; color: var(--text-muted); }
+.crash-card__details summary { cursor: pointer; }
+.crash-card__details pre {
+  margin-top: 8px;
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ===== Reference Comparison ===== */
 
 .reference-bubble {

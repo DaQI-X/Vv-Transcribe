@@ -184,6 +184,17 @@ const api = {
   openSystemSettings: () => ipcRenderer.invoke('app:openSystemSettings'),
   contactDeveloper: () => ipcRenderer.invoke('app:contactDeveloper'),
 
+  // 主进程崩溃兜底推来的一句话（渲染进程还活着才走这条；界面没了它只能弹系统对话框）。
+  // 通道名与 electron/main/services/crashWatch.ts 的 ERROR_NOTICE_CHANNEL 是同一串：
+  // 这里不 import 那个模块，否则会把它依赖的 app/dialog 一起打进 preload。
+  onErrorNotice: (callback: (message: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, message: string) => callback(message)
+    ipcRenderer.on('app:errorNotice', listener)
+    return () => {
+      ipcRenderer.removeListener('app:errorNotice', listener)
+    }
+  },
+
   openLogDirectory: () => ipcRenderer.invoke('app:openLogDirectory'),
   openUserDataDirectory: () => ipcRenderer.invoke('app:openUserDataDirectory'),
 

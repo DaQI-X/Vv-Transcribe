@@ -485,6 +485,12 @@ export interface ElectronAPI {
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
   openUserDataDirectory: () => Promise<{ success: boolean; error?: string }>
 
+  /**
+   * 订阅主进程崩溃兜底推来的一句话，返回取消订阅的函数（与 onVoiceProgress 同一写法）。
+   * 只在渲染进程还活着时触发；界面本身没了，主进程改弹系统对话框。
+   */
+  onErrorNotice: (callback: (message: string) => void) => () => void
+
   toggleWindowMaximize: () => Promise<boolean>
   minimizeWindow: () => Promise<boolean>
   closeWindow: () => Promise<boolean>

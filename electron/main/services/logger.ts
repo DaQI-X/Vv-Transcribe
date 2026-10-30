@@ -4,6 +4,7 @@
  * 日志文件保存在 userData 目录下的 logs 文件夹
  */
 import { mkdir, appendFile } from 'node:fs/promises'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { logsDir } from './userDataStore'
 
@@ -88,6 +89,28 @@ class Logger {
 
   debug(module: string, message: string, data?: any) {
     return this.write('DEBUG', module, message, data)
+  }
+
+  /**
+   * 同步落盘的一条 ERROR，只给「写完就要阻塞事件循环」的崩溃兜底用（见 crashWatch）。
+   * 常规 write 走的是 fs/promises：调用方拿到的是 Promise，字节要等微任务队列转一圈才落盘。
+   * 而 dialog.showMessageBoxSync 恰恰会把事件循环按住不放——实测那条 'Render process gone'
+   * 要等用户点掉对话框才出现在 app.log 里。用户要是那会儿强杀进程，现场就没了。
+   */
+  errorSync(module: string, message: string, data?: any) {
+    const line = this.formatEntry('ERROR', module, message, data)
+    try {
+      console.error(`[ERROR][${module}]`, message, data ?? '')
+    } catch {
+      // EPIPE: stdout pipe broken
+    }
+    try {
+      mkdirSync(this.logDir, { recursive: true })
+      this.initialized = true
+      appendFileSync(this.logFile, line, 'utf-8')
+    } catch (err) {
+      console.error('[Logger] Failed to write log synchronously:', err)
+    }
   }
 
   // 用户操作日志

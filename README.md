@@ -89,7 +89,9 @@ basic_one/
 │   │       ├── userDataStore.ts       #   用户数据目录的唯一规范层：路径（全仓库只有这里读 app.getPath('userData')）、
 │   │       │                          #     读（ok/missing/corrupt/unreadable 四种结局）、原子写（.tmp→rename、.bak 备份）
 │   │       ├── settingsSchema.ts      #   配置文档的 schemaVersion 与迁移链注册表；升版本只改这里
-│   │       └── logger.ts              #   主进程日志（落 userData/logs/app.log）
+│   │       ├── logger.ts              #   主进程日志（落 userData/logs/app.log）；崩溃路径另有一条同步落盘的 errorSync
+│   │       └── crashWatch.ts          #   崩溃兜底：主进程 uncaughtException/未处理拒绝 + 界面进程与子进程消失 + 主框架加载失败；
+│   │                                  #     现场先同步落盘再谈界面，重载/退出都由人点头（见「注意事项」那条）
 │   ├── preload/                       # contextBridge 暴露 window.electronAPI（index.d.ts 是类型声明）
 │   └── resources/dictionary/          # 内置词库：ci.json / idiom.json / version.json
 │
@@ -99,7 +101,8 @@ basic_one/
 │   ├── pages/Transcription.tsx        # 上传 / 转写中 / 结果 三态切换，外加「字幕配音」整页工作台的分流
 │   ├── components/
 │   │   ├── SplashScreen.tsx           #   开屏：只有冷启动播，显示引擎就绪到哪一步
-│   │   ├── ErrorPage.tsx              #   路由兜底
+│   │   ├── ErrorPage.tsx              #   前置服务（词典/ASR）没起来时的整页提示，让人重启应用
+│   │   ├── ErrorBoundary.tsx          #   渲染期抛错的兜底卡片：说原因 + 复制详情 / 打开日志文件夹 / 重新加载
 │   │   ├── ui/                        #   自研 Toast / Dropdown / Popover
 │   │   ├── transcription/             #   StudioTabs（顶部 tab：本地文件 / 音视频链接 / 字幕配音；进了配音页只剩一个返回入口，
 │   │   │                              #     按钮样式与转写结果页那颗一致）、
@@ -119,7 +122,9 @@ basic_one/
 │                                      #     splitPlainText（纯文本稿按句切成 ≤800 字的朗读块）、
 │                                      #     localTtsEngines（本地引擎白名单选项、音色编号枚举、缺件该说哪句话）、
 │                                      #     readiness（阻塞项统一提示）、userData（打开 userData 目录，三处共用一个入口，
-│                                      #     失败一定要弹出来而不是默默没反应）、logger
+│                                      #     失败一定要弹出来而不是默默没反应）、logger、
+│                                      #     rendererErrorWatch（事件回调 / Promise 里那两类 ErrorBoundary 接不到的抛错：
+│                                      #     落日志 + toast，8 秒内同一句话只说一次；也是 app:errorNotice 的收件方）
 │
 ├── python-asr/                        # 本地转写服务：main.py（FastAPI，协议 2 = NDJSON 逐句回传）
 │   ├── vv-asr-server.spec             #   PyInstaller 配置（非 Python 资源必须在 datas 里显式列出）
@@ -189,7 +194,7 @@ basic_one/
 │       localTtsEngine（配音 sidecar 生命周期）·                │
 │       componentService + componentArchive + ttsModelUpstream ·│
 │       ytDlpUpdate · connectionTestService · settingsService · │
-│       logger                                                  │
+│       logger · crashWatch                                     │
 └───────┬───────────────────────┬──────────────────────┬────────┘
         │ HTTP :8000 与 :8010   │ spawn                │ HTTPS（云端转写/校对要显式配置才走；
         │                      │                      │ 链接转写、词库检查更新按用户操作发起）
@@ -370,6 +375,7 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `ytDlp:progress` | 主 → 渲染 | 推送 `{ received, total }` 实测字节数，界面据此写「下载中 a/b」 |
 | `app:openLogDirectory` | 渲染 → 主 | 打开 `userData/logs` 取日志 |
 | `app:openUserDataDirectory` | 渲染 → 主 | 打开 `userData` 本身：设置读不出来时界面唯一的「自己看一眼原件」入口（`settings.json.corrupt-*` 留档和 `.bak` 都住在这层）。失败回 `{ success:false, error }`，不在这里跨 IPC 抛错 |
+| `app:errorNotice` | 主 → 渲染 | 崩溃兜底推给用户的一句话（后台子进程没了、某步异步失败没接住）。只有渲染进程还活着才走这条，界面本身没了就只能弹系统对话框；收件方是 `src/utils/rendererErrorWatch.ts`，转成 toast |
 | `asr:start` | 渲染 → 主 | 启动转写任务，返回 jobId + 段落，或 `canceled` / 失败原因 |
 | `asr:cancel` | 渲染 → 主 | AbortController 中断当前任务并清理临时目录 |
 | `asr:progress` | 主 → 渲染 | 推送 `{ jobId, progress, segment, stage }`，逐句上屏 |
@@ -403,7 +409,7 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `settings:save` | 渲染 → 主 | 写设置（渲染层只在点「保存设置」时调用，落盘走 `userDataStore` 的原子写：tmp+rename，替换前先留一份 `settings.json.bak`，并把 `schemaVersion` 一起盖上）。Key 字段三态：非空＝替换、`null`＝清除、留空＝整个键不发送、磁盘上那把不动；只收 `DEFAULT_SETTINGS` 列得出的字符串字段。没写进磁盘时不跨 IPC 抛错，回 `saveError` 一句可直接弹的话，界面必须留在原状；这一句有两种来源（原件读不出来 / 那份文件来自更新版本的应用），靠 `SettingsWriteBlockedError` 这个类型分开，不是比字符串——比字符串哪天多一道闸门就会把原因说错 |
 | `settings:testConnection` | 渲染 → 主 | 按表单当前值试一次：`kind='asr'` 探云端接口或本机引擎，`kind='ai'` 探校对接口，`kind='tts'` 探音频接口（真合成一句，约 10 个字）；表单 Key 留空时回落到已保存的那把（改接口地址不用重贴），配音这一腿还额外跟 `getTTSConfig` 同口径回落——留空时用的是校对那把 Key、校对那个地址，否则会出现「自检说没填、点开始配音却跑得通」的分歧；密文解不开则直接报错、不发请求。配音的超时跟真实合成一样是 60 秒，不是校对的 30 秒 |
 | `app:getServiceReady` | 渲染 → 主 | 开屏阶段状态：`asrDone` / `asrError` / `dictionaryDone` |
-| `app:log` | 渲染 → 主 | 渲染层日志经 `src/utils/logger.ts` 汇入 `app.log`，两边写在同一份日志里 |
+| `app:log` | 渲染 → 主 | 渲染层日志经 `src/utils/logger.ts` 汇入 `app.log`，两边写在同一份日志里。渲染层的全局抛错另走 `rendererErrorWatch`（module `RendererError`，带 stack）、界面崩掉那一次走 `ErrorBoundary`（module `RendererCrash`，带 componentStack），都不依赖任何组件记得打日志 |
 | `app:getVersion` | 渲染 → 主 | 应用版本号 |
 | `app:checkUpdate` | 渲染 → 主 | 查 GitHub Release 最新版并与当前版本逐段比较；应用本体不自动装，只给「前往发布页」的链接 |
 | `app:contactDeveloper` | 渲染 → 主 | 拼死收件人与正文（应用版本 / 系统 / 取日志说明）后 `shell.openExternal` 打开 `mailto:`；渲染层传不进任何参数 |
@@ -465,7 +471,7 @@ pnpm test:watch    # 边改边跑
 
 跑的是 vitest（`vitest.config.ts` 单独一份，不复用 `vite.config.ts`：那份挂着 `vite-plugin-electron`，它的 `onstart` 会在每次跑测试时把应用拉起来）。`electron` 模块由 `tests/setup.ts` 逐个成员给出显式替身——不是 Proxy 兜万能，漏了哪个成员就响亮地失败，免得把真缺陷测成通过。
 
-当前覆盖三块。一是主进程里「收口的纯函数」：配置归一化（接口地址 / 本地档位 / 配音档位 / 音色 / 引擎白名单）与配音单次调用参数（`withOverrides`、`toSegments`）——这些地方的失败方式不是报错，而是「界面显示 A、实际跑的是 B」，正适合用断言钉住，`tests/ttsCallOptions.test.ts` 里那条「引擎空串必须保住设置里那档」就是 2026-10-29 本机试听踩实的 bug 的回归锚。二是 `userData` 这一层本身：`tests/userDataStore.test.ts` 钉路径收口（各处目录都在 userData 下且互不重合、`settings.json` 平铺在根层）与读写机制（四种读盘结局分得清、原子写留下的文件、`.bak` 存的是上一份、备份失败不影响写成功、历史副本按前缀只留最新 keep 份），`tests/settingsSchema.test.ts` 钉迁移链（走链的三种结局、多步顺序、断链判 gap、比本版新的一份字节不动）；这几份都落在真临时目录里（每用例一份 `mkdtemp` + 替身 `app.getPath`），写盘逻辑用 mock 的 `fs` 测等于测了自己骗自己，`safeStorage` 则由一对可逆的假加解密（`fake:` 前缀）替掉，不碰系统密钥库。三是 `settings.json` 的读写端到端（`tests/settingsPersistence.test.ts`）：钉「解不开会留档并说出去」「读不出内容会拦住落盘」「密钥留空＝不改、`null`＝清除」「首次运行不凭空造文件」「旧字段与明文 Key 一次读盘都办完」「v2 的文件读得懂界面但不许写」。迁移链的多步顺序与断链没法靠只有一步的生产注册表证明，所以 `migrateSettingsDocument` 的 target / steps 做成入参。UI 与安装包链路仍由人工冒烟覆盖。
+当前覆盖四块。一是主进程里「收口的纯函数」：配置归一化（接口地址 / 本地档位 / 配音档位 / 音色 / 引擎白名单）与配音单次调用参数（`withOverrides`、`toSegments`）——这些地方的失败方式不是报错，而是「界面显示 A、实际跑的是 B」，正适合用断言钉住，`tests/ttsCallOptions.test.ts` 里那条「引擎空串必须保住设置里那档」就是 2026-10-29 本机试听踩实的 bug 的回归锚。二是 `userData` 这一层本身：`tests/userDataStore.test.ts` 钉路径收口（各处目录都在 userData 下且互不重合、`settings.json` 平铺在根层）与读写机制（四种读盘结局分得清、原子写留下的文件、`.bak` 存的是上一份、备份失败不影响写成功、历史副本按前缀只留最新 keep 份），`tests/settingsSchema.test.ts` 钉迁移链（走链的三种结局、多步顺序、断链判 gap、比本版新的一份字节不动）；这几份都落在真临时目录里（每用例一份 `mkdtemp` + 替身 `app.getPath`），写盘逻辑用 mock 的 `fs` 测等于测了自己骗自己，`safeStorage` 则由一对可逆的假加解密（`fake:` 前缀）替掉，不碰系统密钥库。三是 `settings.json` 的读写端到端（`tests/settingsPersistence.test.ts`）：钉「解不开会留档并说出去」「读不出内容会拦住落盘」「密钥留空＝不改、`null`＝清除」「首次运行不凭空造文件」「旧字段与明文 Key 一次读盘都办完」「v2 的文件读得懂界面但不许写」。迁移链的多步顺序与断链没法靠只有一步的生产注册表证明，所以 `migrateSettingsDocument` 的 target / steps 做成入参。四是崩溃兜底（`tests/crashWatch.test.ts`）：钉每一种 Electron 原因码都落在一句人话上（oom、memory-eviction、integrity-failure 三件事说成一句，人就照着错的那句做）、该静默的那几种真的静默（`clean-exit`、`killed`、开发模式热重载那次 `ERR_ABORTED`），以及「按钮写着重新加载就不能替用户按回车」——点「知道了」不许重载、连拒两次不占用后面那两次机会、60 秒内真重载满两次就改口让人重启应用。重载计数是模块级数组，所以每用例都要 `vi.resetModules()` 加换一份临时目录重灌模块（logger 的路径在构造时算死，换目录必须赶在 import 之前），不然限流那条永远测不准。另有两条钉的是同一件事的两个时刻：崩溃现场必须先落盘再谈界面——常规日志走 `fs/promises`，而 `dialog.showMessageBoxSync` 会把事件循环按住到用户点掉为止，实测那条 ERROR 就是这么丢的；断言因此写在对话框的 mock 里（弹窗还挂着的那一刻读 `app.log` 就该有那一行）。UI 与安装包链路仍由人工冒烟覆盖。
 
 闸门位置：`build.yml` 的 `test` job（ubuntu，装依赖 + `tsc -b --force` + `pnpm test`）用 `needs` 卡在三平台矩阵之前，红在这里就不用再花三份构建时间。UI 与安装包链路仍由人工冒烟覆盖（见上面的「开发模式」与下面的「构建打包」），单测不碰。
 
@@ -652,3 +658,4 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 - **用户数据目录的落点只有一处定义**：`userDataStore.ts` 是全主进程唯一向 Electron 要 userData 根的地方，日志、按需组件、更新下来的 yt-dlp、词库副本、`settings.json` 都从它拼出来，所以「打开数据目录」按钮打开的那一层，确实就是这些文件住的那一层。同一层还给出唯一的原子写（`.tmp`→rename）与读盘结局分类；`installed.json`（按需组件的版本账）也走这个写。仍按自己方式 `writeFile` 的只剩两类：tempDir 里一次性的中间产物（配音逐段的音频、铺轴用的 ffmpeg graph、用完即删的 cookies），以及可重下的词库副本与它的 `version.json`——后者解不开时读的那一头直接回「没有版本」，下次更新覆盖，坏了我不会盖掉用户填的任何东西
 - 链接取内容的临时媒体**不是**下完就删：播放器整场都要拿它做逐句回放，删早了链路末尾只会剩一条「文件已被移动」的 toast（这是 1.0.5 修掉的回归）。站点 cookies 在提取出音频后立刻删，媒体留到「下一段素材开工」或「退出应用」；应用被强杀时这两处都走不到，下次启动由 24 小时清扫兜底。所以 /tmp 里短时间内看到上一份素材是正常的，不是泄漏
 - 端口 8000 是本机引擎的约定端口。应用不会复用一个「应答者身份不明」的服务，因此手动起的 `python main.py` 不会被采信；反过来，构建或清理时不要用 `pkill -f vv-asr-server` 之类的通配杀进程，容易连别的工作一起打掉
+- **出事的时候一定有话**（1.0.8 的崩溃兜底层，`electron/main/services/crashWatch.ts` + `src/components/ErrorBoundary.tsx` + `src/utils/rendererErrorWatch.ts`）：改之前主进程一个 `uncaughtException` / `unhandledRejection` 处理器都没有，而 Node 15+ 对未处理拒绝的默认处置就是结束进程——一处 `.catch` 漏了，整个应用直接消失，连一行日志都不留。现在这两条都装了，`render-process-gone`、`child-process-gone`、主框架 `did-fail-load` 也各自接上（`installCrashWatch` 排在其余初始化之前，因为 `app.whenReady()` 里那几条链路恰恰最容易出一句没接住的异步失败）。三条规矩：日志先落盘再谈界面，且崩溃路径走 `logger.errorSync`——常规日志是异步写的，紧接着弹出的阻塞式对话框会把事件循环按住到用户点掉为止，实测现场就是这么丢的；谁还活着用谁的通道，渲染进程在就推 toast（`app:errorNotice`），没了才弹系统对话框；丢不丢数据由人点头——界面崩了给「重新加载 / 知道了」，主进程异常给「知道了 / 退出应用」，只有点退出才走 `app.quit()`（那才会跑 before-quit 收尾，不给 8000/8010 留残尸），60 秒内真重载满两次就不再给重载按钮、改口让人重启。渲染层那道 `ErrorBoundary` 只接得住渲染期抛错，事件回调和 Promise 里的那部分靠 `rendererErrorWatch`；`ToastContainer` 现在和 `ErrorBoundary` 平级挂在根层（`src/main.tsx`）——它原先在转写页里，也就是 boundary 的子孙，而 boundary 接住抛错是拿 fallback 换掉整个 children，崩的那一刻 toast 容器自己也跟着没了（这是本机 CDP 打进崩溃态查 DOM 才看出来的，不是推的；`rendererErrorWatch` 同理装在模块作用域，不进组件的 effect）

@@ -23,14 +23,34 @@ const electronState = vi.hoisted(() => ({
 electronState.userData = join(tmpdir(), 'vv-test-userdata')
 
 vi.mock('electron', () => {
+  /**
+   * 窗口替身要能被测试驱动，所以三个动作各留一份记录：
+   * webContents.on 存下监听器（测试手动打事件）、reload 计数（有没有真重载）、send 收消息
+   * （主进程往界面推的那句话到没到）。isDestroyed 默认 false：崩溃兜底正是「窗口还在」时才走 send。
+   */
   class FakeBrowserWindow {
     static getAllWindows() {
       return []
     }
+    destroyed = false
+    notices: unknown[][] = []
+    reloads = 0
+    listeners = new Map<string, (...args: unknown[]) => void>()
     isDestroyed() {
-      return true
+      return this.destroyed
     }
-    webContents = { send: () => {}, openDevTools: () => {} }
+    webContents = {
+      openDevTools: () => {},
+      send: (...args: unknown[]) => {
+        this.notices.push(args)
+      },
+      on: (event: string, cb: (...args: unknown[]) => void) => {
+        this.listeners.set(event, cb)
+      },
+      reload: () => {
+        this.reloads++
+      },
+    }
   }
 
   return {
@@ -40,6 +60,7 @@ vi.mock('electron', () => {
       getName: () => 'Vv Transcribe (test)',
       getVersion: () => electronState.appVersion,
       getAppPath: () => process.cwd(),
+      isReady: () => true,
       on: () => {},
       whenReady: () => Promise.resolve(),
       quit: () => {},
@@ -63,6 +84,12 @@ vi.mock('electron', () => {
       showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
       showSaveDialog: async () => ({ canceled: true, filePath: undefined }),
       showMessageBox: async () => ({ response: 0 }),
+      /**
+       * 崩溃兜底走的是同步版（渲染进程已经不在了，不能再等一个 Promise 把它自己卡住）。
+       * 默认回「按下第 0 个按钮」；用例用 vi.spyOn(dialog,'showMessageBoxSync') 换成别的按钮，
+       * 顺带就是一份调用记录——不必为了测试在这里存第二份状态。
+       */
+      showMessageBoxSync: () => 0,
       showErrorBox: () => {},
     },
     shell: { openPath: async () => '', openExternal: async () => {}, showItemInFolder: () => {} },

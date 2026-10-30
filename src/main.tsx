@@ -3,6 +3,7 @@
  * 挂载 React 根组件，初始化 HashRouter 路由
  * 启动时主动轮询服务就绪状态，失败则展示错误页
  * 开屏动画只属于真正的冷启动（主进程首次建窗口时以 ?cold=1 下发），且至少展示 2.5 秒
+ * 崩溃兜底分两层：ErrorBoundary 接渲染期抛错，rendererErrorWatch 接事件/异步里的那部分
  */
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
@@ -11,6 +12,9 @@ import './index.css'
 import { router } from './router/index.tsx'
 import { SplashScreen } from './components/SplashScreen'
 import { ErrorPage } from './components/ErrorPage'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { ToastContainer } from './components/ui/Toast'
+import { installRendererErrorWatch } from './utils/rendererErrorWatch'
 import './stores/useThemeStore' // 初始化主题
 
 const MIN_SPLASH_MS = 2500 // 开屏动画最短展示时间（0.3s 延迟 + 2s 擦除 + 余量）
@@ -98,4 +102,25 @@ function App() {
   )
 }
 
-createRoot(document.getElementById('root')!).render(<App />)
+createRoot(document.getElementById('root')!).render(
+  <>
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+    {/*
+      toast 容器必须挂在 ErrorBoundary 外面。它以前在转写页里，后来挪进 boundary 内部当兄弟——
+      实测（CDP 打进崩溃态查 DOM）那条路也不通：boundary 接住抛错后是用 fallback 换掉整个 children，
+      兄弟一起被换掉，恰恰在崩了的那一刻 toast 容器自己也没了。挂在外面才真的活得住，
+      主进程推来的崩溃通知（app:errorNotice）才有地方落。
+      启动失败那一支（直接 return <ErrorPage/>）同理。
+    */}
+    <ToastContainer />
+  </>
+)
+
+/*
+  全局错误兜底同样不能装在 App 里：App 一崩，它的 effect 不是没跑就是被清掉，
+  而那正是最需要这条通道的时候（事件回调和 Promise 里的抛错，ErrorBoundary 接不到）。
+  放在 render 之后：此刻 ToastContainer 已经挂上，toast 的模块级 setter 不再是空的。
+*/
+installRendererErrorWatch()

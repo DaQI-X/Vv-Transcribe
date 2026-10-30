@@ -13,7 +13,7 @@ import { TranscriptEditor } from '@/components/transcription/TranscriptEditor'
 import { AudioPlayer } from '@/components/transcription/AudioPlayer'
 import { VoiceStudio } from '@/components/transcription/VoiceStudio'
 import { SettingsModal } from '@/components/settings/SettingsModal'
-import { ToastContainer, toast } from '@/components/ui/Toast'
+import { toast } from '@/components/ui/Toast'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
@@ -178,7 +178,6 @@ export function Transcription() {
       </div>
 
       <SettingsModal tab={settingsTab} onClose={closeSettings} />
-      <ToastContainer />
     </div>
   )
 }

@@ -11,6 +11,7 @@ import { stopLocalTtsEngine } from './services/localTtsEngine'
 import { initDictionary } from './services/dictionaryService'
 import { logger } from './services/logger'
 import { releaseAllMediaSessions, sweepStaleMediaTempDirs } from './services/urlDownloader'
+import { installCrashWatch, watchWindowGone } from './services/crashWatch'
 
 // 忽略 EPIPE 错误（stdout 管道断开，常见于开发服务器重启）
 process.on('SIGPIPE', () => {})
@@ -45,6 +46,10 @@ let mainWindow: BrowserWindow | null = null
 let isQuitting = false
 /** 本进程是否已建过窗口。macOS 关窗不退出应用，从 Dock 重开窗口不是冷启动，不该重放开屏动画 */
 let hasLaunchedWindow = false
+
+// 崩溃兜底要在其余初始化之前装好：app.whenReady() 里那几条链路（拉起 ASR、读词典）
+// 恰恰是最可能出一句没接住的异步失败的，而那时窗口已经建完、用户已经在等结果了
+installCrashWatch(() => mainWindow)
 
 /** 服务初始化状态 */
 let serviceReady = false
@@ -116,6 +121,9 @@ function createWindow() {
       webSecurity: false,
     },
   })
+
+  // 早于第一次 load 挂上，否则首屏就加载不出来时这条链路没人看
+  watchWindowGone(mainWindow)
 
   if (process.env.VITE_DEV_SERVER_URL) {
     const devUrl = new URL(process.env.VITE_DEV_SERVER_URL)
