@@ -10,7 +10,7 @@ import {
   saveSettings,
   normalizeLocalModel,
   normalizeTtsEngine,
-  SETTINGS_WRITE_BLOCKED,
+  SettingsWriteBlockedError,
   type LocalModelTier,
   type SettingsPatch,
   type SettingsView,
@@ -67,13 +67,13 @@ const UNREADABLE_KEY_MESSAGE =
   '这台机器读不出已保存的 API Key（可能换过电脑，或系统密钥库被清过）。重新填一次并保存即可'
 
 /**
- * 写盘失败要说人话。SETTINGS_WRITE_BLOCKED 本来就是给人看的一句话，原样透出去；
- * 其余的（ENOSPC、EACCES、只读介质）带着 errno 文本，再加一句「你填的还在界面上」，
+ * 写盘失败要说人话。闸门那句话（SettingsWriteBlockedError）本来就是按「为什么拦」挑的措辞，
+ * 原样透出去；其余的（ENOSPC、EACCES、只读介质）带着 errno 文本，再加一句「你填的还在界面上」，
  * 免得用户以为白填了一遍去重填。
  */
 function saveErrorMessage(err: unknown): string {
+  if (err instanceof SettingsWriteBlockedError) return err.message
   const message = err instanceof Error ? err.message : String(err)
-  if (message === SETTINGS_WRITE_BLOCKED) return message
   return `设置没能写入（${message}）。界面上填的内容还在，不用重填；清出磁盘空间或修好目录权限后再存一次`
 }
 

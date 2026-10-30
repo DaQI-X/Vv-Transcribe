@@ -2,9 +2,9 @@
  * 文件处理 IPC 处理器
  * 提供文件选择对话框、文件元数据读取、音频提取（FFmpeg）、临时文件清理等功能
  */
-import { app, ipcMain, dialog, shell, BrowserWindow } from 'electron'
+import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { stat, writeFile } from 'node:fs/promises'
-import { basename, extname, join } from 'node:path'
+import { basename, extname } from 'node:path'
 import { extractAudio, cleanupTemp, probeFile } from '../services/audioProcessor'
 import {
   cancelMediaDownload,
@@ -15,6 +15,7 @@ import {
 } from '../services/urlDownloader'
 import { extractTextFromFile } from '../services/referenceParser'
 import { logger } from '../services/logger'
+import { logsDir, userDataRoot } from '../services/userDataStore'
 
 /**
  * 白名单按「FFmpeg 能解 + 媒体行业日常会递过来的文件」两条线取，不是随便列的：
@@ -276,15 +277,14 @@ export function registerFileHandlers() {
   })
 
   ipcMain.handle('app:openLogDirectory', async () => {
-    const logDir = join(app.getPath('userData'), 'logs')
+    const logDir = logsDir()
     logger.userAction('Opening log directory', { path: logDir })
     return openInFinder(logDir, 'openLogDirectory')
   })
 
   // 设置读不出来时，界面唯一的「自己看一眼原件」入口：corrupt 留档那份、.bak 那份都住在这里
   ipcMain.handle('app:openUserDataDirectory', async () => {
-    const dir = app.getPath('userData')
     logger.userAction('Opening user data directory')
-    return openInFinder(dir, 'openUserDataDirectory')
+    return openInFinder(userDataRoot(), 'openUserDataDirectory')
   })
 }

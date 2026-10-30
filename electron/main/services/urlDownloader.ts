@@ -13,6 +13,7 @@ import { copyFile, mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { app, dialog } from 'electron'
 import { logger } from './logger'
+import { userDataPath } from './userDataStore'
 import { fetchCookiesFromUrl, cleanupBrowserTemp } from './browserCookieFetcher'
 
 /** 解析这一步只取元信息，正常几秒；卡住（站点风控挂住连接）不能让界面永远转圈 */
@@ -139,7 +140,7 @@ export type YtDlpSource = 'updated' | 'bundled' | 'system' | 'path'
 /** 应用内更新的落点；resolveYtDlp 的第一优先级就是这个路径，两边必须用同一个函数取 */
 export function updatedYtDlpPath(): string {
   const binary = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
-  return join(app.getPath('userData'), 'bin', binary)
+  return userDataPath('bin', binary)
 }
 
 /**

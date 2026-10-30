@@ -23,8 +23,8 @@ import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { app } from 'electron'
 import { logger } from './logger'
+import { componentsDir } from './userDataStore'
 import { UPSTREAM_MODEL_SOURCES, hasInAppModelDownload, upstreamTotalBytes } from './ttsModelUpstream'
 
 const TAG = 'LocalTTS'
@@ -102,15 +102,6 @@ export const COMPONENT_ROW_TITLES: {
     'sherpa-onnx-vits-zh-ll': { name: 'VITS', row: 'VITS（体积小，音色支持少）' },
     'kokoro-multi-lang-v1_1': { name: 'Kokoro', row: 'Kokoro（体积大，音色支持多）' },
   },
-}
-
-/**
- * 按需组件的根目录。
- * #230 的下载器把引擎二进制与模型都写进这里，约定与 ytDlpUpdate 的 userData/bin 同源
- * （应用可写、升级不动安装包），只是按组件 id 分目录，好按版本摆放与整体回收。
- */
-export function componentsDir(): string {
-  return join(app.getPath('userData'), 'components')
 }
 
 /** 模型根目录：里面是 `<engine-id>/`，目录名就是上游仓库名，sidecar 按同样的名字找 */

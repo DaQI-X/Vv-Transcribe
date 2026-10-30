@@ -8,7 +8,7 @@
  */
 import { readFile, writeFile, mkdir, access } from 'node:fs/promises'
 import { join } from 'node:path'
-import { app } from 'electron'
+import { dictionaryDir } from './userDataStore'
 
 interface DictionaryData {
   words: Map<string, string>
@@ -37,7 +37,7 @@ function getBuiltinDictionaryPath(): string {
 }
 
 function getUpdateDictionaryPath(): string {
-  return join(app.getPath('userData'), 'dictionary')
+  return dictionaryDir()
 }
 
 async function fileExists(path: string): Promise<boolean> {

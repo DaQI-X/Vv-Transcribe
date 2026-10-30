@@ -3,13 +3,18 @@
  * 这里测的不是某个函数返回什么，而是「磁盘出问题时，用户填过的 Key 还在不在」：
  * 旧写法把一个 catch 等同于「给默认值」，于是半截 JSON、只读介质都会让界面以为「用户还没填」，
  * 用户点一次保存就把原来那份盖掉了——1.0.8 把这条排进 P0 就是因为它丢的是不可恢复的数据。
+ * 后半段的「配置格式版本」是同一个问题的另一面：旧文件搬上来要盖戳，本版本读不懂的新文件
+ * 既不搬、不改名、不写回——读不懂不等于坏了，把它当坏的就会抹掉更新版本正在用的配置。
  */
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SETTINGS_WRITE_BLOCKED } from '../electron/main/services/settingsService'
+import {
+  SETTINGS_WRITE_BLOCKED,
+  SETTINGS_WRITE_BLOCKED_NEWER_VERSION
+} from '../electron/main/services/settingsService'
 
 type Service = typeof import('../electron/main/services/settingsService')
 
@@ -180,5 +185,100 @@ describe('settings.json 读不出内容（unreadable）', () => {
     // 闸门在碰磁盘之前就落下：既不写 .tmp，也不复制 .bak（那份读不出来的东西不该被任何人读过一遍就改名）
     expect((await readdir(dir)).includes('settings.json.tmp')).toBe(false)
     expect((await readdir(dir)).includes('settings.json.bak')).toBe(false)
+  })
+})
+
+describe('配置格式版本（schemaVersion 与迁移链）', () => {
+  it('没有版本字段的旧文件：搬完把版本盖回去，而且这事不打扰用户', async () => {
+    // 1.0.5 及之前的文件确实不写版本号，这一条既是迁移也是「别再靠猜」的收口：
+    // 只有写盘那一处产生版本字段，下一个读的人不用再猜第二遍
+    await writeFile(file(), JSON.stringify({ aiTtsModel: 'cosyvoice-v1', aiModel: 'gpt-4o' }))
+    await loadInto(dir)
+
+    const settings = await service.loadSettings()
+    expect(settings.ttsModel).toBe('cosyvoice-v1')
+    expect(settings.aiModel).toBe('gpt-4o')
+    expect((await service.getSettingsView()).storageProblem).toBeNull()
+
+    const onDisk = await readJson(file())
+    expect(onDisk.schemaVersion).toBe(1)
+    expect('aiTtsModel' in onDisk).toBe(false)
+  })
+
+  it('版本已经是当前值：读完一个字节都不动', async () => {
+    // 迁移不是「顺手整理一下」。文件说自己已经是 v1 了还去重写，用户看到的保存成功
+    // 其实是我们替他改过一次配置，而这次改动没有任何人要求过
+    const content = '{\n  "schemaVersion": 1,\n  "aiModel": "gpt-4o"\n}'
+    await writeFile(file(), content)
+    await loadInto(dir)
+    await service.loadSettings()
+    await service.getSettingsView()
+    expect(await readFile(file(), 'utf-8')).toBe(content)
+    expect(await namesWith('settings.json')).toEqual(['settings.json'])
+  })
+
+  it('文件来自更新版本：界面说得出是哪个版本，写盘被拦，那份文件一字未动', async () => {
+    // 这条防的是「装了 1.0.9 又回退到 1.0.8」：那一版的多配置与历史记录本版本读不懂，
+    // 但读不懂不等于坏了——改名留档会挪走人家正在用的配置，写回会抹掉 profiles
+    const content = JSON.stringify(
+      { schemaVersion: 2, profiles: [{ name: '工作' }], aiModel: 'gpt-4o' },
+      null,
+      2
+    )
+    await writeFile(file(), content)
+    await loadInto(dir)
+
+    const view = await service.getSettingsView()
+    expect(view.storageProblem).toContain('更新版本')
+    expect(view.storageProblem).toContain('v2')
+    expect(view.aiModel).toBe('')
+
+    await expect(service.saveSettings({ aiModel: 'gpt-4o-mini' })).rejects.toThrow(
+      SETTINGS_WRITE_BLOCKED_NEWER_VERSION
+    )
+    expect(await readFile(file(), 'utf-8')).toBe(content)
+    // 不改名（那是「它坏了」的说法，可它没坏）、不备份、不留临时文件。按前缀筛而不是比整个目录：
+    // 这一条会写 ERROR 日志，userData 下多一个 logs/ 是正常的
+    expect(await namesWith('settings.json')).toEqual(['settings.json'])
+  })
+
+  it('版本写坏成字符串/小数时不按「未来版本」处理：先搬回当前再盖新戳', async () => {
+    // 与上一条的分别是「哪个方向更可恢复」：这种写法更像是有人手改坏了文件，
+    // 按 v0 走一步就把它整理回本版本认得的样子；装成未来版本会让人一直卡在写不进去
+    await writeFile(file(), JSON.stringify({ schemaVersion: '1', aiTtsModel: 'old-voice' }))
+    await loadInto(dir)
+    expect((await service.getSettingsView()).storageProblem).toBeNull()
+    const onDisk = await readJson(file())
+    expect(onDisk.schemaVersion).toBe(1)
+    expect(onDisk.ttsModel).toBe('old-voice')
+    expect('aiTtsModel' in onDisk).toBe(false)
+  })
+
+  it('旧字段与历史明文 Key 同时存在时，一次读盘就把两件事都办完', async () => {
+    // 迁移写盘与密钥就地加密各写一次，中间那次留下的 .bak 是「搬完但还没加密」的那份——
+    // 这条测的是两次写不打架：最终的磁盘上版本、字段、密文三样都对
+    await writeFile(
+      file(),
+      JSON.stringify({ aiTtsModel: 'cosyvoice-v1', aiApiKey: 'sk-legacy-plaintext' })
+    )
+    await loadInto(dir)
+    expect((await service.loadSettings()).aiApiKey).toBe('sk-legacy-plaintext')
+
+    const onDisk = await readJson(file())
+    expect(onDisk.schemaVersion).toBe(1)
+    expect('aiTtsModel' in onDisk).toBe(false)
+    expect(onDisk.aiApiKey as string).toMatch(/^v1:/)
+    expect(await readFile(file(), 'utf-8')).not.toContain('sk-legacy-plaintext')
+
+    // 内存里那份照常能用：迁移写盘失败也不该让用户觉得自己的配置没了（见 readCache 的 WARN 分支）
+    const inMemory = await service.loadSettings()
+    expect(inMemory.aiApiKey).toBe('sk-legacy-plaintext')
+    expect(inMemory.ttsModel).toBe('cosyvoice-v1')
+
+    // 再重灌一次模块当「重启应用」：磁盘上那份必须自己站得住——版本对、旧键没了、密文解得开
+    await loadInto(dir)
+    const rebooted = await service.loadSettings()
+    expect(rebooted.aiApiKey).toBe('sk-legacy-plaintext')
+    expect(rebooted.ttsModel).toBe('cosyvoice-v1')
   })
 })

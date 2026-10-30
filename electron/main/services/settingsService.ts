@@ -8,11 +8,26 @@
  * 能加密就就地换掉。safeStorage 不可用时退回明文并让界面说清楚（见 getSettingsView 的
  * keyEncryptionAvailable）。明文不进渲染进程：给界面的一律是脱敏视图，只有主进程拿得到解密结果。
  */
-import { app, safeStorage } from 'electron'
-import { readFile, writeFile, mkdir, rename, copyFile, readdir, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { safeStorage } from 'electron'
+import { rename } from 'node:fs/promises'
 import { logger } from './logger'
 import { normalizeLocalTtsEngine, type LocalTtsEngineId } from './localTtsEngine'
+import {
+  CORRUPT_SETTINGS_PREFIX,
+  atomicWriteJson,
+  corruptSettingsName,
+  fileStamp,
+  pruneOlderCopies,
+  readJsonFile,
+  settingsFile,
+  userDataPath,
+} from './userDataStore'
+import {
+  CURRENT_SETTINGS_VERSION,
+  CURRENT_SETTINGS_VERSION_FIELD,
+  migrateSettingsDocument,
+  type SettingsDocument,
+} from './settingsSchema'
 
 export interface AppSettings {
   asrProvider: string
@@ -135,17 +150,21 @@ interface SettingsCache {
 let cache: SettingsCache | null = null
 
 /**
- * 读盘失败的两种，处理权限完全不同，所以分开建类型而不是加个 bool：
+ * 读盘失败的三种，处理权限完全不同，所以分开建类型而不是加个 bool：
  * - corrupt：文件确实在那儿但 JSON 解不开（半截写入、手改坏）。已经把原件改名留档，
  *   磁盘上不存在「再坏一次」的风险，所以允许继续按默认值运行并写回新配置。
- * - unreadable：连内容都没拿到（权限、只读介质、settings.json 是个目录）。
- *   这时候内存里的默认值是来自猜测，写盘就是把用户的东西盖掉——禁止写，直到读成功为止。
+ * - unreadable：连内容都没拿到（权限、只读介质、settings.json 是个目录），或者格式链
+ *   断在半路。这时候内存里的默认值是来自猜测，写盘就是把用户的东西盖掉——禁止写，直到读成功为止。
+ * - fromNewerVersion：文件自报的版本比本应用认得的还新（用户装了更新版本又回退，或
+ *   装错了旧包）。那份文件是好的，只是本应用读不懂它，所以既不搬也不改名——改名等于把
+ *   人家正在用的配置挪走，而「读不懂」这件事本身已经足够拦住写盘。
  * 首次运行（文件本来就不存在）不在这里，那不叫失败。另外 corrupt 只在原件真的留档成功时成立：
  * 留档也没成的话原件还在原位，只能按 unreadable 处置。
  */
 export type SettingsLoadProblem =
   | { kind: 'corrupt'; detail: string; archivedTo: string }
   | { kind: 'unreadable'; detail: string }
+  | { kind: 'fromNewerVersion'; version: number }
 
 /**
  * 本轮启动的读数结论，只用来告诉界面「这份配置不是正常读出来的」。
@@ -160,47 +179,56 @@ let loadProblem: SettingsLoadProblem | null = null
  */
 let writeBlocked = false
 
-/** 禁止写盘时给界面的一句话（会原样出现在 toast 上，所以是给人看的措辞，不是错误码） */
+/**
+ * 禁止写盘时给界面的一句话（会原样出现在 toast 上，所以是给人看的措辞，不是错误码）。
+ * 按「为什么拦」分了两条，因为要用户做的事不一样：这一条是「去看这台机器上的数据目录」，
+ * 而版本读不懂那条只能靠更新应用——拦错了方向，用户检查半天磁盘什么毛病也没有。
+ */
 export const SETTINGS_WRITE_BLOCKED =
   '设置文件当前读不出来（权限或磁盘问题），为避免覆盖你已保存的配置，本次没有写入。请检查这台机器上的应用数据目录后重试'
 
+/** 文件来自更新版本的应用时的闸门提示 */
+export const SETTINGS_WRITE_BLOCKED_NEWER_VERSION =
+  '这台机器上的设置文件来自更新版本的应用，本版本读不懂它的配置格式，为避免覆盖，本次没有写入。请使用该更新版本的应用来保存设置'
+
+/**
+ * 闸门落下时该说哪句：拦盘的原因只有 fromNewerVersion 这一种不是磁盘问题
+ */
+function writeBlockedMessage(): string {
+  return loadProblem?.kind === 'fromNewerVersion'
+    ? SETTINGS_WRITE_BLOCKED_NEWER_VERSION
+    : SETTINGS_WRITE_BLOCKED
+}
+
+/**
+ * 「这次不许落盘」这一类错误的共同形状。
+ * IPC 处理器靠 instanceof 认出它并原样透出去，而不是比对具体文案：靠文案相等来放行，
+ * 下次多加一条闸门提示就会漏进处理器那句「清出磁盘空间或修好目录权限」的建议里——
+ * 用户对着一个本来就没坏的二进制版本文件检查磁盘，是我们自己把话说错的。
+ */
+export class SettingsWriteBlockedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SettingsWriteBlockedError'
+  }
+}
+
 /** 留档与备份的份数上限：坏盘会每次启动都留一份，不能把数据目录变成垃圾场 */
 const ARCHIVE_KEEP = 5
-
-/** errno 的 code 是给用户看的那句里唯一有信息量的部分（EACCES / EISDIR / EROFS 各自的处置不同） */
-function errnoDetail(err: unknown): string {
-  const code = (err as NodeJS.ErrnoException).code
-  const message = err instanceof Error ? err.message : String(err)
-  return code ? `${code}: ${message}` : message
-}
-
-/** 文件名里用的时间戳，零填充到秒，字典序＝时间序，清扫时按名字排序即可 */
-function stamp(d: Date): string {
-  return d.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')
-}
 
 /**
  * 把解不开的 settings.json 改名留档，返回留档后的文件名（没留成返回 null）。
  * 改名而不是复制：原件从此不会再被这次或下次的写入碰到，两份内容也不会混在一起。
  */
 async function archiveCorruptSettings(): Promise<string | null> {
-  const file = getSettingsPath()
-  const dir = app.getPath('userData')
-  const name = `settings.json.corrupt-${stamp(new Date())}`
+  const name = corruptSettingsName(fileStamp(new Date()))
   try {
-    await rename(file, join(dir, name))
+    await rename(settingsFile(), userDataPath(name))
   } catch {
     return null
   }
   // 清扫失败不影响这次留档本身，别为了删旧档把刚保住的原件又搭进去
-  try {
-    const names = (await readdir(dir)).filter((n) => n.startsWith('settings.json.corrupt-')).sort()
-    for (const old of names.slice(0, Math.max(0, names.length - ARCHIVE_KEEP))) {
-      await rm(join(dir, old), { force: true })
-    }
-  } catch {
-    /* 留档已经成功，多余的老档交给下次启动 */
-  }
+  await pruneOlderCopies(CORRUPT_SETTINGS_PREFIX, ARCHIVE_KEEP)
   return name
 }
 
@@ -209,6 +237,9 @@ function describeLoadProblem(problem: SettingsLoadProblem | null): string | null
   if (!problem) return null
   if (problem.kind === 'corrupt') {
     return `设置文件没能解析，已把原件保留为 ${problem.archivedTo}，本次从默认配置开始。要找回原来的配置请在「打开数据目录」里查看那份文件`
+  }
+  if (problem.kind === 'fromNewerVersion') {
+    return `这台机器上的设置文件来自更新版本的应用（配置格式 v${problem.version}，本版本只认到 v${CURRENT_SETTINGS_VERSION}），本次按默认配置运行；为防覆盖，保存已停用。装上那个更新版本即可恢复，你已保存的配置没有被改动`
   }
   return `设置文件没能读取（${problem.detail}），本次按默认配置运行；为防覆盖，保存已暂时停用`
 }
@@ -275,50 +306,31 @@ export function normalizeLocalModel(raw: unknown): LocalModelTier {
   return LOCAL_MODEL_TIERS.includes(raw as LocalModelTier) ? (raw as LocalModelTier) : 'base'
 }
 
-function getSettingsPath(): string {
-  return join(app.getPath('userData'), 'settings.json')
-}
-
 /**
  * 唯一的写盘出口。三条规矩，都是被具体故障逼出来的：
- * 1. 读失败（unreadable）时拒绝写——见 writeBlocked，这是「绝不静默丢 Key」的兜底闸门。
+ * 1. 读失败（unreadable / 版本读不懂）时拒绝写——见 writeBlocked，这是「绝不静默丢 Key」的兜底闸门。
  *    注意闸门不在这里解除：POSIX 上 rename 只看目录权限，写成功不代表那份读不出来的文件
  *    变得能读了，把它当「已恢复」反而放过了我们最想拦的那次覆盖。
- * 2. 先写 settings.json.tmp 再 rename：裸 writeFile 在崩溃/断电时会留下半截 JSON，
- *    而那半截正是下次启动读不出来的原因。同仓 installed.json 早就是这么写的（componentService），
- *    这里向它对齐，不另发明一套。
- * 3. rename 之前把上一份复制成 settings.json.bak：原子写保住了「不坏」，.bak 保的是「坏了也能退」，
- *    比如哪天清单版本推进把一个合法但错误的配置写了下去。
+ * 2. 走 userDataStore 的原子写（先 .tmp 再 rename）与 .bak：裸 writeFile 在崩溃/断电时会留下
+ *    半截 JSON，而那半截正是下次启动读不出来的原因。
+ * 3. 落盘时一律盖上当前的格式版本，版本字段只有写盘这一处产生——谁都没法写出一份
+ *    「没自报版本」的配置，下次读的人就不用再靠猜。
  */
 async function writeRaw(raw: AppSettings): Promise<void> {
   if (writeBlocked) {
-    throw new Error(SETTINGS_WRITE_BLOCKED)
+    throw new SettingsWriteBlockedError(writeBlockedMessage())
   }
-  const file = getSettingsPath()
-  const tmp = `${file}.tmp`
-  await mkdir(app.getPath('userData'), { recursive: true })
-  try {
-    await writeFile(tmp, JSON.stringify(raw, null, 2))
-    // 备份没成不阻断这次保存（原子写才是主菜），但也不能悄悄过去：
-    // 日后要找上一版时，日志里这一行解释为什么没有 .bak。
-    // 首次保存压根没有上一份，ENOENT 不是故障，别给它留一行 WARN 让人以为出了事。
-    try {
-      await copyFile(file, `${file}.bak`)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger.warn(
-          'Settings',
-          'Backing up previous settings failed',
-          err instanceof Error ? err.message : String(err)
-        )
-      }
+  await atomicWriteJson(
+    settingsFile(),
+    { [CURRENT_SETTINGS_VERSION_FIELD]: CURRENT_SETTINGS_VERSION, ...raw },
+    {
+      backup: true,
+      // 备份没成不阻断这次保存（原子写才是主菜），但也不能悄悄过去：
+      // 日后要找上一版时，日志里这一行解释为什么没有 .bak。
+      onBackupFailure: (detail) =>
+        logger.warn('Settings', 'Backing up previous settings failed', detail),
     }
-    await rename(tmp, file)
-  } catch (err) {
-    // 半途失败就把临时文件清掉：留着下次就是「磁盘上有个没人认领的 .tmp」
-    await rm(tmp, { force: true }).catch(() => {})
-    throw err
-  }
+  )
   cache = buildCache(raw)
 }
 
@@ -333,89 +345,92 @@ async function migratePlainKeys(raw: AppSettings): Promise<void> {
 }
 
 /**
- * 1.0.5 及之前，配音取值寄存在校对名下（`aiTtsModel` / `aiTtsVoice`）。这里一次性搬到 `tts*`。
- * 只在新键为空时接管，且不管有没有接管都把旧键从磁盘上抹掉——留着会出现「用户把配音模型清空、
- * 下次启动旧值又复活」这种自己解不开的事；静默丢掉用户填过的音色则更糟。
+ * 把迁移过的文档落成 AppSettings：逐项按 DEFAULT_SETTINGS 收，而不是整份展开——
+ * 界面上多带的状态位、手改出来的非字符串值、以及旧版本残留的键，都不该原样留在配置里。
  */
-function adoptLegacyTtsFields(raw: AppSettings, parsed: Record<string, unknown>): boolean {
-  let sawLegacy = false
-  const pairs: Array<[string, keyof AppSettings]> = [
-    ['aiTtsModel', 'ttsModel'],
-    ['aiTtsVoice', 'ttsVoice'],
-  ]
-  for (const [legacyKey, targetKey] of pairs) {
-    const legacyValue = typeof parsed[legacyKey] === 'string' ? (parsed[legacyKey] as string) : ''
-    if (!legacyValue) continue
-    sawLegacy = true
-    if (!raw[targetKey]) raw[targetKey] = legacyValue
+function normalizeDocument(doc: SettingsDocument): AppSettings {
+  const raw: AppSettings = { ...DEFAULT_SETTINGS }
+  for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof AppSettings>) {
+    const value = doc[key]
+    if (typeof value === 'string') raw[key] = value
   }
-  return sawLegacy
+  return raw
 }
 
 /**
  * 读盘并按「这份配置到底从哪来」分类，是整个设置模块唯一的读数入口。
- * 三类失败的处置完全不同，所以不是一句 catch 给默认值：
- * - ENOENT：首次运行，默认值就是正确答案，不报故障、不拦写盘。
- * - 解不开（含顶层不是对象）：原件改名留档，再从默认值继续。写盘允许——那份坏文件
- *   已经不在原位了，不存在「再坏一次」；留档没成功时降级成下一类，原件还在原位。
- * - 其他 errno：内容都没读到，内存里这份纯属猜测，本轮启动禁止写盘。
+ * 这几种结局的处置完全不同，所以不是一句 catch 给默认值：
+ * - 文件不存在：首次运行，默认值就是正确答案，不报故障、不拦写盘、也不造出一份文件。
+ * - 解不开：原件改名留档，再从默认值继续。写盘允许——那份坏文件已经不在原位了，
+ *   不存在「再坏一次」；留档没成功时降级成下一条，原件还在原位。
+ * - 内容都没拿到：内存里这份纯属猜测，本轮启动禁止写盘。
+ * - 版本比本应用新 / 迁移链断了：同样是禁止写盘，但不改名、不搬动——那份文件可能是
+ *   用户在更新版本里正在用的配置，我们只是读不懂它，不是它坏了。
  */
 async function readCache(): Promise<SettingsCache> {
   if (cache) return cache
   loadProblem = null
   writeBlocked = false
   let raw: AppSettings = { ...DEFAULT_SETTINGS }
-  let legacyAdopted = false
+  let needsVersionStamp = false
 
-  try {
-    const text = await readFile(getSettingsPath(), 'utf-8')
-    const parsed = JSON.parse(text)
-    // 空文件走 JSON.parse 的 SyntaxError；'null'、'42'、'[1,2]' 解得开但不会是配置，
-    // 这里主动抛同一个类型，让它们和「解不开」走同一条留档路径，而不是被当成合法配置写回去。
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new SyntaxError('文件内容不是一个配置对象')
-    }
-    const stored = parsed as Record<string, unknown>
-    // 逐项按 DEFAULT_SETTINGS 收，而不是整份展开：界面上多带的状态位、手改出来的非字符串值、
-    // 以及下面要搬走的旧键，都不该原样留在配置里
-    raw = { ...DEFAULT_SETTINGS }
-    for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof AppSettings>) {
-      const value = stored[key]
-      if (typeof value === 'string') raw[key] = value
-    }
-    legacyAdopted = adoptLegacyTtsFields(raw, stored)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      // 必须放在最前面判：这一条不是故障。把它报给界面，每个新用户第一次启动都会看到
-      // 一句莫名其妙的「设置读取失败」。
-    } else if (err instanceof SyntaxError) {
-      const archivedTo = await archiveCorruptSettings()
-      if (archivedTo) {
-        loadProblem = { kind: 'corrupt', detail: err.message, archivedTo }
-      } else {
-        loadProblem = { kind: 'unreadable', detail: '解析失败，且原件没能改名保留，写下去会盖掉它' }
-        writeBlocked = true
-      }
-      logger.error('Settings', 'settings.json is not valid JSON', err.message)
-    } else {
-      const detail = errnoDetail(err)
-      loadProblem = { kind: 'unreadable', detail }
+  const read = await readJsonFile<SettingsDocument>(settingsFile())
+  if (read.status === 'ok') {
+    const migrated = migrateSettingsDocument(read.value)
+    if (migrated.status === 'fromNewerVersion') {
+      loadProblem = { kind: 'fromNewerVersion', version: migrated.version }
       writeBlocked = true
-      logger.error('Settings', 'settings.json could not be read; saving is disabled', detail)
+      logger.error(
+        'Settings',
+        'settings.json uses a newer schema than this build; saving is disabled',
+        `v${migrated.version}`
+      )
+    } else if (migrated.status === 'gap') {
+      loadProblem = {
+        kind: 'unreadable',
+        detail: `配置格式 v${migrated.at} 到 v${CURRENT_SETTINGS_VERSION} 之间缺一步迁移`,
+      }
+      writeBlocked = true
+      logger.error(
+        'Settings',
+        'settings.json migration chain is broken; saving is disabled',
+        `v${migrated.at}`
+      )
+    } else {
+      raw = normalizeDocument(migrated.doc)
+      // 旧格式文件不写版本号，搬上来之后必须把版本盖回去，否则下一个版本只能继续猜。
+      // 只在真读到文件时才做这一步——首次运行不该因为「版本对不上」凭空造出一份配置。
+      needsVersionStamp = migrated.status === 'migrated'
     }
-    raw = { ...DEFAULT_SETTINGS }
+  } else if (read.status === 'corrupt') {
+    const archivedTo = await archiveCorruptSettings()
+    if (archivedTo) {
+      loadProblem = { kind: 'corrupt', detail: read.detail, archivedTo }
+    } else {
+      loadProblem = { kind: 'unreadable', detail: '解析失败，且原件没能改名保留，写下去会盖掉它' }
+      writeBlocked = true
+    }
+    logger.error('Settings', 'settings.json is not valid JSON', read.detail)
+  } else if (read.status === 'unreadable') {
+    loadProblem = { kind: 'unreadable', detail: read.detail }
+    writeBlocked = true
+    logger.error('Settings', 'settings.json could not be read; saving is disabled', read.detail)
   }
 
   cache = buildCache(raw)
   try {
     // 读失败时上面已经把 raw 换回默认值：既没有旧字段可搬，也没有明文 Key 可迁，
     // 这两个条件自然为 false，不会去动那份读不出来的文件。
-    if (legacyAdopted) await writeRaw(raw)
+    if (needsVersionStamp) await writeRaw(raw)
     if (cache.migrated) await migratePlainKeys(raw)
   } catch (e) {
     // 迁移写盘失败不影响这次能不能用：内存里已经是迁移后的值，照常干活，下次启动再试。
     // 但必须留痕——磁盘上会继续留着旧字段、历史明文 Key，而这只有翻日志的人才知道。
-    logger.warn('Settings', 'Migrating settings on disk failed', e instanceof Error ? e.message : String(e))
+    logger.warn(
+      'Settings',
+      'Migrating settings on disk failed',
+      e instanceof Error ? e.message : String(e)
+    )
   }
   return cache
 }

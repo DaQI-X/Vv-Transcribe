@@ -86,6 +86,9 @@ basic_one/
 │   │       ├── connectionTestService.ts # 「测试连接」：分别探云端接口与本机引擎
 │   │       ├── settingsService.ts     #   userData/settings.json 读写 + 内存缓存；Key 密文落盘，对外只给脱敏视图；
 │   │       │                          #     解不开先留档再报，读不出内容就拦住落盘
+│   │       ├── userDataStore.ts       #   用户数据目录的唯一规范层：路径（全仓库只有这里读 app.getPath('userData')）、
+│   │       │                          #     读（ok/missing/corrupt/unreadable 四种结局）、原子写（.tmp→rename、.bak 备份）
+│   │       ├── settingsSchema.ts      #   配置文档的 schemaVersion 与迁移链注册表；升版本只改这里
 │   │       └── logger.ts              #   主进程日志（落 userData/logs/app.log）
 │   ├── preload/                       # contextBridge 暴露 window.electronAPI（index.d.ts 是类型声明）
 │   └── resources/dictionary/          # 内置词库：ci.json / idiom.json / version.json
@@ -396,8 +399,8 @@ preload 用 contextBridge 把这些通道包成 `window.electronAPI`，渲染层
 | `dictionary:getVersion` | 渲染 → 主 | 当前词库 commit hash |
 | `dictionary:checkUpdate` | 渲染 → 主 | 只对比远端 commit，判断有没有新版 |
 | `dictionary:downloadUpdate` | 渲染 → 主 | 下载远端词库更新 |
-| `settings:get` | 渲染 → 主 | 读设置的**脱敏视图**：非密钥字段原样，三把 Key 只给状态（`none`/`encrypted`/`plaintext`/`unreadable`）+ 本机密钥库可用性 + `storageProblem`（磁盘那份没读出来时给人看的一句话，null＝正常）。读盘失败不会让这个 channel 报错——按默认值返回并带上原因，界面才有的可显示 |
-| `settings:save` | 渲染 → 主 | 写设置（渲染层只在点「保存设置」时调用，落盘是 tmp+rename 的原子替换，替换前先留一份 `settings.json.bak`）。Key 字段三态：非空＝替换、`null`＝清除、留空＝整个键不发送、磁盘上那把不动；只收 `DEFAULT_SETTINGS` 列得出的字符串字段。没写进磁盘时不跨 IPC 抛错，回 `saveError` 一句可直接弹的话，界面必须留在原状 |
+| `settings:get` | 渲染 → 主 | 读设置的**脱敏视图**：非密钥字段原样，三把 Key 只给状态（`none`/`encrypted`/`plaintext`/`unreadable`）+ 本机密钥库可用性 + `storageProblem`（磁盘那份没读出来、或来自更新版本的应用时给人看的一句话，null＝正常）。读盘失败不会让这个 channel 报错——按默认值返回并带上原因，界面才有的可显示 |
+| `settings:save` | 渲染 → 主 | 写设置（渲染层只在点「保存设置」时调用，落盘走 `userDataStore` 的原子写：tmp+rename，替换前先留一份 `settings.json.bak`，并把 `schemaVersion` 一起盖上）。Key 字段三态：非空＝替换、`null`＝清除、留空＝整个键不发送、磁盘上那把不动；只收 `DEFAULT_SETTINGS` 列得出的字符串字段。没写进磁盘时不跨 IPC 抛错，回 `saveError` 一句可直接弹的话，界面必须留在原状；这一句有两种来源（原件读不出来 / 那份文件来自更新版本的应用），靠 `SettingsWriteBlockedError` 这个类型分开，不是比字符串——比字符串哪天多一道闸门就会把原因说错 |
 | `settings:testConnection` | 渲染 → 主 | 按表单当前值试一次：`kind='asr'` 探云端接口或本机引擎，`kind='ai'` 探校对接口，`kind='tts'` 探音频接口（真合成一句，约 10 个字）；表单 Key 留空时回落到已保存的那把（改接口地址不用重贴），配音这一腿还额外跟 `getTTSConfig` 同口径回落——留空时用的是校对那把 Key、校对那个地址，否则会出现「自检说没填、点开始配音却跑得通」的分歧；密文解不开则直接报错、不发请求。配音的超时跟真实合成一样是 60 秒，不是校对的 30 秒 |
 | `app:getServiceReady` | 渲染 → 主 | 开屏阶段状态：`asrDone` / `asrError` / `dictionaryDone` |
 | `app:log` | 渲染 → 主 | 渲染层日志经 `src/utils/logger.ts` 汇入 `app.log`，两边写在同一份日志里 |
@@ -462,7 +465,7 @@ pnpm test:watch    # 边改边跑
 
 跑的是 vitest（`vitest.config.ts` 单独一份，不复用 `vite.config.ts`：那份挂着 `vite-plugin-electron`，它的 `onstart` 会在每次跑测试时把应用拉起来）。`electron` 模块由 `tests/setup.ts` 逐个成员给出显式替身——不是 Proxy 兜万能，漏了哪个成员就响亮地失败，免得把真缺陷测成通过。
 
-当前覆盖两块。一是主进程里「收口的纯函数」：配置归一化（接口地址 / 本地档位 / 配音档位 / 音色 / 引擎白名单）与配音单次调用参数（`withOverrides`、`toSegments`）——这些地方的失败方式不是报错，而是「界面显示 A、实际跑的是 B」，正适合用断言钉住，`tests/ttsCallOptions.test.ts` 里那条「引擎空串必须保住设置里那档」就是 2026-10-29 本机试听踩实的 bug 的回归锚。二是 `settings.json` 的读写（`tests/settingsPersistence.test.ts`）：走的是真文件（每用例一份 `mkdtemp` 临时目录 + 替身 `app.getPath`），钉的是「解不开会留档并说出去」「读不出内容会拦住落盘」「密钥留空＝不改、`null`＝清除」「首次运行不凭空造文件」「`.bak` 存的是上一份而不是这一份」「留档最多 5 份」。写盘这类逻辑用 mock 的 `fs` 测等于测了自己骗自己，所以这里坚持落真盘；`safeStorage` 用一对可逆的假加解密（`fake:` 前缀）替掉，不碰系统密钥库。
+当前覆盖三块。一是主进程里「收口的纯函数」：配置归一化（接口地址 / 本地档位 / 配音档位 / 音色 / 引擎白名单）与配音单次调用参数（`withOverrides`、`toSegments`）——这些地方的失败方式不是报错，而是「界面显示 A、实际跑的是 B」，正适合用断言钉住，`tests/ttsCallOptions.test.ts` 里那条「引擎空串必须保住设置里那档」就是 2026-10-29 本机试听踩实的 bug 的回归锚。二是 `userData` 这一层本身：`tests/userDataStore.test.ts` 钉路径收口（各处目录都在 userData 下且互不重合、`settings.json` 平铺在根层）与读写机制（四种读盘结局分得清、原子写留下的文件、`.bak` 存的是上一份、备份失败不影响写成功、历史副本按前缀只留最新 keep 份），`tests/settingsSchema.test.ts` 钉迁移链（走链的三种结局、多步顺序、断链判 gap、比本版新的一份字节不动）；这几份都落在真临时目录里（每用例一份 `mkdtemp` + 替身 `app.getPath`），写盘逻辑用 mock 的 `fs` 测等于测了自己骗自己，`safeStorage` 则由一对可逆的假加解密（`fake:` 前缀）替掉，不碰系统密钥库。三是 `settings.json` 的读写端到端（`tests/settingsPersistence.test.ts`）：钉「解不开会留档并说出去」「读不出内容会拦住落盘」「密钥留空＝不改、`null`＝清除」「首次运行不凭空造文件」「旧字段与明文 Key 一次读盘都办完」「v2 的文件读得懂界面但不许写」。迁移链的多步顺序与断链没法靠只有一步的生产注册表证明，所以 `migrateSettingsDocument` 的 target / steps 做成入参。UI 与安装包链路仍由人工冒烟覆盖。
 
 闸门位置：`build.yml` 的 `test` job（ubuntu，装依赖 + `tsc -b --force` + `pnpm test`）用 `needs` 卡在三平台矩阵之前，红在这里就不用再花三份构建时间。UI 与安装包链路仍由人工冒烟覆盖（见上面的「开发模式」与下面的「构建打包」），单测不碰。
 
@@ -645,5 +648,7 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
   - 文件在但**解不开**（半截写入、手改坏）：先把原件改名留成 `settings.json.corrupt-<时间戳>`（改名成功才这么算，最多留最新 5 份，见 `ARCHIVE_KEEP`），再按默认配置继续跑，启动时弹一句说明，「设置 → 本机数据」里另有一个「打开数据目录」按钮——toast 会消失，原件就在那一层，随时可以从那份文件里找回。这时候写盘是安全的，所以不拦。
   - 连**内容都没拿到**（权限、只读介质、`settings.json` 是个目录）：内存里的默认值来自猜测，写下去就是盖掉用户的东西，所以本次禁止落盘（`SETTINGS_WRITE_BLOCKED`），「保存设置」弹的是这句原因而不是成功。闸门只由一次**成功读取**打开：POSIX 上 rename 只需要目录可写，所以「写成功了」并不证明原件变得可读了。
   - 内容非 null 的 JSON 但不是一对象（数组、字符串）走 corrupt 那条；空文件、`null` 也走。首次运行（文件本来就不存在，ENOENT）不算故障，`storageProblem` 为 null，也不会凭空造出一个 `settings.json`
+- **`settings.json` 自己声明格式版本**：文件里多了一个 `schemaVersion`（本版写 1），只由写盘那一步盖上，读的时候缺字段就按 v0 走迁移。往下兼容靠 `settingsSchema.ts` 的迁移注册表一条一步搬上来（v0→v1 就是把 1.0.5 之前寄存在校对名下的 `aiTtsModel` / `aiTtsVoice` 搬到 `ttsModel` / `ttsVoice`，搬完无条件删旧键）；链中间缺一步会被判成「断链」并拦住写盘，而不是跳过那步——跳过等于把一份看不懂的文件当成看懂了。往上不兼容时反过来：**版本比本版高的文件，本版不搬、不改名、不写回，连保存都停用**（`SETTINGS_WRITE_BLOCKED_NEWER_VERSION`），防的是「装了 1.0.9 再回退到 1.0.8」把用户新版里的配置整段抹掉。写坏的版本号（`'1'`、1.5、负数）按 v0 处理：这个方向搬得回来，装成未来版本反而把人卡在写不进去
+- **用户数据目录的落点只有一处定义**：`userDataStore.ts` 是全主进程唯一向 Electron 要 userData 根的地方，日志、按需组件、更新下来的 yt-dlp、词库副本、`settings.json` 都从它拼出来，所以「打开数据目录」按钮打开的那一层，确实就是这些文件住的那一层。同一层还给出唯一的原子写（`.tmp`→rename）与读盘结局分类；`installed.json`（按需组件的版本账）也走这个写。仍按自己方式 `writeFile` 的只剩两类：tempDir 里一次性的中间产物（配音逐段的音频、铺轴用的 ffmpeg graph、用完即删的 cookies），以及可重下的词库副本与它的 `version.json`——后者解不开时读的那一头直接回「没有版本」，下次更新覆盖，坏了我不会盖掉用户填的任何东西
 - 链接取内容的临时媒体**不是**下完就删：播放器整场都要拿它做逐句回放，删早了链路末尾只会剩一条「文件已被移动」的 toast（这是 1.0.5 修掉的回归）。站点 cookies 在提取出音频后立刻删，媒体留到「下一段素材开工」或「退出应用」；应用被强杀时这两处都走不到，下次启动由 24 小时清扫兜底。所以 /tmp 里短时间内看到上一份素材是正常的，不是泄漏
 - 端口 8000 是本机引擎的约定端口。应用不会复用一个「应答者身份不明」的服务，因此手动起的 `python main.py` 不会被采信；反过来，构建或清理时不要用 `pkill -f vv-asr-server` 之类的通配杀进程，容易连别的工作一起打掉

@@ -26,15 +26,15 @@
  */
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { net } from 'electron'
 import { logger } from './logger'
+import { atomicWriteJson, componentsDir } from './userDataStore'
 import { ArchiveError, extractTarGz } from './componentArchive'
 import {
   COMPONENT_ROW_TITLES,
   LOCAL_TTS_ENGINES,
-  componentsDir,
   isLocalTtsEngineRunning,
   modelRootDir,
 } from './localTtsEngine'
@@ -324,13 +324,9 @@ async function readInstalled(): Promise<Record<string, InstalledRecord>> {
   }
 }
 
-/** 原子写：先落 .tmp 再改名，避免应用被杀时留下半份 JSON 把版本记录整个丢掉 */
+/** 写「装的哪一版」：走 userDataStore 的原子写，应用被杀时不会留下半份 JSON 把版本记录整个丢掉 */
 async function writeInstalled(map: Record<string, InstalledRecord>): Promise<void> {
-  const file = installedFile()
-  const tmp = `${file}.tmp`
-  await mkdir(dirname(file), { recursive: true })
-  await writeFile(tmp, JSON.stringify({ schema: MANIFEST_SCHEMA, components: map }, null, 2), 'utf8')
-  await rename(tmp, file)
+  await atomicWriteJson(installedFile(), { schema: MANIFEST_SCHEMA, components: map })
 }
 
 /** 读一份可能不存在的文本文件；读不到就是 null，不抛 */

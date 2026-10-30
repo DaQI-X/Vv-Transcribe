@@ -3,9 +3,9 @@
  * 记录用户操作、服务调用和错误信息，便于问题排查
  * 日志文件保存在 userData 目录下的 logs 文件夹
  */
-import { app } from 'electron'
 import { mkdir, appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { logsDir } from './userDataStore'
 
 type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'DEBUG'
 
@@ -23,7 +23,7 @@ class Logger {
   private initialized = false
 
   constructor() {
-    this.logDir = join(app.getPath('userData'), 'logs')
+    this.logDir = logsDir()
     this.logFile = join(this.logDir, 'app.log')
   }
 
