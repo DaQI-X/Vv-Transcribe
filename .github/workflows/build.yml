@@ -195,6 +195,23 @@ jobs:
           path: ${{ matrix.ttsArtifactPath }}
           if-no-files-found: error
 
+      # 引擎冻结产物冒烟（#235 路径 A）：产物一出来就当场验，挂在已有矩阵里，不另开一次 CI。
+      # 证的三件事都是「只有在这台机器上才看得出来」的：onefile 能不能解包拉起、
+      # 身份握手回不回本次的 boot_id、sherpa-onnx 的原生库（Windows 的 onnxruntime.dll /
+      # macOS 的 libonnxruntime）被 PyInstaller 收完之后还在不在——
+      # 判据是「空模型目录要出 503（缺文件）而不是 500（import 挂）」，
+      # 因为 sidecar 的 load_engine() 是先 import sherpa_onnx 再查文件。
+      # 不下模型：135MB/426MB 那两份留给手测（路径 B），所以「出声」档在这里恒为跳过；
+      # ASR 档也只到握手（faster_whisper 是懒加载），别把这条绿读成「转写/配音真跑过一遍」。
+      # 架构用 matrix.arch 而不是 process.arch：macOS x64 job 的 Node 本身仍是 arm64，
+      # 只有构建步骤被 arch -x86_64 按在 x64 里；那里的 x64 产物靠 Rosetta 拉起，
+      # 所以它证的是「x64 这套库能跑」，RTF 不等于 Intel Mac。
+      - name: Smoke engine binaries (${{ matrix.arch }})
+        env:
+          VV_ENGINE_SMOKE: '1'
+          VV_ENGINE_SMOKE_ARCH: ${{ matrix.arch }}
+        run: pnpm vitest run tests/engineSmoke.test.ts
+
       - name: Build renderer + main
         run: pnpm build
 

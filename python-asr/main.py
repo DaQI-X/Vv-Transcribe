@@ -207,5 +207,10 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     import uvicorn
-    log("[ASR] Starting Vv Transcribe ASR service on http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # 端口可由宿主/冒烟改写，默认仍是 8000（应用内那条链路没设这个变量，行为一字不变）。
+    # 加这一位是为了 tests/engineSmoke.test.ts：它要在开发者机器上拉起一份冻结二进制做握手校验，
+    # 而 8000 很可能正被那个开着的应用占着——占着就得跳过，等于最该跑的那台机器上跑不到。
+    port = int(os.environ.get("VV_ASR_PORT", "8000"))
+    log(f"[ASR] Starting Vv Transcribe ASR service on http://localhost:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
