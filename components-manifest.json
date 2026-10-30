@@ -3,26 +3,26 @@
   "_verify": "发布后用 GitHub Release 的资产 digest（GitHub 自己算的 SHA2-256）复核：node scripts/components-manifest.mjs。资产由 build.yml 的 release job 在「创建 Release」那一刻一起上传——仓库开了 Release immutability，事后往已发布的 Release 加资产会 422，所以只有这一刻传得进去；清单要人工看过 diff 再合进 main——没合进 main 之前应用内读不到它。",
   "schema": 1,
   "component": "vv-components",
-  "tag": "v1.0.7",
-  "reviewedAt": "2026-10-29",
+  "tag": "v1.0.8",
+  "reviewedAt": "2026-10-30",
   "components": {
     "vv-tts-server": {
-      "version": "1.0.7",
+      "version": "1.0.8",
       "assets": {
         "darwin-arm64": {
-          "name": "vv-tts-server-darwin-arm64-1.0.7",
-          "sha256": "bd8dc3677ab9ae2c717df065d72594d7ffd5b24df09bea239c358cb1ed948822",
-          "bytes": 24438304
+          "name": "vv-tts-server-darwin-arm64-1.0.8",
+          "sha256": "a14e9471646fecd0f1554f874ee7b74457df9dc6bdf3b23ec1b33fbc1ddf0639",
+          "bytes": 24436816
         },
         "darwin-x64": {
-          "name": "vv-tts-server-darwin-x64-1.0.7",
-          "sha256": "5b19afd76c58eb58c395354b9021e9685512a5c66184d0794e8974855342e671",
-          "bytes": 26471280
+          "name": "vv-tts-server-darwin-x64-1.0.8",
+          "sha256": "9828d4958b4fc770be71b0f05b75daec580c26e0f9e14d35acfaadf1b7bc144b",
+          "bytes": 26470896
         },
         "win32-x64": {
-          "name": "vv-tts-server-win32-x64-1.0.7",
-          "sha256": "c1ac6ceccbbfa363a1042dd7f65328c4d1bd6e7fab7b4ece17be628b2b2a1117",
-          "bytes": 23962682
+          "name": "vv-tts-server-win32-x64-1.0.8",
+          "sha256": "9ba3c089c2febcaf35a69f29b378532cecb056e3bc90b0b58a6caab4982b4b3e",
+          "bytes": 23960622
         }
       }
     }
