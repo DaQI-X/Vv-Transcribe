@@ -10,8 +10,9 @@ import {
   saveSettings,
   normalizeLocalModel,
   normalizeTtsEngine,
-  type AppSettings,
+  SETTINGS_WRITE_BLOCKED,
   type LocalModelTier,
+  type SettingsPatch,
   type SettingsView,
 } from '../services/settingsService'
 import { restartLocalEngine } from '../services/asrServiceManager'
@@ -35,6 +36,12 @@ export interface SaveSettingsResult {
   tierRestart: TierRestartOutcome
   /** tierRestart 为 failed 时可直接展示给用户的原因 */
   error: string | null
+  /**
+   * 这次没能写进磁盘，可直接展示给用户的原因；null＝真的存下了。
+   * 界面必须靠它决定接下来做什么：写盘失败却照旧清空 Key 输入框、报「设置已保存」，
+   * 就是当面撒慌——而磁盘上那份配置还是旧的（甚至一份都没有）。
+   */
+  saveError: string | null
 }
 
 /**
@@ -59,6 +66,17 @@ const TIER_RESTART_MESSAGE: Partial<Record<TierRestartOutcome, string>> = {
 const UNREADABLE_KEY_MESSAGE =
   '这台机器读不出已保存的 API Key（可能换过电脑，或系统密钥库被清过）。重新填一次并保存即可'
 
+/**
+ * 写盘失败要说人话。SETTINGS_WRITE_BLOCKED 本来就是给人看的一句话，原样透出去；
+ * 其余的（ENOSPC、EACCES、只读介质）带着 errno 文本，再加一句「你填的还在界面上」，
+ * 免得用户以为白填了一遍去重填。
+ */
+function saveErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  if (message === SETTINGS_WRITE_BLOCKED) return message
+  return `设置没能写入（${message}）。界面上填的内容还在，不用重填；清出磁盘空间或修好目录权限后再存一次`
+}
+
 export function registerSettingsHandlers() {
   // 脱敏视图：密钥字段在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」
   ipcMain.handle('settings:get', async (): Promise<SettingsView> => {
@@ -69,14 +87,22 @@ export function registerSettingsHandlers() {
     'settings:save',
     async (
       _event,
-      // 界面上的 Key 输入框留空＝不改，显式清除走 null，非空才是替换（见 saveSettings）
-      patch: Partial<AppSettings> &
-        Partial<{ asrApiKey: string | null; aiApiKey: string | null; ttsApiKey: string | null }>
+      // 界面上的 Key 输入框留空＝不改，显式清除走 null，非空才是替换（见 saveSettings）。
+      // 类型必须和 saveSettings 用同一个：这里写宽了 IPC 收得下、那边收不住，
+      // 「清除 Key」按钮的 null 会在跨进程之后变成 undefined，用户看到的是没删掉
+      patch: SettingsPatch
     ): Promise<SaveSettingsResult> => {
-      const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
-      const saved = await saveSettings(patch)
-      const tierRestart = await applyTierChange(before, normalizeLocalModel(saved.asrLocalModel))
-      return { settings: saved, tierRestart, error: TIER_RESTART_MESSAGE[tierRestart] ?? null }
+      try {
+        const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
+        const saved = await saveSettings(patch)
+        const tierRestart = await applyTierChange(before, normalizeLocalModel(saved.asrLocalModel))
+        return { settings: saved, tierRestart, error: TIER_RESTART_MESSAGE[tierRestart] ?? null, saveError: null }
+      } catch (err) {
+        // 不跨 IPC 抛错：让渲染层拿到一句可以直接弹的话，而不是一个它接不住的 reject
+        const saveError = saveErrorMessage(err)
+        logger.error('Settings', 'settings:save did not reach the disk', saveError)
+        return { settings: await getSettingsView(), tierRestart: 'not-needed', error: null, saveError }
+      }
     }
   )
 

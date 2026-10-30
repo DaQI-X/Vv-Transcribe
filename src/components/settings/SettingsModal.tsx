@@ -53,6 +53,7 @@ import {
   voiceSidOptions,
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
+import { openUserDataDirectory } from '@/utils/userData'
 import type { KeyStatus } from '@/utils/readiness'
 
 interface SettingsValues {
@@ -546,6 +547,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         else delete payload[field]
       }
       const result = await api.saveSettings(payload)
+      // 没写进磁盘就到此为止。后面那几步——清空 Key 输入框、更新快照、报「设置已保存」——
+      // 全都建立在「存下了」之上；少弹这一句却多报一句成功，就是当着用户的面撒谎。
+      // 界面上填的内容原样留着，用户修好磁盘空间或权限后可以直接再点一次。
+      if (result?.saveError) {
+        toast.error(result.saveError, 15000, {
+          label: '打开数据目录',
+          onClick: handleOpenUserDataDirectory,
+        })
+        return
+      }
       // 提交过的 Key 从输入框里清掉：值已经进了配置，留在那儿会让人以为还没保存
       const nextValues: SettingsValues = {
         ...values,
@@ -887,6 +898,12 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       toast.error('打开日志文件夹失败')
     }
   }
+
+  /**
+   * 设置读不出来时唯一的自救入口：corrupt 留档的原件和上一次的 .bak 都住在这一层。
+   * 实现放在 utils/userData，保存失败的 toast 用的是同一个（措辞必须与主进程那句话对上）。
+   */
+  const handleOpenUserDataDirectory = () => void openUserDataDirectory()
 
   const copyContactEmail = async (email: string) => {
     try {
@@ -1440,6 +1457,25 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 </div>
                 <span className="settings-form-hint">
                   转写或校对失败时，把这里的日志文件随邮件发给开发者便于排查
+                </span>
+              </div>
+
+              <div className="settings-form-group">
+                <label className="settings-form-label">本机数据</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={handleOpenUserDataDirectory}
+                    className="settings-modal__dict-update-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  >
+                    <FolderOpen size={12} />
+                    打开数据目录
+                  </button>
+                </div>
+                <span className="settings-form-hint">
+                  设置（settings.json）、按需下载的配音引擎与组件都在这里。设置没能解析时，
+                  原件会以 settings.json.corrupt-时间戳 的名字留在同一层，可以从那份文件里找回
                 </span>
               </div>
 

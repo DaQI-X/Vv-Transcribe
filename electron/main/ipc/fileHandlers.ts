@@ -2,9 +2,9 @@
  * 文件处理 IPC 处理器
  * 提供文件选择对话框、文件元数据读取、音频提取（FFmpeg）、临时文件清理等功能
  */
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { app, ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { stat, writeFile } from 'node:fs/promises'
-import { basename, extname } from 'node:path'
+import { basename, extname, join } from 'node:path'
 import { extractAudio, cleanupTemp, probeFile } from '../services/audioProcessor'
 import {
   cancelMediaDownload,
@@ -30,6 +30,27 @@ const VIDEO_EXTENSIONS = [
   '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts', '.mts', '.mxf', '.vob', '.ogv',
 ]
 const ALLOWED_EXTENSIONS = [...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS]
+
+/**
+ * 在系统文件管理器里打开一个目录。
+ * `shell.openPath()` 不 reject——打不开（目录还没建、权限、找不到 Helper）时它把 resolve 成
+ * 一句错误文本，所以只 catch 异常的那版永远返回 success: true，界面也就永远报「已打开」。
+ * 这里按它真正的契约判一次，界面才敢拿这个返回值当结论。
+ */
+async function openInFinder(dir: string, channel: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const failure = await shell.openPath(dir)
+    if (failure) {
+      // openPath 的错误是一句话文本，不是 Error；serviceError 只取 .message，所以包一层再交
+      logger.serviceError('FileHandlers', channel, { message: failure })
+      return { success: false, error: failure }
+    }
+    return { success: true }
+  } catch (err) {
+    logger.serviceError('FileHandlers', channel, err as Error)
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
 
 export function registerFileHandlers() {
   ipcMain.handle('dialog:selectFile', async () => {
@@ -255,16 +276,15 @@ export function registerFileHandlers() {
   })
 
   ipcMain.handle('app:openLogDirectory', async () => {
-    const { app, shell } = require('electron')
-    const { join } = require('path')
     const logDir = join(app.getPath('userData'), 'logs')
     logger.userAction('Opening log directory', { path: logDir })
-    try {
-      await shell.openPath(logDir)
-      return { success: true }
-    } catch (err) {
-      logger.serviceError('FileHandlers', 'openLogDirectory', err as Error)
-      return { success: false, error: (err as Error).message }
-    }
+    return openInFinder(logDir, 'openLogDirectory')
+  })
+
+  // 设置读不出来时，界面唯一的「自己看一眼原件」入口：corrupt 留档那份、.bak 那份都住在这里
+  ipcMain.handle('app:openUserDataDirectory', async () => {
+    const dir = app.getPath('userData')
+    logger.userAction('Opening user data directory')
+    return openInFinder(dir, 'openUserDataDirectory')
   })
 }

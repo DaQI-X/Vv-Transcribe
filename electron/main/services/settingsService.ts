@@ -9,7 +9,7 @@
  * keyEncryptionAvailable）。明文不进渲染进程：给界面的一律是脱敏视图，只有主进程拿得到解密结果。
  */
 import { app, safeStorage } from 'electron'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, copyFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { logger } from './logger'
 import { normalizeLocalTtsEngine, type LocalTtsEngineId } from './localTtsEngine'
@@ -79,7 +79,23 @@ export type SettingsView = Omit<AppSettings, SecretField> & {
   aiKeyStatus: SecretStatus
   ttsKeyStatus: SecretStatus
   keyEncryptionAvailable: boolean
+  /**
+   * 这份配置是怎么来的：null＝正常读到了磁盘上的配置；非 null＝磁盘那份没读出来，
+   * 界面必须把它当成「出问题了」而不是「用户还没填」。文案见 describeLoadProblem。
+   */
+  storageProblem: string | null
 }
+
+/**
+ * 「保存」能接受的补丁形状。密钥单独摊出来写，是为了让 null（清除）真的能通过类型检查：
+ * `Partial<AppSettings> & Partial<Record<SecretField, string | null>>` 这种交叉类型里，
+ * 同名属性会被求交收成 `string | undefined`，null 直接判不兼容——于是调用方只能传 ''，
+ * 而 '' 的语义是「不改」，传下去就是把用户的 Key 留着不删。界面那个「清除 Key」按钮
+ * 走的是同一条 IPC，写错一次就是当着用户的面把配置改了却没删掉他以为删掉的东西。
+ * handlers 与 preload 都引用这个类型，别再各写一遍。
+ */
+export type SettingsPatch = Partial<Omit<AppSettings, SecretField>> &
+  Partial<Record<SecretField, string | null>>
 
 const DEFAULT_SETTINGS: AppSettings = {
   asrProvider: 'local',
@@ -117,6 +133,85 @@ interface SettingsCache {
 }
 
 let cache: SettingsCache | null = null
+
+/**
+ * 读盘失败的两种，处理权限完全不同，所以分开建类型而不是加个 bool：
+ * - corrupt：文件确实在那儿但 JSON 解不开（半截写入、手改坏）。已经把原件改名留档，
+ *   磁盘上不存在「再坏一次」的风险，所以允许继续按默认值运行并写回新配置。
+ * - unreadable：连内容都没拿到（权限、只读介质、settings.json 是个目录）。
+ *   这时候内存里的默认值是来自猜测，写盘就是把用户的东西盖掉——禁止写，直到读成功为止。
+ * 首次运行（文件本来就不存在）不在这里，那不叫失败。另外 corrupt 只在原件真的留档成功时成立：
+ * 留档也没成的话原件还在原位，只能按 unreadable 处置。
+ */
+export type SettingsLoadProblem =
+  | { kind: 'corrupt'; detail: string; archivedTo: string }
+  | { kind: 'unreadable'; detail: string }
+
+/**
+ * 本轮启动的读数结论，只用来告诉界面「这份配置不是正常读出来的」。
+ * 写盘成功不抹它——原件被留档这件事，不会因为后来又写了个新文件就不成立了。
+ */
+let loadProblem: SettingsLoadProblem | null = null
+
+/**
+ * 唯一能阻止落盘的状态，和 loadProblem 分开是有原因的：corrupt 也要报给界面，
+ * 但它的语义是「原件保住了、可以继续」；unreadable 才是「再写就是盖掉用户的东西」。
+ * 一个变量既当提示又当闸门，下次改动就会误放开放误拦。
+ */
+let writeBlocked = false
+
+/** 禁止写盘时给界面的一句话（会原样出现在 toast 上，所以是给人看的措辞，不是错误码） */
+export const SETTINGS_WRITE_BLOCKED =
+  '设置文件当前读不出来（权限或磁盘问题），为避免覆盖你已保存的配置，本次没有写入。请检查这台机器上的应用数据目录后重试'
+
+/** 留档与备份的份数上限：坏盘会每次启动都留一份，不能把数据目录变成垃圾场 */
+const ARCHIVE_KEEP = 5
+
+/** errno 的 code 是给用户看的那句里唯一有信息量的部分（EACCES / EISDIR / EROFS 各自的处置不同） */
+function errnoDetail(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException).code
+  const message = err instanceof Error ? err.message : String(err)
+  return code ? `${code}: ${message}` : message
+}
+
+/** 文件名里用的时间戳，零填充到秒，字典序＝时间序，清扫时按名字排序即可 */
+function stamp(d: Date): string {
+  return d.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')
+}
+
+/**
+ * 把解不开的 settings.json 改名留档，返回留档后的文件名（没留成返回 null）。
+ * 改名而不是复制：原件从此不会再被这次或下次的写入碰到，两份内容也不会混在一起。
+ */
+async function archiveCorruptSettings(): Promise<string | null> {
+  const file = getSettingsPath()
+  const dir = app.getPath('userData')
+  const name = `settings.json.corrupt-${stamp(new Date())}`
+  try {
+    await rename(file, join(dir, name))
+  } catch {
+    return null
+  }
+  // 清扫失败不影响这次留档本身，别为了删旧档把刚保住的原件又搭进去
+  try {
+    const names = (await readdir(dir)).filter((n) => n.startsWith('settings.json.corrupt-')).sort()
+    for (const old of names.slice(0, Math.max(0, names.length - ARCHIVE_KEEP))) {
+      await rm(join(dir, old), { force: true })
+    }
+  } catch {
+    /* 留档已经成功，多余的老档交给下次启动 */
+  }
+  return name
+}
+
+/** 给界面的一句话：null＝这份配置是正常从磁盘读出来的 */
+function describeLoadProblem(problem: SettingsLoadProblem | null): string | null {
+  if (!problem) return null
+  if (problem.kind === 'corrupt') {
+    return `设置文件没能解析，已把原件保留为 ${problem.archivedTo}，本次从默认配置开始。要找回原来的配置请在「打开数据目录」里查看那份文件`
+  }
+  return `设置文件没能读取（${problem.detail}），本次按默认配置运行；为防覆盖，保存已暂时停用`
+}
 
 /**
  * 本机密钥库可用性。isEncryptionAvailable() 在 Linux 没有密钥环时可能直接抛，
@@ -184,9 +279,46 @@ function getSettingsPath(): string {
   return join(app.getPath('userData'), 'settings.json')
 }
 
+/**
+ * 唯一的写盘出口。三条规矩，都是被具体故障逼出来的：
+ * 1. 读失败（unreadable）时拒绝写——见 writeBlocked，这是「绝不静默丢 Key」的兜底闸门。
+ *    注意闸门不在这里解除：POSIX 上 rename 只看目录权限，写成功不代表那份读不出来的文件
+ *    变得能读了，把它当「已恢复」反而放过了我们最想拦的那次覆盖。
+ * 2. 先写 settings.json.tmp 再 rename：裸 writeFile 在崩溃/断电时会留下半截 JSON，
+ *    而那半截正是下次启动读不出来的原因。同仓 installed.json 早就是这么写的（componentService），
+ *    这里向它对齐，不另发明一套。
+ * 3. rename 之前把上一份复制成 settings.json.bak：原子写保住了「不坏」，.bak 保的是「坏了也能退」，
+ *    比如哪天清单版本推进把一个合法但错误的配置写了下去。
+ */
 async function writeRaw(raw: AppSettings): Promise<void> {
+  if (writeBlocked) {
+    throw new Error(SETTINGS_WRITE_BLOCKED)
+  }
+  const file = getSettingsPath()
+  const tmp = `${file}.tmp`
   await mkdir(app.getPath('userData'), { recursive: true })
-  await writeFile(getSettingsPath(), JSON.stringify(raw, null, 2))
+  try {
+    await writeFile(tmp, JSON.stringify(raw, null, 2))
+    // 备份没成不阻断这次保存（原子写才是主菜），但也不能悄悄过去：
+    // 日后要找上一版时，日志里这一行解释为什么没有 .bak。
+    // 首次保存压根没有上一份，ENOENT 不是故障，别给它留一行 WARN 让人以为出了事。
+    try {
+      await copyFile(file, `${file}.bak`)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn(
+          'Settings',
+          'Backing up previous settings failed',
+          err instanceof Error ? err.message : String(err)
+        )
+      }
+    }
+    await rename(tmp, file)
+  } catch (err) {
+    // 半途失败就把临时文件清掉：留着下次就是「磁盘上有个没人认领的 .tmp」
+    await rm(tmp, { force: true }).catch(() => {})
+    throw err
+  }
   cache = buildCache(raw)
 }
 
@@ -220,26 +352,64 @@ function adoptLegacyTtsFields(raw: AppSettings, parsed: Record<string, unknown>)
   return sawLegacy
 }
 
+/**
+ * 读盘并按「这份配置到底从哪来」分类，是整个设置模块唯一的读数入口。
+ * 三类失败的处置完全不同，所以不是一句 catch 给默认值：
+ * - ENOENT：首次运行，默认值就是正确答案，不报故障、不拦写盘。
+ * - 解不开（含顶层不是对象）：原件改名留档，再从默认值继续。写盘允许——那份坏文件
+ *   已经不在原位了，不存在「再坏一次」；留档没成功时降级成下一类，原件还在原位。
+ * - 其他 errno：内容都没读到，内存里这份纯属猜测，本轮启动禁止写盘。
+ */
 async function readCache(): Promise<SettingsCache> {
   if (cache) return cache
-  let raw: AppSettings
+  loadProblem = null
+  writeBlocked = false
+  let raw: AppSettings = { ...DEFAULT_SETTINGS }
   let legacyAdopted = false
+
   try {
     const text = await readFile(getSettingsPath(), 'utf-8')
-    const parsed = JSON.parse(text) as Record<string, unknown>
+    const parsed = JSON.parse(text)
+    // 空文件走 JSON.parse 的 SyntaxError；'null'、'42'、'[1,2]' 解得开但不会是配置，
+    // 这里主动抛同一个类型，让它们和「解不开」走同一条留档路径，而不是被当成合法配置写回去。
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new SyntaxError('文件内容不是一个配置对象')
+    }
+    const stored = parsed as Record<string, unknown>
     // 逐项按 DEFAULT_SETTINGS 收，而不是整份展开：界面上多带的状态位、手改出来的非字符串值、
     // 以及下面要搬走的旧键，都不该原样留在配置里
     raw = { ...DEFAULT_SETTINGS }
     for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof AppSettings>) {
-      const value = parsed[key]
+      const value = stored[key]
       if (typeof value === 'string') raw[key] = value
     }
-    legacyAdopted = adoptLegacyTtsFields(raw, parsed)
-  } catch {
+    legacyAdopted = adoptLegacyTtsFields(raw, stored)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // 必须放在最前面判：这一条不是故障。把它报给界面，每个新用户第一次启动都会看到
+      // 一句莫名其妙的「设置读取失败」。
+    } else if (err instanceof SyntaxError) {
+      const archivedTo = await archiveCorruptSettings()
+      if (archivedTo) {
+        loadProblem = { kind: 'corrupt', detail: err.message, archivedTo }
+      } else {
+        loadProblem = { kind: 'unreadable', detail: '解析失败，且原件没能改名保留，写下去会盖掉它' }
+        writeBlocked = true
+      }
+      logger.error('Settings', 'settings.json is not valid JSON', err.message)
+    } else {
+      const detail = errnoDetail(err)
+      loadProblem = { kind: 'unreadable', detail }
+      writeBlocked = true
+      logger.error('Settings', 'settings.json could not be read; saving is disabled', detail)
+    }
     raw = { ...DEFAULT_SETTINGS }
   }
+
   cache = buildCache(raw)
   try {
+    // 读失败时上面已经把 raw 换回默认值：既没有旧字段可搬，也没有明文 Key 可迁，
+    // 这两个条件自然为 false，不会去动那份读不出来的文件。
     if (legacyAdopted) await writeRaw(raw)
     if (cache.migrated) await migratePlainKeys(raw)
   } catch (e) {
@@ -266,6 +436,7 @@ export async function getSettingsView(): Promise<SettingsView> {
     aiKeyStatus: current.status.aiApiKey,
     ttsKeyStatus: current.status.ttsApiKey,
     keyEncryptionAvailable: encryptionAvailable(),
+    storageProblem: describeLoadProblem(loadProblem),
   }
 }
 
@@ -275,9 +446,7 @@ export async function getSettingsView(): Promise<SettingsView> {
  * - null：显式清除（界面「清除已保存的 Key」按钮）
  * - 非空字符串：替换，并按本机能不能加密决定存密文还是明文
  */
-export async function saveSettings(
-  patch: Partial<AppSettings> & Partial<Record<SecretField, string | null>>
-): Promise<SettingsView> {
+export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> {
   const current = await readCache()
   const merged: AppSettings = { ...current.raw }
   const incoming = patch as Partial<AppSettings>

@@ -413,17 +413,21 @@ export interface ElectronAPI {
    * 脱敏视图：三把 API Key 不回明文（值根本不过 IPC），只给状态。
    * 字段是 asrKeyStatus / aiKeyStatus / ttsKeyStatus（none / encrypted / plaintext / unreadable）
    * 与 keyEncryptionAvailable，见 SettingsModal 的 KeyStatus。
+   * storageProblem 非 null 时说明这份配置不是从磁盘读出来的（解析失败或读不了），
+   * 界面必须把这句话原样弹给用户——此时「密钥全是 none」是读失败，不是用户没填。
    */
   getSettings: () => Promise<Record<string, unknown>>
   /**
    * tierRestart：本次保存改了本地档位时的引擎重启结果。
    * busy / failed 时 error 是必须展示给用户的原因——这两种情况下新档位其实还没生效。
+   * saveError 非 null 时这次压根没写进磁盘，界面必须留在原状（不许清空 Key 输入框、不许报已保存）。
    * 密钥字段按「留空＝不改、null＝清除、非空＝替换」处理，返回值同样是脱敏视图。
    */
   saveSettings: (settings: Record<string, unknown>) => Promise<{
     settings: Record<string, unknown>
     tierRestart: 'not-needed' | 'done' | 'busy' | 'failed'
     error: string | null
+    saveError: string | null
   }>
   testConnection: (
     kind: 'asr' | 'ai' | 'tts',
@@ -479,6 +483,7 @@ export interface ElectronAPI {
   contactDeveloper: () => Promise<{ success: boolean; email: string; error?: string }>
 
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
+  openUserDataDirectory: () => Promise<{ success: boolean; error?: string }>
 
   toggleWindowMaximize: () => Promise<boolean>
   minimizeWindow: () => Promise<boolean>

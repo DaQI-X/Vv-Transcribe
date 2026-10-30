@@ -185,6 +185,7 @@ const api = {
   contactDeveloper: () => ipcRenderer.invoke('app:contactDeveloper'),
 
   openLogDirectory: () => ipcRenderer.invoke('app:openLogDirectory'),
+  openUserDataDirectory: () => ipcRenderer.invoke('app:openUserDataDirectory'),
 
   toggleWindowMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
 

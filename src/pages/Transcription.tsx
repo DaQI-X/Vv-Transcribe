@@ -21,6 +21,7 @@ import { useReferenceStore } from '@/stores/useReferenceStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
+import { openUserDataDirectory } from '@/utils/userData'
 import logoIcon from '@/assets/mac/logo_1024.png'
 
 const SETTINGS_MENU = [
@@ -47,6 +48,27 @@ export function Transcription() {
     if (!api) return
     api.getAppVersion()
       .then(setAppVersion)
+      .catch(() => {})
+  }, [])
+
+  /**
+   * 设置没能从磁盘读出来时，启动就得当面说一次。不说，界面看到的是「几把 Key 全是 none」，
+   * 用户以为是自己漏填——而真相是磁盘那份被留档了（或根本读不了），继续保存会把它盖掉。
+   * 只在启动时报：保存失败走 settings:save 的 saveError，两条话不会出现同一句弹两遍。
+   */
+  useEffect(() => {
+    const api = getElectronAPI()
+    if (!api) return
+    api
+      .getSettings()
+      .then((saved) => {
+        const problem = saved?.storageProblem
+        if (typeof problem !== 'string' || !problem) return
+        toast.error(problem, 20000, {
+          label: '打开数据目录',
+          onClick: () => void openUserDataDirectory(),
+        })
+      })
       .catch(() => {})
   }, [])
 
