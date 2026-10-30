@@ -25,6 +25,8 @@ interface VersionInfo {
 }
 
 let dictionaryCache: DictionaryData | null = null
+// 在飞的那一次读盘：`dictionaryCache` 要等两份 JSON 都解完才赋值，只按它判空等于没判
+let initTask: Promise<void> | null = null
 let currentVersion: string = '0.0.0'
 
 const SOURCE_REPO = 'pwxcoo/chinese-xinhua'
@@ -126,13 +128,25 @@ async function initializeFromUpdate(): Promise<boolean> {
   return true
 }
 
-export async function initDictionary(): Promise<void> {
-  if (dictionaryCache) return
+/**
+ * 让盘上有词库这件事只跑一次。启动时有两个调用点同时打这儿：`main/index.ts` 那串服务初始化，
+ * 和 `ipc/dictionaryHandlers.ts` 注册通道时自己那一次。本机 app.log 上的现场是每次启动两行
+ * `Loaded builtin dictionary`、隔 85–96 毫秒——26 万条 ci 加 3 万条成语被读进内存两遍，
+ * 先起来那份还没赋值成 cache，后一家就看不到它。失败后允许重试，所以 promise 只跟在飞期间存着。
+ */
+export function initDictionary(): Promise<void> {
+  if (dictionaryCache) return Promise.resolve()
+  if (initTask) return initTask
 
-  const hasUpdate = await initializeFromUpdate()
-  if (!hasUpdate) {
-    await initializeFromBuiltin()
-  }
+  initTask = (async () => {
+    const hasUpdate = await initializeFromUpdate()
+    if (!hasUpdate) {
+      await initializeFromBuiltin()
+    }
+  })().finally(() => {
+    initTask = null
+  })
+  return initTask
 }
 
 export async function lookupWord(word: string): Promise<{ found: boolean; explanation?: string }> {

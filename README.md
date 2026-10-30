@@ -646,6 +646,7 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 - 数据来源：[pwxcoo/chinese-xinhua](https://github.com/pwxcoo/chinese-xinhua)
 - 包含词语（ci.json）和成语（idiom.json）释义；「校对配置 → 本地词典」显示当前版本号（内置是 `1.0.0`，更新过后换成源仓库 commit 短哈希）
 - 加载优先级：`userData/dictionary/`（更新后的副本）> `resources/dictionary/`（内置）
+- **启动那一次读盘只跑一遍**：`initDictionary()` 有两个调用点同时打在启动那几秒里——`main/index.ts` 那串服务初始化，和 `ipc/dictionaryHandlers.ts` 注册通道时自己那一次。判空只看 `dictionaryCache`，而它要等两份 JSON 全解完才赋值，于是后一家进来时什么都是空的、于是 26 万条 ci + 3 万条成语被读进内存两遍。本机 `app.log` 上这是每次启动两行 `Loaded builtin dictionary`、隔 85–96 毫秒（改前一次启动实测两行 12:56:42.350 / .446，改后一次启动只剩一行 13:06:05.636）。现在跟在飞的那次 promise 被另一个调用点共用（与本地配音引擎 `singleFlight` 同一套路），失败后 `initTask` 清空、下一次调用可以重试。
 - 更新机制：按 `data/ci.json` 的最近 commit hash 判断有没有新版，有就直接拉 `ci.json` / `idiom.json` 写入 `userData/dictionary/`、清缓存重载，当场生效。连不上 GitHub 会如实报错，不会当成「已是最新」
 
 ## 注意事项
