@@ -10,6 +10,10 @@
  * 拉起 24MB/69MB 的冻结产物。只有各平台构建 job 里带 `VV_ENGINE_SMOKE=1` 才跑，
  * 挂在已有的三平台矩阵之后，不为它单独烧一次 CI（按 [[avoid-wasteless-ci-runs]]）。
  *
+ * 开关一开却找不到产物 = **直接红，不是跳过**。否则产物目录名或 exe 后缀一变，这一档就会
+ * 静默退化成「只有 4 条判据在跑」，而 CI 三个 job 照样全绿——那种绿比红难发现得多。
+ * 唯一合法的跳过是「出声档」：CI 不下 135MB/426MB 的模型，那一档恒为跳过。
+ *
  * 分档，每档证的事不同、代价也不同，别把它们混成一句「冒烟过了」：
  * 1. 启动 + 身份握手：证 onefile 解包、Python 引导、顶层 import（TTS 的 fastapi/uvicorn/pydantic，
  *    ASR 再加一个 numpy）与端口都通，且 /health 回显的是本次给的 boot_id。
@@ -251,18 +255,30 @@ const MODEL_PARENT = process.env.VV_ENGINE_SMOKE_MODEL_DIR || ''
 const AUDIO_ENGINE = process.env.VV_ENGINE_SMOKE_ENGINE || OTHER_ENGINE
 const audioReady = ENABLED && binsPresent && !!MODEL_PARENT && existsSync(join(MODEL_PARENT, AUDIO_ENGINE))
 
-if (ENABLED && !binsPresent) {
-  const missing = [existsSync(TTS_BIN) ? '' : TTS_BIN, existsSync(ASR_BIN) ? '' : ASR_BIN].filter(Boolean)
-  console.info(
-    `[engineSmoke] 拉起档跳过：缺 ${missing.join(' ')}。先在对应平台跑 pnpm build:asr / pnpm build:tts 再带 VV_ENGINE_SMOKE=1。`,
-  )
-}
+// 这里刻意不写「产物不在就 console.info 一句然后跳过」：开关已经明确要跑冒烟了，
+// 找不到产物却报绿，等于把这一档静默降级成「只有 3 条判据在跑」——产物目录名或
+// exe 后缀一变就会发生，而 CI 那三个 job 照样全绿。缺产物必须是红的，判据在下面
+// 「引擎冒烟的判据本身」里。唯一合法的跳过是出声档（CI 不下模型）。
 if (ENABLED && binsPresent && MODEL_PARENT && !existsSync(join(MODEL_PARENT, AUDIO_ENGINE))) {
   console.info(`[engineSmoke] 出声档跳过：${join(MODEL_PARENT, AUDIO_ENGINE)} 不存在`)
 }
 
 /** 这一档不碰进程，所以永远跑——它是「协议号变了就去改冒烟」的常驻提醒 */
 describe('引擎冒烟的判据本身', () => {
+  it('开了开关就必须找得到两份冻结产物，否则六档会静默跳过、报出一条假绿', () => {
+    if (!ENABLED) return
+    expect(
+      existsSync(TTS_BIN),
+      `缺 TTS 产物 ${TTS_BIN}（按架构 ${SMOKE_ARCH} 找）。在该平台跑 pnpm build:tts，` +
+        `或把 VV_ENGINE_SMOKE_ARCH 指到产物那份架构（CI 的 macOS x64 job 就得指，Node 自己是 arm64）。`,
+    ).toBe(true)
+    expect(
+      existsSync(ASR_BIN),
+      `缺 ASR 产物 ${ASR_BIN}（按架构 ${SMOKE_ARCH} 找）。在该平台跑 pnpm build:asr；` +
+        `若产物是改动前那份，它不认 VV_ASR_PORT，会去抢 8000 然后自己退出。`,
+    ).toBe(true)
+  })
+
   it('写死的协议号与两份 sidecar 源码一致', async () => {
     const ttsSrc = await readFile('python-tts/main.py', 'utf-8')
     const asrSrc = await readFile('python-asr/main.py', 'utf-8')
