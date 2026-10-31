@@ -151,8 +151,11 @@ const api = {
 
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
-  testConnection: (kind: 'asr' | 'ai' | 'tts', values: unknown) =>
-    ipcRenderer.invoke('settings:testConnection', kind, values),
+  // 第三个参数是「这一次自检用的是哪一套方案」，只带被测那一档的 id：
+  // 配音留空地址时会回落到「校对那套」，而那条回落真干活时走的是校对的**默认**方案
+  // （getTTSConfig 只挑 tts 一条），一个 id 不该同时指到两档。
+  testConnection: (kind: 'asr' | 'ai' | 'tts', values: unknown, profileId?: string) =>
+    ipcRenderer.invoke('settings:testConnection', kind, values, profileId),
 
   // 多套配置（#222）：三档各自的方案列表，增删改各一条。
   // createProfile 的 fromProfileId：传空串＝要一条全空的（连 Key 都不带），传 id 或省略＝照着那一条复制

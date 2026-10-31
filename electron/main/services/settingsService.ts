@@ -131,10 +131,10 @@ export type SettingsView = Omit<AppSettings, SecretField> & {
 }
 
 /**
- * 界面上的一条方案（脱敏）。`values` 是这一档除密钥以外的字段，键名直接取自
- * CAPABILITY_FIELDS 那张表（provider / apiBase / model / localModel / language /
- * engine / voice / localEngine / localVoice），所以第③步的表单绑的就是这几个名字，
- * 表里加一项时界面不用回来改一次类型。
+ * 界面上的一条方案（脱敏）。`values` 的键名是**界面上那 17 个扁平名**（asrProvider /
+ * ttsLocalEngine / …），不是磁盘上的字段名（provider / localEngine）：表单状态、
+ * getSettings 的脱敏视图、保存补丁说的都是扁平名这一套，这里换成磁盘名就等于让渲染层再抄一份
+ * 字段对照表——那张表一旦和 CAPABILITY_FIELDS 分叉，「界面显示 A、存进去的是 B」就又回来了。
  * apiKey 一律不在这里——跨 IPC 只带状态位，与 SettingsView 同一个规矩。
  */
 export interface ProfileView {
@@ -819,12 +819,16 @@ function normalizeProfileIdArg(raw: unknown): string {
 }
 
 /** 一条方案投成界面看的脱敏形状：字段按 CAPABILITY_FIELDS 那张表给，密钥只给状态 */
-function profileViewFor(current: SettingsCache, cap: ProfileCapability, profile: Profile): ProfileView {
+function profileViewFor(
+  current: SettingsCache,
+  cap: ProfileCapability,
+  profile: Profile
+): ProfileView {
   const values: Record<string, string> = {}
-  for (const [, field] of CAPABILITY_FIELDS[cap]) {
+  for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
     if (field === 'apiKey') continue
     const value = profile[field]
-    values[field] = typeof value === 'string' ? value : ''
+    values[flatKey] = typeof value === 'string' ? value : ''
   }
   return {
     id: profile.id,

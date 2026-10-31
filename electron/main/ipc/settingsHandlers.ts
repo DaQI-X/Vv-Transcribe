@@ -22,6 +22,7 @@ import {
   SettingsWriteBlockedError,
   type LocalModelTier,
   type ProfilesView,
+  type ProfileSelection,
   type SettingsPatch,
   type SettingsView,
 } from '../services/settingsService'
@@ -211,8 +212,22 @@ export function registerSettingsHandlers() {
 
   ipcHandle(
     'settings:testConnection',
-    async (_event, kind: 'asr' | 'ai' | 'tts', values: AsrTestValues | AITestValues | TTSTestValues) => {
+    async (
+      _event,
+      kind: 'asr' | 'ai' | 'tts',
+      values: AsrTestValues | AITestValues | TTSTestValues,
+      profileId?: unknown
+    ) => {
       try {
+        // 只带被测这一腿的 id，且**只**带这一腿：回落必须跟真干活用的是同一条方案，
+        // 而 getTTSConfig 那里就是这样——它只挑配音那档，配音留空时沿用的「校对那套」固定是
+        // 校对档当前默认的那条（settingsService 里写了为什么：一个 id 不该同时指到两档）。
+        // 测试要是把界面正在编辑的校对方案也带进来，就会出现「自检按 B 家网关绿了、
+        // 点开始配音却走 A 家」——这正是这条链路一路在躲的分歧。
+        // 不带 id 时拿的是该档当前默认那条；id 指不到人时按 picker 语义落回默认，与真干活一致。
+        const selection: ProfileSelection = {}
+        const wantedId = typeof profileId === 'string' ? profileId.trim() : ''
+        if (wantedId) selection[kind] = wantedId
         // 配音这一腿的回落口径必须与 getTTSConfig 一致：接口地址与 Key 留空时用的是校对那套。
         // 测试不跟着回落就会出现「自检报没填、点开始配音却跑得通」这种最难解释的分歧。
         // 但本地配音档例外：Key 与地址根本不参与这一档，跟着回落等于把能用的人拦在门外（#220/#227）。
@@ -224,8 +239,8 @@ export function registerSettingsHandlers() {
         const needSavedBase = !isLocalTTS && kind === 'tts' && !formBase.trim()
         let probe = values
         if (needSavedKey || needSavedBase) {
-          const view = await getSettingsView()
-          const saved = await loadSettings()
+          const view = await getSettingsView(selection)
+          const saved = await loadSettings(selection)
           const effectiveKey =
             kind === 'tts'
               ? saved.ttsApiKey || saved.aiApiKey

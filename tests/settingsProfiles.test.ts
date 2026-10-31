@@ -1,5 +1,5 @@
 /**
- * 1.0.9 第②步的判据测试：profileId 接到了取值与增删改上。
+ * 1.0.9 多配置的判据测试：第②步的 profileId 取值/增删改 + 第③步的界面回执与「测试连接」回落。
  *
  * 这一层最值得测的是两条**方向相反**的回落规则，因为它们各自的错误代价不一样：
  * ① 干活那条路（getter / loadSettings / saveSettings 不带 id）按「该档当前默认方案」落——
@@ -10,6 +10,9 @@
  * 其余几条是产品口径：每档最多 3 套只在写入侧生效（读取侧剪列表就是「读成功、写成功、
  * 东西没了」）、至少留一套、复制一套时密钥原样搬运（重新封一次会把「能不能解密」变成
  * 「换过机器」）、以及密钥绝不因为「把方案列表发给界面」而跟着出去。
+ * 「测试连接」那组测的是回落按哪一条取 Key 与地址：测出来的那句结论必须与真干活用的是同一套
+ * 配置——编辑哪一条就按那一条回落，而配音借用的「校对那套」要和 getTTSConfig 落回同一个地方，
+ * 否则「自检绿了、点开始配音却走了另一家」就是界面亲口撒的谎。
  */
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -62,6 +65,26 @@ vi.mock('../electron/main/services/asrServiceManager', () => ({
   }),
 }))
 vi.mock('../electron/main/ipc/asrHandlers', () => ({ hasActiveTranscription: engine.busy }))
+
+/**
+ * 「测试连接」真发网络请求，测试里换成一只只记参数的假探针。
+ * 第③步要钉的是回落读的是**哪一条方案**的 Key 与地址，而这件事唯一外部可见的结果
+ * 就是探针最后收到的那一份参数——不看返回值，因为返回值是那句结论，不是这次要核的规矩。
+ */
+const probe = vi.hoisted(() => {
+  // 参数写进签名里，测试才拿得到「探针收到的是什么」：vi.fn(() => …) 推出来的调用参数是空元组
+  const ok = async (_values: Record<string, string>) => ({
+    level: 'pass' as const,
+    title: '假探针',
+    message: '没发真请求',
+  })
+  return { asr: vi.fn(ok), ai: vi.fn(ok), tts: vi.fn(ok) }
+})
+vi.mock('../electron/main/services/connectionTestService', () => ({
+  testASRConfig: probe.asr,
+  testAIConfig: probe.ai,
+  testTTSConfig: probe.tts,
+}))
 
 let dir = ''
 let service: Service
@@ -334,12 +357,23 @@ describe('方案列表：一次给全的脱敏形状', () => {
     await loadInto(dir)
   })
 
-  it('values 的键名就是表里那几项，且不包含密钥', async () => {
+  it('values 的键名就是界面上那 17 个扁平名，且不包含密钥', async () => {
     const view = await service.listProfiles()
-    expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['apiBase', 'model', 'provider'])
-    expect(view.profiles.ai[1].values.model).toBe('gpt-b')
-    expect(view.profiles.tts[0].values).toHaveProperty('localEngine')
-    expect(view.profiles.asr[0].values).toHaveProperty('localModel')
+    expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual([
+      'aiApiBase',
+      'aiModel',
+      'aiProvider'
+    ])
+    expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
+    expect(view.profiles.tts[0].values).toHaveProperty('ttsLocalEngine')
+    expect(view.profiles.asr[0].values).toHaveProperty('asrLocalModel')
+    // 连密钥的**键名**都不许出现：第③步的表单把这一份直接盖到自己身上，
+    // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串
+    for (const cap of ['asr', 'ai', 'tts'] as const) {
+      for (const profile of view.profiles[cap]) {
+        expect(Object.keys(profile.values).filter((key) => key.endsWith('ApiKey'))).toEqual([])
+      }
+    }
   })
 
   it('三档的列表 + 每档默认 + 上限 + 读盘结论都在一份里', async () => {
@@ -688,6 +722,142 @@ describe('IPC 通道（渲染层拿到的形状）', () => {
     const got = (await call('settings:createProfile', 'tts', 'C')) as ProfilesResult
     expect(JSON.stringify(got)).not.toContain('sk-tts')
     expect(JSON.stringify(got)).not.toContain('v1:')
+  })
+
+  describe('settings:testConnection 的回落读哪一条方案', () => {
+    /** 探针最后一次收到的那一份参数＝这次回落最终用了什么；mockReset 会把实现也清掉，所以每次重挂 */
+    const probed = (kind: 'asr' | 'ai' | 'tts') => {
+      const fn = kind === 'asr' ? probe.asr : kind === 'ai' ? probe.ai : probe.tts
+      expect(fn).toHaveBeenCalled()
+      return fn.mock.calls[fn.mock.calls.length - 1][0] as Record<string, string>
+    }
+
+    beforeEach(async () => {
+      await writeFile(
+        file(),
+        v2Document({
+          ai: [
+            {
+              id: 'ai-default',
+              name: '默认',
+              apiKey: sealed('sk-默认'),
+              apiBase: 'https://a.example',
+              model: 'gpt-a'
+            },
+            {
+              id: 'ai-b',
+              name: 'B',
+              apiKey: sealed('sk-B'),
+              apiBase: 'https://b.example',
+              model: 'gpt-b'
+            }
+          ],
+          tts: [
+            { id: 'tts-default', name: '默认', apiKey: '', apiBase: '', model: 'tts-1' },
+            { id: 'tts-b', name: 'B', apiKey: '', apiBase: '', model: 'tts-2' }
+          ]
+        })
+      )
+      await loadInto(dir)
+      for (const fn of [probe.asr, probe.ai, probe.tts]) {
+        fn.mockReset().mockResolvedValue({ level: 'pass', title: '假探针', message: '没发真请求' })
+      }
+      await register()
+    })
+
+    /** 表单里 Key 留空＝拿已保存的那把去测，这一条从第②步就有；第③步加的是「哪一条的」 */
+    it('Key 留空时回落取这次发来的那条方案，不取该档默认那条', async () => {
+      await call(
+        'settings:testConnection',
+        'ai',
+        { apiBase: 'https://b.example', apiKey: '', model: 'gpt-b' },
+        'ai-b'
+      )
+      expect(probed('ai')).toMatchObject({ apiKey: 'sk-B' })
+    })
+
+    it('不带 id 时按该档默认那条回落；带了却指不到人时同样落回默认（与真干活同一口径）', async () => {
+      await call('settings:testConnection', 'ai', { apiBase: 'https://a.example', apiKey: '', model: 'gpt-a' })
+      expect(probed('ai')).toMatchObject({ apiKey: 'sk-默认' })
+
+      await call(
+        'settings:testConnection',
+        'ai',
+        { apiBase: 'https://a.example', apiKey: '', model: 'gpt-a' },
+        'ai-ghost'
+      )
+      expect(probed('ai')).toMatchObject({ apiKey: 'sk-默认' })
+    })
+
+    /**
+     * 配音的地址与 Key 留空时沿用「校对那套」，而这一套**固定是校对档当前默认那条**——
+     * 因为真配音时 getTTSConfig 也只做 `loadSettings({tts: id})`，界面正在编辑的校对方案
+     * 不参与。测试要是跟着界面把校对换成 B 套，就会出现「自检按 B 家网关绿了、
+     * 点开始配音却走 A 家」，那正是这条链路一路在躲的分歧（见 settingsService 里 getTTSConfig 的注释）。
+     */
+    it('配音的回落走校对默认那条，不走界面正在编辑的校对方案', async () => {
+      await call(
+        'settings:testConnection',
+        'tts',
+        { engine: 'cloud', apiBase: '', apiKey: '', model: 'tts-2', voice: 'alice' },
+        'tts-b'
+      )
+      expect(probed('tts')).toMatchObject({ apiKey: 'sk-默认', apiBase: 'https://a.example' })
+    })
+
+    /** 第三参只收一个字符串。形状不对就当没带：这条通道不接受「三档各指一条」 */
+    it('把三档 id 一起塞进第三参不会被吃进去', async () => {
+      await call(
+        'settings:testConnection',
+        'tts',
+        { engine: 'cloud', apiBase: '', apiKey: '', model: 'tts-2', voice: 'alice' },
+        { tts: 'tts-b', ai: 'ai-b' }
+      )
+      expect(probed('tts')).toMatchObject({ apiKey: 'sk-默认', apiBase: 'https://a.example' })
+    })
+
+    /** 本地配音档不看地址与 Key：跟着回落等于把没填校对配置的人拦在门外（#220/#227） */
+    it('本地配音档不参与回落，Key 留空照样开测', async () => {
+      await call(
+        'settings:testConnection',
+        'tts',
+        { engine: 'local', apiBase: '', apiKey: '', model: '', localEngine: 'vits', voice: '0' },
+        'tts-b'
+      )
+      expect(probed('tts')).toMatchObject({ apiKey: '', apiBase: '' })
+    })
+
+    it('那条方案的 Key 在这台机器上解不开时，报的是「读不出」而不是「还没填」', async () => {
+      await writeFile(
+        file(),
+        v2Document({
+          ai: [
+            { id: 'ai-default', name: '默认', apiKey: '', apiBase: 'https://a.example', model: 'gpt-a' },
+            {
+              id: 'ai-b',
+              name: 'B',
+              // 解不开的形式：前缀对、内容不是那段假加密能认的（setup.ts 只认 fake: 前缀）
+              apiKey: 'v1:' + Buffer.from('不是这台机器封的', 'utf-8').toString('base64'),
+              apiBase: 'https://b.example',
+              model: 'gpt-b'
+            }
+          ]
+        })
+      )
+      await loadInto(dir)
+      probe.ai.mockReset().mockResolvedValue({ level: 'pass', title: '假探针', message: '没发真请求' })
+      await register()
+
+      const got = (await call(
+        'settings:testConnection',
+        'ai',
+        { apiBase: 'https://b.example', apiKey: '', model: 'gpt-b' },
+        'ai-b'
+      )) as { level: string; title: string; message: string }
+      expect(got.level).toBe('fail')
+      expect(got.message).toContain('读不出')
+      expect(probe.ai).not.toHaveBeenCalled()
+    })
   })
 
   describe('settings:save 的档位重启判定（看的是「下一次转写用哪一条」）', () => {

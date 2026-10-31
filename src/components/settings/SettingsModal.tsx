@@ -14,6 +14,11 @@
  *
  * 三把 API Key 与其他字段不同：主进程只回状态不回值，所以输入框不回显、留空＝不修改、
  * 清除要走「清除已保存的 Key」按钮（点保存才生效）。
+ *
+ * 每档能力各有最多 3 套方案（#222 第③步）：顶部的「配置方案」条决定表单此刻在编辑哪一套，
+ * 「当前使用」与「正在编辑」是两件事——编辑一套没在用的配置不影响正在跑的活，
+ * 点「设为当前使用」才切过去。方案的落盘（列表/增删改）走 settings:listProfiles 那五条通道，
+ * 字段内容的落盘仍然只有「保存设置」这一个动作。
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
@@ -53,6 +58,13 @@ import {
   voiceSidOptions,
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
+import { CAPABILITY_NOUN, ProfileBar } from '@/components/settings/ProfileBar'
+import type {
+  ProfileCapability,
+  ProfileView,
+  ProfilesResult,
+  ProfilesView,
+} from '@/types/settingsProfile'
 import { openUserDataDirectory } from '@/utils/userData'
 import type { KeyStatus } from '@/utils/readiness'
 import { formatBytes } from '@/utils/formatBytes'
@@ -111,6 +123,16 @@ const DEFAULT_VALUES: SettingsValues = {
   ttsVoice: '',
   ttsLocalEngine: '',
   ttsLocalVoice: '',
+}
+
+/**
+ * 每档能力在表单里对应的那把 Key 输入框名。方案的 values 里刻意不带密钥（跨 IPC 只带状态位），
+ * 切换方案时要单独把这一格清空，所以这里给一张一一对应的表，而不是在切换处写三遍 if。
+ */
+const KEY_FIELD: Record<ProfileCapability, 'asrApiKey' | 'aiApiKey' | 'ttsApiKey'> = {
+  asr: 'asrApiKey',
+  ai: 'aiApiKey',
+  tts: 'ttsApiKey',
 }
 
 /**
@@ -380,6 +402,24 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     ai: boolean
     tts: boolean
   }>({ asr: false, ai: false, tts: false })
+  /**
+   * 三档的方案列表。null＝这次连列表都没读出来——ProfileBar 会说明「读不出来」并收起四个动作，
+   * 不许按「用户一套都没建过」渲染（磁盘上那几条并没有消失）。
+   */
+  const [profiles, setProfiles] = useState<ProfilesView | null>(null)
+  /** 一次方案增删改在路上：连点会把两次结构改动叠在同一份配置上，第二次读到的还是第一次之前的磁盘 */
+  const [profileBusy, setProfileBusy] = useState(false)
+  /**
+   * 表单此刻在编辑哪一条方案（三档各一份，切 Tab 不动别的档）。
+   * 不变式：`values` 里某一档的字段 ≡ `profiles` 里 `editing[那一档]` 那条的 values——
+   * 只有 switchProfile 会改它，而它同时改这两处，所以「保存写进哪三条」可以照这份 id 直接发。
+   * 空串＝列表还没读出来，这时保存不带 id，主进程按各档默认那条落（＝第②步之前的行为）。
+   */
+  const [editing, setEditing] = useState<Record<ProfileCapability, string>>({
+    asr: '',
+    ai: '',
+    tts: '',
+  })
   const [restarting, setRestarting] = useState(false)
   const [restartingVoice, setRestartingVoice] = useState(false)
   const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocalSnapshot | null>(null)
@@ -392,6 +432,14 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   )
   const api = getElectronAPI()
   const { theme, setTheme } = useThemeStore()
+  /**
+   * values 的镜像。方案的增删改要等 IPC 回话，回话期间用户可能又敲了几个字——
+   * 事件处理器闭包里的 values 是点按钮那一刻的那份，拿它算「切方案后的表单」会把这几个字吞掉。
+   */
+  const valuesRef = useRef(values)
+  useEffect(() => {
+    valuesRef.current = values
+  }, [values])
 
   // 主题只在点保存后才落到 store，所以「改了没存」拿 store 当前值和表单值比；Key 的「待清除」也算未保存
   const isDirty =
@@ -457,6 +505,171 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     invalidateTest('ai')
   }
 
+  /**
+   * 「这一档有没有还没保存的修改」按档算，不用全局的 isDirty。
+   * 切走转写的方案只会冲掉转写那几格，用户在配音里刚敲的字一个都不会丢；
+   * 拿全局判断就会把「配音还没存」说成「切转写方案要丢改动」——那是假警报，
+   * 用户会照着它多点一次「先去保存」，甚至存下半成品。
+   * 字段归哪一档沿用 kindOfField 那条前缀规矩，不再抄一份字段表（抄来的表会和主进程那张分叉）。
+   */
+  const isCapDirty = (cap: ProfileCapability): boolean => {
+    if (pendingKeyClear[cap]) return true
+    try {
+      const disk = JSON.parse(snapshot) as SettingsValues
+      return (Object.keys(values) as (keyof SettingsValues)[]).some(
+        (field) => kindOfField(field) === cap && values[field] !== disk[field]
+      )
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 把表单换成另一条方案的样子。
+   * Key 那一格必须显式清成空串：输入框里的字是「还没保存的新 Key」，跟着 spread 盖到另一套上，
+   * 用户下一次保存就把 A 套的 Key 写进了 B 套。磁盘上那条方案的 Key 不受影响，
+   * 状态位由 profile.keyStatus 供上去，所以清空不等于「说它没填」。
+   * snapshot 一起换：未保存的判断是「表单 vs 磁盘此刻」，不换的话切完立刻显示「有改动没保存」。
+   */
+  const switchProfile = (cap: ProfileCapability, profile: ProfileView) => {
+    const next = {
+      ...valuesRef.current,
+      ...profile.values,
+      [KEY_FIELD[cap]]: '',
+    } as SettingsValues
+    valuesRef.current = next
+    setValues(next)
+    setSnapshot(JSON.stringify(next))
+    setEditing((prev) => ({ ...prev, [cap]: profile.id }))
+    setPendingKeyClear((prev) => (prev[cap] ? { ...prev, [cap]: false } : prev))
+    setKeyStates((prev) => ({ ...prev, [cap]: toKeyStatus(profile.keyStatus) }))
+    invalidateTest(cap)
+  }
+
+  /**
+   * 列表读回来之后要刷的两样：列表本身，和表单上那三个「密钥已保存 / 未填写」标记。
+   * 标记说的是**正在编辑的那条**，而 settings:get 回的那三把说的是各档**默认**那条——
+   * 编辑非默认方案时照它刷，等于把刚存进去的 Key 说成没填。id 找不到人时不动原值，
+   * 比按「没有」重画诚实（紧接着的 switchProfile 会把它对齐到真的那一条）。
+   */
+  const applyProfiles = (view: ProfilesView) => {
+    setProfiles(view)
+    setKeyStates((prev) => {
+      const next = { ...prev }
+      for (const cap of ['asr', 'ai', 'tts'] as const) {
+        const target = view.profiles[cap].find((profile) => profile.id === editing[cap])
+        if (target) next[cap] = toKeyStatus(target.keyStatus)
+      }
+      return next
+    })
+  }
+
+  /**
+   * 四个结构动作（新建 / 改名 / 删除 / 设为当前使用）共用的走法：读 {profiles, error} 信封、
+   * 把磁盘此刻的样子落回界面、失败一律 toast。回 null＝这次没写进磁盘，
+   * 调用方（ProfileBar）靠它决定输入框和确认行要不要留着——改名没成功就关掉输入框，
+   * 用户刚改的那几个字就丢了。
+   */
+  const runProfileAction = async (
+    run: () => Promise<ProfilesResult>
+  ): Promise<ProfilesView | null> => {
+    if (!api || profileBusy) return null
+    setProfileBusy(true)
+    try {
+      const result = await run()
+      if (result?.profiles) applyProfiles(result.profiles)
+      if (result?.error) {
+        toast.error(result.error, 12000)
+        return null
+      }
+      // error 为 null 却没有列表，只剩「IPC 传输本身挂了」这一种：同样算没改成，别报成功
+      if (!result?.profiles) {
+        toast.error('这次操作没能确认。关掉设置窗口重开一次，再看列表是不是磁盘上那样', 12000)
+        return null
+      }
+      return result.profiles
+    } catch {
+      toast.error('这次操作没能确认。关掉设置窗口重开一次，再看列表是不是磁盘上那样', 12000)
+      return null
+    } finally {
+      setProfileBusy(false)
+    }
+  }
+
+  /** 下拉里选一套来编辑。方案不在列表里＝列表刚被别处改掉，不能拿旧数据盖表单 */
+  const handleSelectProfile = (cap: ProfileCapability, profileId: string) => {
+    const profile = profiles?.profiles[cap].find((item) => item.id === profileId)
+    if (!profile) {
+      toast.error('这条方案已经不在列表里了，关掉设置窗口重开一次再看', 12000)
+      return
+    }
+    switchProfile(cap, profile)
+  }
+
+  const handleCreateProfile = async (cap: ProfileCapability): Promise<void> => {
+    if (!api) return
+    const before = new Set((profiles?.profiles[cap] ?? []).map((profile) => profile.id))
+    // 从「此刻在编辑的那条」复制：同一家网关换个模型是最常见的第二次配置。
+    // 不传 id 时主进程复制的是该档**默认**那条，用户编辑非默认方案时点新建，拿到的却是别套的内容。
+    const view = await runProfileAction(() =>
+      api.createProfile(cap, undefined, editing[cap] || undefined)
+    )
+    if (!view) return
+    const created = view.profiles[cap].find((profile) => !before.has(profile.id))
+    if (!created) return
+    switchProfile(cap, created)
+    toast.success(
+      `已新建「${created.name}」并切过来编辑：接口地址、模型和已保存的 API Key 都照原来那套填好了，改完点「保存设置」才算存下`
+    )
+  }
+
+  /** 改名只动 name，id 不变，所以表单内容不受影响；返回值给 ProfileBar 决定输入框是否收起 */
+  const handleRenameProfile = async (
+    cap: ProfileCapability,
+    profileId: string,
+    name: string
+  ): Promise<boolean> => {
+    if (!api) return false
+    return (await runProfileAction(() => api.renameProfile(cap, profileId, name))) !== null
+  }
+
+  const handleDeleteProfile = async (
+    cap: ProfileCapability,
+    profileId: string
+  ): Promise<boolean> => {
+    if (!api) return false
+    const deletedName =
+      profiles?.profiles[cap].find((profile) => profile.id === profileId)?.name ?? ''
+    const view = await runProfileAction(() => api.deleteProfile(cap, profileId))
+    if (!view) return false
+    // 删掉的正是「正在编辑那条」时表单上还挂着它那几个字段：留着就是让用户对着磁盘上
+    // 已经不存在的配置点保存，而那条 id 已经指不到人，保存会直接报错。
+    const wasEditing = editing[cap] === profileId
+    const nextProfile = wasEditing
+      ? (view.profiles[cap].find((profile) => profile.id === view.defaultProfileId[cap]) ??
+        view.profiles[cap][0])
+      : undefined
+    if (nextProfile) switchProfile(cap, nextProfile)
+    toast.success(
+      `已删掉「${deletedName}」（含它保存的 API Key），${
+        nextProfile ? `表单切到「${nextProfile.name}」` : '正在编辑的那套没动'
+      }`
+    )
+    return true
+  }
+
+  const handleSetDefault = async (cap: ProfileCapability, profileId: string): Promise<void> => {
+    if (!api) return
+    const name = profiles?.profiles[cap].find((profile) => profile.id === profileId)?.name ?? ''
+    const view = await runProfileAction(() => api.setDefaultProfile(cap, profileId))
+    if (!view || !name) return
+    // 不说「立刻生效」：下一次转写/校对/配音取值才走这套，正在跑的那一批用的还是原来那套
+    toast.success(
+      `已把「${name}」设为当前使用的${CAPABILITY_NOUN[cap]}配置，下一次${CAPABILITY_NOUN[cap]}就按这套干活`,
+      8000
+    )
+  }
+
   const loadDictVersion = useCallback(async () => {
     if (!api) return
     try {
@@ -474,13 +687,19 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       setConfirmDiscard(false)
       setTestResults({})
       setPendingKeyClear({ asr: false, ai: false, tts: false })
+      // 关窗就把方案列表一起收掉：下次打开要按磁盘上那一刻的样子重新认一遍
+      // 「正在编辑哪一条」，留着旧列表会让保存带着一条已经不存在的 id 去写盘
+      setProfiles(null)
+      setEditing({ asr: '', ai: '', tts: '' })
       return
     }
     if (hydrated || !api) return
     ;(async () => {
       let loaded: SettingsValues = DEFAULT_VALUES
+      let settingsRead = false
       try {
         const saved = await api.getSettings()
+        settingsRead = saved !== null
         if (saved === null) {
           // 读失败现在回 null（IPC 收口后不再 reject，见 ipc/guard.ts）。表单会落满默认值，
           // 用户看着像「磁盘上本来就是这些」，顺手点保存就把真那份盖掉了——这句必须在他动手前说
@@ -511,9 +730,28 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       } catch {
         loaded = DEFAULT_VALUES
       }
+      valuesRef.current = loaded
       setValues(loaded)
       setSnapshot(JSON.stringify(loaded))
       setHydrated(true)
+      // 列表和表单值是两次独立的读：getSettings 成功而列表读失败时，字段是真的、只是看不见别的方案。
+      // 两边套在同一个 try 里，一次 listProfiles 抖动会把已经读到的字段打回默认值，那才是真丢数据
+      let view: ProfilesView | null = null
+      try {
+        view = await api.listProfiles()
+      } catch {
+        view = null
+      }
+      if (view) {
+        setProfiles(view)
+        // settings:get 回的那一套字段就是各档默认方案的，所以「正在编辑」从默认那条起步对得上
+        setEditing({ ...view.defaultProfileId })
+      } else if (settingsRead) {
+        toast.error(
+          '配置方案列表这次没读出来。下面填的是磁盘上的真值，方案没丢；新建 / 改名 / 删除先不要用，关掉设置窗口重开一次再看',
+          15000
+        )
+      }
     })()
   }, [tab, api, hydrated])
 
@@ -558,13 +796,21 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     try {
       const payload: Record<string, unknown> = { ...values }
       for (const kind of ['asr', 'ai', 'tts'] as const) {
-        const field = kind === 'asr' ? 'asrApiKey' : kind === 'ai' ? 'aiApiKey' : 'ttsApiKey'
+        const field = KEY_FIELD[kind]
         const typed = values[field].trim()
         // 三态：有字＝替换、点了清除＝null、都没有＝整个键不发送，磁盘上那把保持原样
         if (typed) payload[field] = typed
         else if (pendingKeyClear[kind]) payload[field] = null
         else delete payload[field]
       }
+      // 这份表单要写进哪三条方案。不变式「values 里那一档的字段 ≡ editing[那一档] 那条」由
+      // switchProfile 维持，所以三档一起发是对的；id 是空串（列表没读出来）的那一档不发，
+      // 主进程就按该档当前默认那条落——那是列表看不见时唯一不会写错地方的走法。
+      const profileIds: Partial<Record<ProfileCapability, string>> = {}
+      for (const kind of ['asr', 'ai', 'tts'] as const) {
+        if (editing[kind]) profileIds[kind] = editing[kind]
+      }
+      if (Object.keys(profileIds).length > 0) payload.profileIds = profileIds
       const result = await api.saveSettings(payload)
       // 没写进磁盘就到此为止。后面那几步——清空 Key 输入框、更新快照、报「设置已保存」——
       // 全都建立在「存下了」之上；少弹这一句却多报一句成功，就是当着用户的面撒谎。
@@ -583,10 +829,21 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         aiApiKey: '',
         ttsApiKey: '',
       }
+      valuesRef.current = nextValues
       setValues(nextValues)
       setSnapshot(JSON.stringify(nextValues))
       setPendingKeyClear({ asr: false, ai: false, tts: false })
-      if (result?.settings)
+      const encryptable = result?.settings
+        ? result.settings.keyEncryptionAvailable !== false
+        : null
+      // 重读一次列表再对齐密钥状态：result.settings 那三把说的各是**默认**那条，而这次写进去的是
+      // **正在编辑**的那条——编辑非默认方案时照它刷，刚存进去的 Key 会被说成「未填写」。
+      // 列表里那份 values 也要跟着更新，否则切走再切回来显示的还是保存前那几个字。
+      const fresh = await api.listProfiles().catch(() => null)
+      if (fresh) {
+        applyProfiles(fresh)
+        if (encryptable !== null) setKeyStates((prev) => ({ ...prev, encryptable }))
+      } else if (result?.settings)
         setKeyStates({
           asr: toKeyStatus(result.settings.asrKeyStatus),
           ai: toKeyStatus(result.settings.aiKeyStatus),
@@ -706,7 +963,14 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 voice: ttsLocal ? values.ttsLocalVoice : values.ttsVoice,
               }
             : { apiBase: values.aiApiBase, apiKey: values.aiApiKey, model: values.aiModel }
-      const result = await api.testConnection(kind, payload)
+      // 只带被测这一档正在编辑的那条：主进程那边 Key 留空要回落到已保存的那把，
+      // 不带 id 就会回落到「该档当前默认那条」——编辑 B 套却拿 A 套的 Key 去测，
+      // 红和绿都不是眼前这套配置的结论。
+      // 为什么不把三档 id 都发过去：配音的地址与 Key 留空时沿用「校对那套」，而真配音时
+      // 那一步读的是校对的**默认**那条（getTTSConfig 只挑 tts 一条）。跟着界面把校对也换成
+      // B 套，就会出现「自检按 B 家网关绿了、点开始配音却走 A 家」这种最难解释的分歧。
+      const profileId = editing[kind]
+      const result = await api.testConnection(kind, payload, profileId || undefined)
       setTestResults((prev) => ({ ...prev, [kind]: result }))
       if (kind === 'tts') setVoiceStateTick((prev) => prev + 1)
     } catch {
@@ -980,6 +1244,26 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     }
   }
 
+  /**
+   * 三个配置 Tab 顶部的「配置方案」条。装配只写一遍：cap 用来取对应那份 state 与回调，
+   * 在三个 Tab 里各摊开一次 props 就是改一处要改三处，最容易漏的正是 hasUnsavedEdits
+   * 那条按档的判断（配音还没存不该拦住切转写的方案）。
+   */
+  const renderProfileBar = (cap: ProfileCapability) => (
+    <ProfileBar
+      capability={cap}
+      profiles={profiles}
+      editingId={editing[cap]}
+      hasUnsavedEdits={isCapDirty(cap)}
+      busy={profileBusy}
+      onSelect={(profileId) => handleSelectProfile(cap, profileId)}
+      onCreate={() => handleCreateProfile(cap)}
+      onRename={(profileId, name) => handleRenameProfile(cap, profileId, name)}
+      onDelete={(profileId) => handleDeleteProfile(cap, profileId)}
+      onSetDefault={(profileId) => void handleSetDefault(cap, profileId)}
+    />
+  )
+
   if (!tab) return null
 
   return (
@@ -995,6 +1279,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         <div className="settings-modal__body">
           {tab === 'asr' && (
             <>
+              {renderProfileBar('asr')}
               <div className="settings-form-group">
                 <label className="settings-form-label">转写模式</label>
                 <select
@@ -1120,6 +1405,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
 
           {tab === 'ai' && (
             <>
+              {renderProfileBar('ai')}
               <div className="settings-form-group">
                 <label className="settings-form-label">服务商</label>
                 <select
@@ -1206,6 +1492,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
 
           {tab === 'tts' && (
             <>
+              {renderProfileBar('tts')}
               <div className="settings-form-group">
                 <label className="settings-form-label">配音引擎</label>
                 <select

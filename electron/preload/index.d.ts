@@ -280,9 +280,10 @@ export type ProfileCapability = 'asr' | 'ai' | 'tts'
 export type SecretStatus = 'none' | 'encrypted' | 'plaintext' | 'unreadable'
 
 /**
- * 一条方案的脱敏形状。`values` 的键名按能力不同（provider / apiBase / model /
- * localModel / language / engine / voice / localEngine / localVoice），取自磁盘那
- * 张字段表，所以第③步的表单绑的就是这几个名字。
+ * 一条方案的脱敏形状。`values` 的键名用的是**界面上那 17 个扁平名**（asrProvider /
+ * ttsLocalEngine / …），和 getSettings 的脱敏视图同一套名字，所以表单可以直接把这一份
+ * 覆盖到自己正在编辑的那一组上，渲染层不留第二份字段对照表。
+ * apiKey 照旧不在这里——跨 IPC 只带状态位。
  */
 export interface ProfileView {
   id: string
@@ -528,9 +529,18 @@ export interface ElectronAPI {
     error: string | null
     saveError: string | null
   }>
+  /**
+   * `profileId`＝这一腿正在编辑哪一套方案。表单里 Key 留空时主进程要回落到已保存的那把，
+   * 不带这个 id，回落拿到的就是「该档当前默认那条」的 Key——编辑另一套时测出来的
+   * 结论属于别的配置，红和绿都骗人。省略＝按该档当前默认那条，与不选方案时同一口径。
+   * 只带被测这一档的 id 是三档的回落口径对齐 getTTSConfig 的结果：配音的地址与 Key 留空时
+   * 沿用**校对**那套，而真干活时那一步读的是校对的默认那条（getTTSConfig 只挑 tts 一条）。
+   * 把三档 id 都发过去反而会出现「自检按 B 家网关绿了、点开始配音却走 A 家」。
+   */
   testConnection: (
     kind: 'asr' | 'ai' | 'tts',
-    values: ConnectionTestValues
+    values: ConnectionTestValues,
+    profileId?: string
   ) => Promise<TestOutcome>
 
   /**
