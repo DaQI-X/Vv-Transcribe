@@ -1,12 +1,22 @@
 /**
  * 设置持久化服务
- * 管理应用的 ASR 和 AI 配置项，以 JSON 文件形式持久化到 userData 目录
- * 支持内存缓存，避免重复读取磁盘
+ * 主进程里唯一读写 settings.json 的地方：读盘并分诊、按本机密钥库加解密、把配置交给转写/校对/配音。
+ * 支持内存缓存，避免重复读取磁盘。
  *
- * API Key 单独说：磁盘上那份 settings.json 里的三把 Key 走系统的 safeStorage（macOS Keychain /
+ * 磁盘形状和对外形状是两件事，这一层刻意把它们分开：
+ * - 磁盘上（配置格式 v2，1.0.9 起）按能力存三份方案列表（profiles.asr / ai / tts）
+ *   加一个 defaultProfileId，形状与迁移都在 settingsSchema。
+ * - 对外的 AppSettings 仍是那 17 个扁平键，含义是「这一档当前默认方案的投影」。
+ *   这么分的理由是增量落地：转写、校对、配音的取值点，设置表单，preload 与 IPC 全都按
+ *   扁平字段读，先把内部形状换成方案列表、契约不动，界面那一半才不用跟着返工（#222 第①步）。
+ *   第②步给 getter 加 profileId 时，改的是这一层之下的取值路径，不是外面那套字段名。
+ *
+ * API Key 单独说：磁盘上方案里的 apiKey 走系统的 safeStorage（macOS Keychain /
  * Windows DPAPI）加密后写入，值形如 `v1:<base64>`。没有前缀的按历史明文处理——首次读到且本机
  * 能加密就就地换掉。safeStorage 不可用时退回明文并让界面说清楚（见 getSettingsView 的
  * keyEncryptionAvailable）。明文不进渲染进程：给界面的一律是脱敏视图，只有主进程拿得到解密结果。
+ * 一条规矩贯穿全部改动：方案搬家时密钥原样搬运，绝不重新加密——重新加密会把「能不能解密」
+ * 变成「换过机器」，用户看到的就是「我填过的 Key 没了」，而那是不可恢复的谎报。
  */
 import { safeStorage } from 'electron'
 import { rename } from 'node:fs/promises'
@@ -23,12 +33,27 @@ import {
   userDataPath,
 } from './userDataStore'
 import {
+  CAPABILITY_FIELDS,
   CURRENT_SETTINGS_VERSION,
   CURRENT_SETTINGS_VERSION_FIELD,
+  DEFAULT_PROFILE_ID_FIELD,
+  DEFAULT_PROFILE_IDS,
+  DEFAULT_PROFILE_NAME,
+  PROFILE_CAPABILITIES,
+  PROFILES_FIELD,
   migrateSettingsDocument,
+  type DefaultProfileId,
+  type Profile,
+  type ProfileCapability,
   type SettingsDocument,
+  type SettingsProfiles,
+  type SettingsStore,
 } from './settingsSchema'
 
+/**
+ * 对外的扁平配置：一项能力当前选用那套方案的投影。
+ * 键名与 v1 时代磁盘上的扁平键一致，所以转写/校对/配音那几处取值点不用动。
+ */
 export interface AppSettings {
   asrProvider: string
   asrApiKey: string
@@ -135,16 +160,34 @@ const DEFAULT_SETTINGS: AppSettings = {
 }
 
 /**
- * 一份缓存三样用途：raw 是磁盘上该原样写回的样子（密文不动它），
- * plain 是解密后的（只给主进程里的转写/校对用），status 是给界面的。
+ * 一份缓存三样用途：raw 是磁盘上该原样写回的样子（方案列表，密文不动它），
+ * plain / status 是按「能力 + 方案 id」索引的两张查找表——解密后的 Key 和它给界面看的状态。
+ *
+ * 为什么不干脆再存一份「解密后的方案列表」：那要把整个 store 深拷贝一遍，而两处列表
+ * 迟早会分叉（就地加密改一处、保存改另一处）。密钥是唯一需要解密的字段，把它单独摊成
+ * 一张表，「谁被解过、解成什么状态」就只有一份事实；其余字段本来就是明文，读 raw 即可。
  * 每次解密都要过一遍系统密钥库，所以按进程缓存，不在每次取配置时重解。
  */
 interface SettingsCache {
-  raw: AppSettings
-  plain: AppSettings
-  status: Record<SecretField, SecretStatus>
-  /** 磁盘上有没有需要就地加密的历史明文 */
+  raw: SettingsStore
+  plain: Record<ProfileCapability, Record<string, string>>
+  status: Record<ProfileCapability, Record<string, SecretStatus>>
+  /** 磁盘上有没有需要就地加密的历史明文（任何一条方案里的都算） */
   migrated: boolean
+}
+
+/** 三张查找表的空壳：buildCache 往里逐项填，缺项即「这条方案不存在」 */
+function emptyLookups(): {
+  plain: Record<ProfileCapability, Record<string, string>>
+  status: Record<ProfileCapability, Record<string, SecretStatus>>
+} {
+  const plain = {} as Record<ProfileCapability, Record<string, string>>
+  const status = {} as Record<ProfileCapability, Record<string, SecretStatus>>
+  for (const cap of PROFILE_CAPABILITIES) {
+    plain[cap] = {}
+    status[cap] = {}
+  }
+  return { plain, status }
 }
 
 let cache: SettingsCache | null = null
@@ -280,16 +323,21 @@ function unseal(stored: string): { value: string; status: SecretStatus } {
   }
 }
 
-/** 密文解不开时不能把「解不开」当成「没配」，否则用户会去重填一个本来就对的 Key */
-function buildCache(raw: AppSettings): SettingsCache {
-  const plain = { ...raw }
-  const status = {} as Record<SecretField, SecretStatus>
+/**
+ * 密文解不开时不能把「解不开」当成「没配」，否则用户会去重填一个本来就对的 Key。
+ * 方案列表里每一条都要单独解、单独记状态：一条方案的 Key 换过机器不代表另一条也是，
+ * 界面（第③④步）按 (能力, 方案 id) 显示的就是这里的 status。
+ */
+function buildCache(raw: SettingsStore): SettingsCache {
+  const { plain, status } = emptyLookups()
   let migrated = false
-  for (const field of SECRET_FIELDS) {
-    const { value, status: st } = unseal(raw[field])
-    plain[field] = value
-    status[field] = st
-    if (st === 'plaintext') migrated = true
+  for (const cap of PROFILE_CAPABILITIES) {
+    for (const profile of raw.profiles[cap]) {
+      const { value, status: st } = unseal(profile.apiKey)
+      plain[cap][profile.id] = value
+      status[cap][profile.id] = st
+      if (st === 'plaintext') migrated = true
+    }
   }
   return { raw, plain, status, migrated }
 }
@@ -316,13 +364,17 @@ export function normalizeLocalModel(raw: unknown): LocalModelTier {
  * 3. 落盘时一律盖上当前的格式版本，版本字段只有写盘这一处产生——谁都没法写出一份
  *    「没自报版本」的配置，下次读的人就不用再靠猜。
  */
-async function writeRaw(raw: AppSettings): Promise<void> {
+async function writeRaw(store: SettingsStore): Promise<void> {
   if (writeBlocked) {
     throw new SettingsWriteBlockedError(writeBlockedMessage())
   }
   await atomicWriteJson(
     settingsFile(),
-    { [CURRENT_SETTINGS_VERSION_FIELD]: CURRENT_SETTINGS_VERSION, ...raw },
+    {
+      [CURRENT_SETTINGS_VERSION_FIELD]: CURRENT_SETTINGS_VERSION,
+      [PROFILES_FIELD]: store.profiles,
+      [DEFAULT_PROFILE_ID_FIELD]: store.defaultProfileId,
+    },
     {
       backup: true,
       // 备份没成不阻断这次保存（原子写才是主菜），但也不能悄悄过去：
@@ -331,30 +383,146 @@ async function writeRaw(raw: AppSettings): Promise<void> {
         logger.warn('Settings', 'Backing up previous settings failed', detail),
     }
   )
-  cache = buildCache(raw)
+  cache = buildCache(store)
 }
 
-/** 读到历史明文且本机现在能加密 → 立刻就地加密回写；写成功才认「已迁移」 */
-async function migratePlainKeys(raw: AppSettings): Promise<void> {
+/**
+ * 读到历史明文且本机现在能加密 → 立刻就地加密回写；写成功才认「已迁移」。
+ * 在副本上做：失败时（闸门、磁盘故障）内存里那份还是原样，不会留下「半加密」的状态。
+ */
+async function migratePlainKeys(store: SettingsStore): Promise<void> {
   if (!encryptionAvailable()) return
-  const sealed = { ...raw }
-  for (const field of SECRET_FIELDS) {
-    if (sealed[field] && !sealed[field].startsWith(ENC_PREFIX)) sealed[field] = seal(sealed[field])
+  const sealed = cloneStore(store)
+  for (const cap of PROFILE_CAPABILITIES) {
+    for (const profile of sealed.profiles[cap]) {
+      if (profile.apiKey && !profile.apiKey.startsWith(ENC_PREFIX)) {
+        profile.apiKey = seal(profile.apiKey)
+      }
+    }
   }
   await writeRaw(sealed)
 }
 
+/** 磁盘上任何一段都可能是 null、字符串或数组：这一句把「不是对象」统一收成空对象 */
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
 /**
- * 把迁移过的文档落成 AppSettings：逐项按 DEFAULT_SETTINGS 收，而不是整份展开——
- * 界面上多带的状态位、手改出来的非字符串值、以及旧版本残留的键，都不该原样留在配置里。
+ * 一条全新的默认方案：id / name 用生产那对常量，业务字段逐个落回 DEFAULT_SETTINGS。
+ * 字段只按 CAPABILITY_FIELDS 那张表写，所以「这一档有哪几项」加一项时不用改这里
+ * （密钥除外：它的默认值不在这里猜，只从磁盘那一份来）。
  */
-function normalizeDocument(doc: SettingsDocument): AppSettings {
-  const raw: AppSettings = { ...DEFAULT_SETTINGS }
-  for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof AppSettings>) {
-    const value = doc[key]
-    if (typeof value === 'string') raw[key] = value
+function defaultProfileFor(cap: ProfileCapability): Profile {
+  const profile: Profile = { id: DEFAULT_PROFILE_IDS[cap], name: DEFAULT_PROFILE_NAME, apiKey: '' }
+  for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
+    if (field === 'apiKey') continue
+    profile[field] = DEFAULT_SETTINGS[flatKey as keyof AppSettings]
   }
-  return raw
+  return profile
+}
+
+/** 首次运行、以及「读盘失败退回默认配置」用的那份：每档一条默认方案，指着自己 */
+function defaultStore(): SettingsStore {
+  const profiles = {} as SettingsProfiles
+  const defaultProfileId = {} as DefaultProfileId
+  for (const cap of PROFILE_CAPABILITIES) {
+    const profile = defaultProfileFor(cap)
+    profiles[cap] = [profile]
+    defaultProfileId[cap] = profile.id
+  }
+  return { profiles, defaultProfileId }
+}
+
+/** 逐条浅拷贝：方案字段全是字符串，一层就够；深拷贝会把不存在的对象形状也猜出来 */
+function cloneStore(store: SettingsStore): SettingsStore {
+  const profiles = {} as SettingsProfiles
+  for (const cap of PROFILE_CAPABILITIES) {
+    profiles[cap] = store.profiles[cap].map((profile) => ({ ...profile }))
+  }
+  return { profiles, defaultProfileId: { ...store.defaultProfileId } }
+}
+
+/**
+ * 这一档当前选用的那条方案。normalizeStore 已经保证每档至少一条且 id 指得到人，
+ * 这里的落回第一条是给写 store 的那几步（第②步的增删改）兜底：宁可让用户看到自己的
+ * 另一套配置，也不要在取值路径上抛一个他打不开的错。
+ */
+function pickDefault(store: SettingsStore, cap: ProfileCapability): Profile {
+  const list = store.profiles[cap]
+  return list.find((profile) => profile.id === store.defaultProfileId[cap]) ?? list[0]
+}
+
+/**
+ * 收口磁盘上的一条方案：id 必须是能拿来指人的非空字符串，其余逐项按默认值收，
+ * 只认表里列得出的键——界面上多带的状态位、手改出来的非字符串值、旧版本残留的扁平键，
+ * 都不该原样留在配置里。
+ */
+function normalizeProfile(cap: ProfileCapability, entry: unknown): Profile | null {
+  const src = asObject(entry)
+  // 没有 id 的方案没法被 defaultProfileId 指到，也没法被历史记录引用（#247 按 id 记），
+  // 所以不收；现编一个号反而会造出两条看起来一样、实际不同的方案
+  if (typeof src.id !== 'string' || !src.id) return null
+  const profile = defaultProfileFor(cap)
+  profile.id = src.id
+  if (typeof src.name === 'string' && src.name) profile.name = src.name
+  for (const [, field] of CAPABILITY_FIELDS[cap]) {
+    const value = src[field]
+    if (typeof value === 'string') profile[field] = value
+  }
+  return profile
+}
+
+/**
+ * 把迁移过的文档落成 SettingsStore。
+ *
+ * 这一层存在的理由就写在名字里：v1 时代的读盘收口「只收字符串」，而方案列表是对象数组——
+ * 照那份写法读 v2 的文件会「读成功、写成功、东西没了」，用户的多套配置静默消失。
+ * 所以列表要单独按形状收，并且收完自己站得住：每档至少一条、defaultProfileId 一定指得到人。
+ */
+function normalizeStore(doc: SettingsDocument): SettingsStore {
+  const profiles = {} as SettingsProfiles
+  const defaultProfileId = {} as DefaultProfileId
+  const src = asObject(doc[PROFILES_FIELD])
+  const ids = asObject(doc[DEFAULT_PROFILE_ID_FIELD])
+  for (const cap of PROFILE_CAPABILITIES) {
+    const entries = Array.isArray(src[cap]) ? src[cap] : []
+    const list: Profile[] = []
+    for (const entry of entries) {
+      const profile = normalizeProfile(cap, entry)
+      if (profile) list.push(profile)
+    }
+    // 一条都没收到（整段缺失、写成字符串、每条都没 id）就补一条默认方案：
+    // 这一档必须有东西可选，否则 getter 与界面都得再判一次「没有方案」
+    profiles[cap] = list.length ? list : [defaultProfileFor(cap)]
+    const wanted = typeof ids[cap] === 'string' ? ids[cap] : ''
+    defaultProfileId[cap] = profiles[cap].some((p) => p.id === wanted) ? wanted : profiles[cap][0].id
+  }
+  return { profiles, defaultProfileId }
+}
+
+/**
+ * 方案 store 投成对外那 17 个扁平键：每档取当前默认方案，密钥按它的 id 从解密表里取。
+ * 这是「磁盘形状」与「对外契约」唯一的交界处——别处再各自拼 store 就会出现
+ * 「转写读默认方案、界面读第一条」这种两边不一致的分歧。
+ */
+function flattenDefault(current: SettingsCache): AppSettings {
+  const out: AppSettings = { ...DEFAULT_SETTINGS }
+  for (const cap of PROFILE_CAPABILITIES) {
+    const profile = pickDefault(current.raw, cap)
+    for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
+      const value = field === 'apiKey' ? current.plain[cap][profile.id] : profile[field]
+      out[flatKey as keyof AppSettings] = typeof value === 'string' ? value : ''
+    }
+  }
+  return out
+}
+
+/** 默认方案在界面上的密钥状态：视图里那三个 `*KeyStatus` 取自这里 */
+function defaultKeyStatus(current: SettingsCache, cap: ProfileCapability): SecretStatus {
+  return current.status[cap][pickDefault(current.raw, cap).id] ?? 'none'
 }
 
 /**
@@ -371,7 +539,7 @@ async function readCache(): Promise<SettingsCache> {
   if (cache) return cache
   loadProblem = null
   writeBlocked = false
-  let raw: AppSettings = { ...DEFAULT_SETTINGS }
+  let store = defaultStore()
   let needsVersionStamp = false
 
   const read = await readJsonFile<SettingsDocument>(settingsFile())
@@ -397,7 +565,7 @@ async function readCache(): Promise<SettingsCache> {
         `v${migrated.at}`
       )
     } else {
-      raw = normalizeDocument(migrated.doc)
+      store = normalizeStore(migrated.doc)
       // 旧格式文件不写版本号，搬上来之后必须把版本盖回去，否则下一个版本只能继续猜。
       // 只在真读到文件时才做这一步——首次运行不该因为「版本对不上」凭空造出一份配置。
       needsVersionStamp = migrated.status === 'migrated'
@@ -417,12 +585,12 @@ async function readCache(): Promise<SettingsCache> {
     logger.error('Settings', 'settings.json could not be read; saving is disabled', read.detail)
   }
 
-  cache = buildCache(raw)
+  cache = buildCache(store)
   try {
-    // 读失败时上面已经把 raw 换回默认值：既没有旧字段可搬，也没有明文 Key 可迁，
+    // 读失败时上面已经把 store 换回默认值：既没有旧字段可搬，也没有明文 Key 可迁，
     // 这两个条件自然为 false，不会去动那份读不出来的文件。
-    if (needsVersionStamp) await writeRaw(raw)
-    if (cache.migrated) await migratePlainKeys(raw)
+    if (needsVersionStamp) await writeRaw(store)
+    if (cache.migrated) await migratePlainKeys(store)
   } catch (e) {
     // 迁移写盘失败不影响这次能不能用：内存里已经是迁移后的值，照常干活，下次启动再试。
     // 但必须留痕——磁盘上会继续留着旧字段、历史明文 Key，而这只有翻日志的人才知道。
@@ -437,49 +605,51 @@ async function readCache(): Promise<SettingsCache> {
 
 /** 主进程内部用的配置：密钥已解密。渲染层一律走 getSettingsView */
 export async function loadSettings(): Promise<AppSettings> {
-  const current = await readCache()
-  return { ...current.plain }
+  return flattenDefault(await readCache())
 }
 
 /** 给界面的脱敏视图：几把 Key 在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」 */
 export async function getSettingsView(): Promise<SettingsView> {
   const current = await readCache()
-  const { asrApiKey: _asr, aiApiKey: _ai, ttsApiKey: _tts, ...rest } = current.raw
+  const flat = flattenDefault(current)
+  const { asrApiKey: _asr, aiApiKey: _ai, ttsApiKey: _tts, ...rest } = flat
   return {
     ...rest,
-    asrKeyStatus: current.status.asrApiKey,
-    aiKeyStatus: current.status.aiApiKey,
-    ttsKeyStatus: current.status.ttsApiKey,
+    asrKeyStatus: defaultKeyStatus(current, 'asr'),
+    aiKeyStatus: defaultKeyStatus(current, 'ai'),
+    ttsKeyStatus: defaultKeyStatus(current, 'tts'),
     keyEncryptionAvailable: encryptionAvailable(),
     storageProblem: describeLoadProblem(loadProblem),
   }
 }
 
 /**
- * 保存。密钥字段的语义和普通字段不同，界面上的输入框是「留空＝不改」：
+ * 保存。第①步的口径：这份补丁写进「当前默认方案」，其余方案原样留在磁盘上——
+ * 界面此刻还只有一套扁平表单（#222 第③步才有多方案列表），所以写默认那条就是对的落点。
+ *
+ * 密钥字段的语义和普通字段不同，界面上的输入框是「留空＝不改」：
  * - 缺席 / 空串：保留磁盘上已有的那把（改个接口地址不用重贴 Key）
  * - null：显式清除（界面「清除已保存的 Key」按钮）
  * - 非空字符串：替换，并按本机能不能加密决定存密文还是明文
  */
 export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> {
   const current = await readCache()
-  const merged: AppSettings = { ...current.raw }
+  const merged = cloneStore(current.raw)
   const incoming = patch as Partial<AppSettings>
-  for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof AppSettings>) {
-    if (SECRET_FIELDS.includes(key as SecretField)) continue
-    // 只认这里列得出的配置项，且只收字符串：界面上多带的字段（脱敏视图的状态位）
-    // 和任何手改出来的怪值都不该被写回磁盘
-    const value = incoming[key]
-    if (typeof value === 'string') merged[key] = value
-  }
-  for (const field of SECRET_FIELDS) {
-    const incomingSecret = patch[field]
-    if (incomingSecret === undefined || incomingSecret === '') continue
-    if (incomingSecret === null) {
-      merged[field] = ''
-      continue
+  for (const cap of PROFILE_CAPABILITIES) {
+    const profile = pickDefault(merged, cap)
+    for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
+      if (SECRET_FIELDS.includes(flatKey as SecretField)) {
+        const incomingSecret = patch[flatKey as SecretField]
+        if (incomingSecret === undefined || incomingSecret === '') continue
+        profile.apiKey = incomingSecret === null ? '' : seal(incomingSecret.trim())
+        continue
+      }
+      // 只认这里列得出的配置项，且只收字符串：界面上多带的字段（脱敏视图的状态位）
+      // 和任何手改出来的怪值都不该被写回磁盘
+      const value = incoming[flatKey as keyof AppSettings]
+      if (typeof value === 'string') profile[field] = value
     }
-    merged[field] = seal(incomingSecret.trim())
   }
   await writeRaw(merged)
   return getSettingsView()
