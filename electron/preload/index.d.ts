@@ -98,6 +98,8 @@ export interface VoiceCallOptions {
   localEngine?: string
   /** OpenAI 标准 speed 的取值范围 0.25–4.0；不填按 1，主进程会夹边界 */
   speed?: number
+  /** 「这次用哪套配音配置」：#222 第②步的方案 id，空/不传＝该档当前默认方案 */
+  profileId?: string
 }
 
 export interface VoiceProgress {
@@ -271,6 +273,41 @@ export interface ConnectionTestValues {
   voice?: string
 }
 
+/** 三档能力：转写 / 校对 / 字幕配音，各自有一套方案列表（#222） */
+export type ProfileCapability = 'asr' | 'ai' | 'tts'
+
+/** 一把 Key 在本机的状态；明文一律不进渲染进程，所以这里没有值只有状态 */
+export type SecretStatus = 'none' | 'encrypted' | 'plaintext' | 'unreadable'
+
+/**
+ * 一条方案的脱敏形状。`values` 的键名按能力不同（provider / apiBase / model /
+ * localModel / language / engine / voice / localEngine / localVoice），取自磁盘那
+ * 张字段表，所以第③步的表单绑的就是这几个名字。
+ */
+export interface ProfileView {
+  id: string
+  name: string
+  values: Record<string, string>
+  keyStatus: SecretStatus
+}
+
+/** 三档的方案列表 + 每档当前选哪条 + 上限；上限只在「新建」时拦，读到的条数可能比它多 */
+export interface ProfilesView {
+  profiles: Record<ProfileCapability, ProfileView[]>
+  defaultProfileId: Record<ProfileCapability, string>
+  maxProfiles: number
+  storageProblem: string | null
+}
+
+/**
+ * 增删改的回执：error 非 null 时这次没写进磁盘，界面不许报「已保存」；
+ * profiles 照样回（可能是 null，那是连读都读不出来），因为它才是磁盘上此刻的真实样子。
+ */
+export interface ProfilesResult {
+  profiles: ProfilesView | null
+  error: string | null
+}
+
 export interface ElectronAPI {
   /** preload 里取的 `process.platform`（darwin / win32 / linux / …），窗口那侧的 hiddenInset 看的就是它 */
   platform: string
@@ -338,10 +375,16 @@ export interface ElectronAPI {
     text: string,
     options: unknown
   ) => Promise<{ corrected: string; changes: string[]; error?: string }>
+  /**
+   * `profileId` 是「这次用哪套校对配置」，空或指不到人时按校对档当前默认那条走（#222 第②步留下的接缝，
+   * 界面到第④步才长出选择器）。`startTranscription` / `correctText` 的 options 形同 `unknown`，
+   * 所以只有这里这两条需要在类型上留位。
+   */
   explainDifferences: (
-    differences: Array<{ original: string; corrected: string; context: string }>
+    differences: Array<{ original: string; corrected: string; context: string }>,
+    profileId?: string
   ) => Promise<Array<{ explanation: string; dictionaryHint?: string }>>
-  analyzeReference: (referenceText: string) => Promise<{
+  analyzeReference: (referenceText: string, profileId?: string) => Promise<{
     issues: Array<{
       text: string
       suggestion?: string
@@ -414,10 +457,12 @@ export interface ElectronAPI {
 
   /**
    * 本地配音引擎状态快照（只读，不拉起引擎）；engine 传界面当前选中的那个引擎 id。
+   * `profileId` 传的是「这一套配音方案」，第③步按方案显示就绪状态要用它；空＝按配音档当前默认那条读
+   * （#222 第②步留下的接缝）。
    * null＝这一份快照没能读出来（不是「什么都缺」），界面按「还没读到本机组件状态」那一支说话，
    * 不许照着 false 的 binaryPresent 去说「引擎二进制没下载」。
    */
-  getLocalVoiceStatus: (engine?: string) => Promise<LocalTtsStatus | null>
+  getLocalVoiceStatus: (engine?: string, profileId?: string) => Promise<LocalTtsStatus | null>
   /**
    * 应用内重启本地配音引擎。引擎只取已保存的设置——设置页「点保存才生效」这条口径不在这儿破例。
    * 首次启动要解包，最长可能等两分钟。
@@ -470,7 +515,8 @@ export interface ElectronAPI {
    */
   getSettings: () => Promise<Record<string, unknown> | null>
   /**
-   * tierRestart：本次保存改了本地档位时的引擎重启结果。
+   * tierRestart：本次保存改了本地档位时的引擎重启结果。比的是该档**当前默认那条**换前换后
+   * （引擎驻留的就是那条的档位）——补丁用 profileIds 指到别的方案时档位没变，回 not-needed。
    * busy / failed 时 error 是必须展示给用户的原因——这两种情况下新档位其实还没生效。
    * saveError 非 null 时这次压根没写进磁盘，界面必须留在原状（不许清空 Key 输入框、不许报已保存）。
    * settings 为 null 是更坏的一档：连脱敏视图都没读出来，界面不许据此把密钥状态标成「全是 none」。
@@ -486,6 +532,30 @@ export interface ElectronAPI {
     kind: 'asr' | 'ai' | 'tts',
     values: ConnectionTestValues
   ) => Promise<TestOutcome>
+
+  /**
+   * 三档各自的方案列表（脱敏，密钥只有状态）。
+   * null＝连列表都没读出来，界面不许按「一条都没有」显示——那句话会把用户已有的方案说成不存在。
+   */
+  listProfiles: () => Promise<ProfilesView | null>
+  /**
+   * 新建一套方案。`fromProfileId` 传空串要一条全空的（连 Key 都不带），传那条 id 表示照着它复制；
+   * 缺省＝照着该档当前默认那条复制。到了上限或磁盘不能写时 error 是给人看的一句话。
+   */
+  createProfile: (
+    capability: ProfileCapability,
+    name?: string,
+    fromProfileId?: string
+  ) => Promise<ProfilesResult>
+  renameProfile: (
+    capability: ProfileCapability,
+    profileId: string,
+    name: string
+  ) => Promise<ProfilesResult>
+  /** 删掉最后一条会被拒绝：那一档就没有「当前方案」可指了 */
+  deleteProfile: (capability: ProfileCapability, profileId: string) => Promise<ProfilesResult>
+  /** 换该档当前用的方案，下一次转写/校对/配音取值就走这条，无需重启应用 */
+  setDefaultProfile: (capability: ProfileCapability, profileId: string) => Promise<ProfilesResult>
 
   getServiceReady: () => Promise<{
     ready: boolean

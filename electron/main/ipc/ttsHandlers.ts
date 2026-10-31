@@ -103,6 +103,27 @@ interface VoiceCallOptions {
   /** 本地档用哪个引擎（VITS / Kokoro）。只认白名单，见下面 withOverrides */
   localEngine?: string
   speed?: number
+  /**
+   * 「这次用哪套配音配置」：#222 第②步接上的方案 id。
+   * 空或指不到人时走该档当前默认方案，所以配音页还没长出方案下拉时这一格就是空的。
+   * 它是查表用的键，不会被拼进任何路径或目录名（引擎 id 那种白名单校验对它不适用）。
+   */
+  profileId?: string
+}
+
+/** 界面传来的一个字符串参数：非字符串与空串都收成空串，交给调用点按「没指定」处理 */
+function trimArg(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+/**
+ * 从界面传来的那格可覆盖参数里取方案 id。收口写法与 withOverrides 一致：非字符串与空串都按
+ * 「没指定」处理——「没指定」在 settingsService 里就是「用该档当前默认方案」，
+ * 而把 undefined 传下去和把一串乱码传下去结果相同，不必再多一层判断。
+ */
+function profileIdOf(raw: unknown): string | undefined {
+  const value = (raw ?? {}) as { profileId?: unknown }
+  return trimArg(value.profileId) || undefined
 }
 
 /**
@@ -156,7 +177,10 @@ export function registerTTSHandlers() {
   ipcHandle(
     'tts:preview',
     async (_event, text: string, opts?: unknown): Promise<TTSPreviewResult> => ({
-      clip: await previewSpeech(String(text ?? ''), withOverrides(await getTTSConfig(), opts)),
+      clip: await previewSpeech(
+        String(text ?? ''),
+        withOverrides(await getTTSConfig(profileIdOf(opts)), opts)
+      ),
       error: null,
     }),
     (message) => ({ clip: null, error: message })
@@ -191,7 +215,11 @@ export function registerTTSHandlers() {
       // 逐段合成的失败由 guard 收成一份空账目 + error；下面拼轨那一步不能交给它，
       // 因为拼接是本地 ffmpeg，它失败不代表前面几十段没成，把 clipCount/failures/skipped
       // 抹成 0 会让界面报「一段都没成」，用户白等了一轮。
-      const batch = await synthesizeSegments(queue, withOverrides(await getTTSConfig(), opts), sendProgress)
+      const batch = await synthesizeSegments(
+        queue,
+        withOverrides(await getTTSConfig(profileIdOf(opts)), opts),
+        sendProgress
+      )
       const jobId = batch.job.id
       const result = batch.result
 
@@ -298,13 +326,19 @@ export function registerTTSHandlers() {
    * 这个值会被拼进模型目录名，不能把渲染层传来的字符串直接当路径用。
    * 空串同样按「没指定」处理，跟 tts:preview/synthesize 一个口径——不然设置页还没选过时
    * 这里会回一份 VITS 的状态，界面却按保存的那一档显示。
+   * 第二个参数是第②步加的方案 id：多套配音配置之后，「这一套要用的引擎装没装好」得能按套问，
+   * 传空就是问当前默认那套（与 preview/synthesize 同一个落点）。
    * 「检查状态」不主动 ensure 是刻意的——本地档懒启动，用户只是想知道组件下没下好，
    * 不该因为打开设置页就吃掉一次 8 秒解包和几百 MB 内存。
    */
   ipcHandle(
     'tts:localStatus',
-    async (_event, requestedEngine?: unknown): Promise<LocalTtsStatusResult> => {
-      const config = await getTTSConfig()
+    async (
+      _event,
+      requestedEngine?: unknown,
+      requestedProfile?: unknown
+    ): Promise<LocalTtsStatusResult> => {
+      const config = await getTTSConfig(trimArg(requestedProfile) || undefined)
       const requested = typeof requestedEngine === 'string' ? requestedEngine.trim() : ''
       const engine = normalizeLocalTtsEngine(requested || config.localEngine)
       const detail = await getLocalTtsDetail(engine)

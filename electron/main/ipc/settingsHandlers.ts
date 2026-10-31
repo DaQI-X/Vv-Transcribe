@@ -1,20 +1,27 @@
 /**
  * 设置持久化 IPC 处理器
- * 提供设置的读取、保存，以及「测试连接 / 检查引擎状态」接口
+ * 提供设置的读取、保存，多套配置的增删改，以及「测试连接 / 检查引擎状态」接口
  * 数据存储在 userData/settings.json；三把 API Key 只在主进程解密，回给界面的一律是脱敏视图
  *
- * settings:get 失败回 null 而不是回一份空的 SettingsView：那一份表单每个字段都是空的，
+ * settings:get / settings:listProfiles 失败回 null 而不是回一份空视图：那一份表单每个字段都是空的，
  * 界面会照着说「你还没填 API Key」——磁盘上明明有，只是这次读不出来。
  * null 正好落回界面本来就有的那条分支（按默认值填表、密钥状态一律不标）。
  */
 import {
+  createProfile,
+  deleteProfile,
   getSettingsView,
+  listProfiles,
   loadSettings,
+  renameProfile,
   saveSettings,
+  setDefaultProfile,
   normalizeLocalModel,
   normalizeTtsEngine,
+  SettingsProfileRuleError,
   SettingsWriteBlockedError,
   type LocalModelTier,
+  type ProfilesView,
   type SettingsPatch,
   type SettingsView,
 } from '../services/settingsService'
@@ -39,7 +46,7 @@ export interface SaveSettingsResult {
   /** null＝连脱敏视图都没读出来（配置坏了或目录权限掉了）；界面按「不知道密钥状态」处理，不许当成「全是 none」 */
   settings: SettingsView | null
   tierRestart: TierRestartOutcome
-  /** tierRestart 为 failed 时可直接展示给用户的原因 */
+  /** tierRestart 为 busy / failed 时可直接展示给用户的原因——这两种情况下新档位其实还没生效 */
   error: string | null
   /**
    * 这次没能写进磁盘，可直接展示给用户的原因；null＝真的存下了。
@@ -95,9 +102,76 @@ async function viewForFailure(): Promise<SettingsView | null> {
   }
 }
 
+/**
+ * 方案增删改的回执。`profiles` 是改完之后（或没改成时）磁盘上的那份列表，
+ * error 非 null 时界面**不许**把它当成「操作成功了列表刷新一下」——
+ * 列表照样回，是因为即便这次没写进去，界面上那三条也得还是磁盘上真实的样子。
+ */
+export interface ProfilesResult {
+  profiles: ProfilesView | null
+  error: string | null
+}
+
+/** 方案操作的失败原因：闸门与规矩那两类文案本来就是给人看的一句话，原样透出去 */
+function profilesErrorMessage(err: unknown): string {
+  if (err instanceof SettingsWriteBlockedError) return err.message
+  if (err instanceof SettingsProfileRuleError) return err.message
+  const message = err instanceof Error ? err.message : String(err)
+  return `配置没能写入（${message}）。清出磁盘空间或修好目录权限后再试一次`
+}
+
+/** 四条改动（新建 / 改名 / 删除 / 换默认）共用的一条出口：出错也要回列表 + 一句话，而不是让渲染层的 await 抛 */
+async function profilesAction(run: () => Promise<ProfilesView>): Promise<ProfilesResult> {
+  try {
+    return { profiles: await run(), error: null }
+  } catch (err) {
+    const error = profilesErrorMessage(err)
+    logger.error('Settings', 'profile change did not reach the disk', error)
+    let profiles: ProfilesView | null = null
+    try {
+      profiles = await listProfiles()
+    } catch {
+      profiles = null
+    }
+    return { profiles, error }
+  }
+}
+
 export function registerSettingsHandlers() {
   // 脱敏视图：密钥字段在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」
   ipcHandle('settings:get', () => getSettingsView(), () => null)
+
+  // 三档各自的方案列表（含每条的密钥状态与「当前选哪条」），一次给全
+  ipcHandle('settings:listProfiles', () => listProfiles(), () => null)
+
+  // 新建：不传 fromProfileId 或传那条 id 都是照着复制，传空串才要一条全空的（密钥原样搬运，见 settingsService）
+  ipcHandle(
+    'settings:createProfile',
+    (_event, capability: unknown, name?: unknown, fromProfileId?: unknown) =>
+      profilesAction(() => createProfile(capability, name, fromProfileId)),
+    (message) => ({ profiles: null, error: message })
+  )
+
+  ipcHandle(
+    'settings:renameProfile',
+    (_event, capability: unknown, profileId: unknown, name: unknown) =>
+      profilesAction(() => renameProfile(capability, profileId, name)),
+    (message) => ({ profiles: null, error: message })
+  )
+
+  ipcHandle(
+    'settings:deleteProfile',
+    (_event, capability: unknown, profileId: unknown) =>
+      profilesAction(() => deleteProfile(capability, profileId)),
+    (message) => ({ profiles: null, error: message })
+  )
+
+  ipcHandle(
+    'settings:setDefaultProfile',
+    (_event, capability: unknown, profileId: unknown) =>
+      profilesAction(() => setDefaultProfile(capability, profileId)),
+    (message) => ({ profiles: null, error: message })
+  )
 
   ipcHandle(
     'settings:save',
@@ -111,7 +185,11 @@ export function registerSettingsHandlers() {
       try {
         const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
         const saved = await saveSettings(patch)
-        const tierRestart = await applyTierChange(before, normalizeLocalModel(saved.asrLocalModel))
+        // after 也必须按「下一次转写真的会用哪一条」读，不能读这次写进去的那一条：
+        // saved 说的是被编辑的那条方案，编辑的不是当前默认那条时，引擎用的还是原来那条，
+        // 档位没变却重启一次、还说「新档位才会生效」，就是把用户的好几次转写白白打断了
+        const after = normalizeLocalModel((await loadSettings()).asrLocalModel)
+        const tierRestart = await applyTierChange(before, after)
         return { settings: saved, tierRestart, error: TIER_RESTART_MESSAGE[tierRestart] ?? null, saveError: null }
       } catch (err) {
         // 写盘失败要说得出为什么，还要把界面上那份（没存进去的）视图原样回给它，

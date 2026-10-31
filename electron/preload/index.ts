@@ -30,6 +30,8 @@ interface VoiceSegment {
 interface VoiceCallOptions {
   voice?: string
   speed?: number
+  /** 「这次用哪套配音配置」；空/不传＝该档当前默认方案 */
+  profileId?: string
 }
 
 /** 与 index.d.ts 的 VoiceProgress 对齐：index/total 是真实段号，不做假百分比 */
@@ -107,10 +109,12 @@ const api = {
   },
 
   correctText: (text: string, options: unknown) => ipcRenderer.invoke('ai:correct', text, options),
-  explainDifferences: (differences: unknown[]) =>
-    ipcRenderer.invoke('ai:explainDifferences', differences),
-  analyzeReference: (referenceText: string) =>
-    ipcRenderer.invoke('ai:analyzeReference', referenceText),
+  // 三条 AI 通道都多接一个可选的方案 id（#222 第②步）：空/不传＝用该档当前默认方案，
+  // 所以现在的调用点一个字都不用改
+  explainDifferences: (differences: unknown[], profileId?: string) =>
+    ipcRenderer.invoke('ai:explainDifferences', differences, profileId),
+  analyzeReference: (referenceText: string, profileId?: string) =>
+    ipcRenderer.invoke('ai:analyzeReference', referenceText, profileId),
 
   proofreadLocal: (segments: unknown[]) => ipcRenderer.invoke('proofread:local', segments),
   proofreadExplain: (differences: unknown[]) =>
@@ -125,7 +129,9 @@ const api = {
   saveVoiceTrack: (jobId: string) => ipcRenderer.invoke('tts:saveTrack', jobId),
   releaseVoiceBatch: (jobId: string) => ipcRenderer.invoke('tts:releaseBatch', jobId),
   // 本地配音引擎：只读状态（不会因此拉起引擎）、应用内重启与停止
-  getLocalVoiceStatus: (engine?: string) => ipcRenderer.invoke('tts:localStatus', engine),
+  // profileId 是「问哪一套配音配置里的引擎」，不传就是问当前默认那套
+  getLocalVoiceStatus: (engine?: string, profileId?: string) =>
+    ipcRenderer.invoke('tts:localStatus', engine, profileId),
   restartLocalVoiceEngine: () => ipcRenderer.invoke('tts:localRestart'),
   stopLocalVoiceEngine: () => ipcRenderer.invoke('tts:localStop'),
   // 一批要跑几分钟（每段一次网络请求，串行），invoke 只给最后结果；段号得推回来界面才不会像卡死
@@ -147,6 +153,18 @@ const api = {
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
   testConnection: (kind: 'asr' | 'ai' | 'tts', values: unknown) =>
     ipcRenderer.invoke('settings:testConnection', kind, values),
+
+  // 多套配置（#222）：三档各自的方案列表，增删改各一条。
+  // createProfile 的 fromProfileId：传空串＝要一条全空的（连 Key 都不带），传 id 或省略＝照着那一条复制
+  listProfiles: () => ipcRenderer.invoke('settings:listProfiles'),
+  createProfile: (capability: 'asr' | 'ai' | 'tts', name?: string, fromProfileId?: string) =>
+    ipcRenderer.invoke('settings:createProfile', capability, name, fromProfileId),
+  renameProfile: (capability: 'asr' | 'ai' | 'tts', profileId: string, name: string) =>
+    ipcRenderer.invoke('settings:renameProfile', capability, profileId, name),
+  deleteProfile: (capability: 'asr' | 'ai' | 'tts', profileId: string) =>
+    ipcRenderer.invoke('settings:deleteProfile', capability, profileId),
+  setDefaultProfile: (capability: 'asr' | 'ai' | 'tts', profileId: string) =>
+    ipcRenderer.invoke('settings:setDefaultProfile', capability, profileId),
 
   getServiceReady: () => ipcRenderer.invoke('app:getServiceReady'),
 

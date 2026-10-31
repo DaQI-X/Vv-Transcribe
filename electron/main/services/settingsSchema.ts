@@ -108,6 +108,16 @@ export const DEFAULT_PROFILE_IDS: DefaultProfileId = {
 
 export const DEFAULT_PROFILE_NAME = '默认'
 
+/**
+ * 每一档最多能有几套方案（2026-10-31 用户定的产品上限：转写/校对/配音各最多 3 套）。
+ *
+ * 这个数**只在写入侧生效**——新建方案到数就拒；读取侧不许按它剪列表。
+ * 手改的文件里塞了 5 条时剪掉 2 条，就是「读成功、写成功、东西没了」，撞的是
+ * 「绝不静默丢用户的东西」那条承诺。所以它是产品上限，不是校验规则，
+ * normalizeStore 那边照单全收，界面上限与这里的判断都取自这一个常量。
+ */
+export const MAX_PROFILES_PER_CAPABILITY = 3
+
 /** 版本字段的名字只在这里出现一次，写盘与读盘都取它，避免拼写分叉 */
 export const CURRENT_SETTINGS_VERSION_FIELD = 'schemaVersion'
 

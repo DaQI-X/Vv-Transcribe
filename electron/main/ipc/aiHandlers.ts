@@ -16,8 +16,14 @@ import { ipcHandle } from './guard'
 export function registerAIHandlers() {
   ipcHandle(
     'ai:correct',
-    async (_event, text: string, options?: { language?: string; promptTemplate?: string }) => {
-      const config = await getAIConfig()
+    async (
+      _event,
+      text: string,
+      options?: { language?: string; promptTemplate?: string; profileId?: string }
+    ) => {
+      // profileId＝「这次校对用哪套校对配置」；空或指不到人时走该档当前默认方案，
+      // 也就是界面上还没长出方案选择器时的行为
+      const config = await getAIConfig(options?.profileId)
 
       if (!config.apiKey) {
         return {
@@ -41,8 +47,8 @@ export function registerAIHandlers() {
 
   ipcHandle(
     'ai:explainDifferences',
-    async (_event, differences: DifferenceItem[]) => {
-      const config = await getAIConfig()
+    async (_event, differences: DifferenceItem[], profileId?: string) => {
+      const config = await getAIConfig(profileId)
 
       if (!config.apiKey) {
         return differences.map(() => ({
@@ -69,8 +75,8 @@ export function registerAIHandlers() {
 
   ipcHandle(
     'ai:analyzeReference',
-    async (_event, referenceText: string) => {
-      const config = await getAIConfig()
+    async (_event, referenceText: string, profileId?: string) => {
+      const config = await getAIConfig(profileId)
 
       if (!config.apiKey) {
         return {

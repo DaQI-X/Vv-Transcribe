@@ -19,7 +19,7 @@ import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { existsSync, readdirSync } from 'node:fs'
 import { app } from 'electron'
-import { loadSettings, normalizeLocalModel } from './settingsService'
+import { loadSettings, normalizeLocalModel, type LocalModelTier } from './settingsService'
 import { logger } from './logger'
 
 const TAG = 'ASRService'
@@ -63,6 +63,13 @@ let asrExitInfo: string | null = null
 let asrReady = false
 /** 未就绪时的用户可读原因，随转写失败一起展示，避免只留一句 fetch failed */
 let asrError: string | null = null
+/**
+ * 这次 spawn 是以哪个 Whisper 档位起的（只在这次 ready 期间有意义）。
+ * 档位本身可以逐请求传（引擎按请求懒加载模型），但 HF_HUB_OFFLINE 是 spawn 时钉死的，
+ * 运行中改不了——所以「要跑的档位」和「引擎被允许联网与否」必须在起进程那一刻对上，
+ * 对不上就只有重起这一条路（本地配音的 boundEngine 是同一个道理）。
+ */
+let bootedTier: LocalModelTier | null = null
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -282,8 +289,13 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
   return 'timeout'
 }
 
-/** 启动 Python ASR 服务 */
-export async function startASRService(): Promise<boolean> {
+/**
+ * 启动 Python ASR 服务。
+ * `tierOverride` 只有 ensureLocalTier 会传：转写按界面上选中的那套方案取档位，
+ * 而那次 spawn 的联网许可要按**这一档**的缓存情况定；不传就是应用启动那条路，
+ * 按该档当前默认方案定（与设置页那个「重启本地引擎」按钮同一个口径）。
+ */
+export async function startASRService(tierOverride?: LocalModelTier): Promise<boolean> {
   const binaryPath = getBinaryPath()
 
   if (!existsSync(binaryPath)) {
@@ -337,10 +349,10 @@ export async function startASRService(): Promise<boolean> {
     ffprobe: !!ffprobePath,
   })
 
-  const tier = normalizeLocalModel((await loadSettings()).asrLocalModel)
+  const tier = tierOverride ?? normalizeLocalModel((await loadSettings()).asrLocalModel)
   const modelCached = isModelCached(tier)
   // cached=false 意味着这次启动没给 HF_HUB_OFFLINE=1，首次转写会先去 hf-mirror 拉权重
-  logger.info(TAG, 'Whisper tier', { tier, cached: modelCached })
+  logger.info(TAG, 'Whisper tier', { tier, cached: modelCached, override: tierOverride !== undefined })
 
   asrProcess = spawn(binaryPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -378,6 +390,9 @@ export async function startASRService(): Promise<boolean> {
 
   const outcome = await waitForReady()
   asrReady = outcome === 'ready'
+  // 这个档位只在「这次真的起来了」期间有意义：下面的 ensureLocalTier 先看 asrReady，
+  // 没起来时既没有联网许可要对齐，也没有进程可换
+  bootedTier = asrReady ? tier : null
   asrError = readyFailureMessage(outcome)
 
   // 引擎秒退且端口上仍有人监听：那是别的程序占着 8000（它不该赖给「引擎自己崩了」），
@@ -483,24 +498,64 @@ export interface EngineActionResult {
 /**
  * 重启同一时刻只允许跑一次：连点会并发 spawn 两个引擎抢 8000，后起的立即退出，
  * 而「引擎秒退 + 端口仍有人监听」会被判成端口被占，顺手把刚起好的那个也关掉。
+ * 顺带记下这次是为哪个档起的：「要 base」和「要 small」不能共用同一个结果，
+ * 复用另一档的在飞请求等于报了成功、跑的却是别的档。
  */
-let restartInFlight: Promise<EngineActionResult> | null = null
+let restartInFlight: {
+  tier: LocalModelTier | null
+  promise: Promise<EngineActionResult>
+} | null = null
 
-async function doRestartLocalEngine(): Promise<EngineActionResult> {
+async function doRestartLocalEngine(tier?: LocalModelTier): Promise<EngineActionResult> {
   // 先停再起。stop 里的 ensureTreeGone 用的还是旧 bootId，正好用来确认「上一代真退干净了」；
   // 新身份由 startASRService 在 spawn 前现生成，残尸过不了握手这道关
   await stopASRService()
-  const ok = await startASRService()
+  const ok = await startASRService(tier)
   return { ok, error: ok ? null : (asrError || '本地转写引擎没能重启成功，请稍后再试') }
 }
 
-/** 应用内重启本地引擎：让用户在软件里就能再试一次，不必退出重开 */
-export function restartLocalEngine(): Promise<EngineActionResult> {
-  if (restartInFlight) return restartInFlight
-  restartInFlight = doRestartLocalEngine().finally(() => {
-    restartInFlight = null
+/**
+ * 应用内重启本地引擎：让用户在软件里就能再试一次，不必退出重开。
+ * `tier` 只有 ensureLocalTier 会传（那是「这次转写要用的档位」），设置页那颗按钮不传，
+ * 按已保存的配置起——没保存的选择不能在这里偷偷把后台切成它。
+ */
+export function restartLocalEngine(tier?: LocalModelTier): Promise<EngineActionResult> {
+  const wanted = tier ?? null
+  if (restartInFlight) {
+    if (restartInFlight.tier === wanted) return restartInFlight.promise
+    // 档位不同就排队再来一次：两个档并发抢 8000 只会同归于尽（见上面那段）
+    return restartInFlight.promise.then(() => restartLocalEngine(tier))
+  }
+  const promise = doRestartLocalEngine(tier)
+  let entry!: { tier: LocalModelTier | null; promise: Promise<EngineActionResult> }
+  entry = {
+    tier: wanted,
+    promise: promise.finally(() => {
+      // 只清自己这一条：排队跑第二次时，第一条的收尾可能晚于第二次的赋值到达
+      if (restartInFlight === entry) restartInFlight = null
+    }),
+  }
+  restartInFlight = entry
+  return entry.promise
+}
+
+/**
+ * 让「这次转写要用的档位」和「引擎是以哪个档位起的」对上（#222 第②步带来的新问题）：
+ * 多套配置之后，第二套转写方案可以选 small 而当前默认那套是 base，可引擎的联网许可
+ * （HF_HUB_OFFLINE）是 spawn 时按 base 的缓存情况钉死的。照原样把请求发下去，small 会
+ * 报「模型没下载完」却又下不下来——正是设置页换档必须重启引擎的那个死结，只是这次
+ * 换档的不是用户，是两套方案。
+ *
+ * 引擎没在跑时这里什么都不做：那是「引擎根本没运行」，归 getASRServiceStatus 那句报给用户，
+ * 重启一次也解决不了缺失的二进制。
+ */
+export async function ensureLocalTier(tier: LocalModelTier): Promise<EngineActionResult> {
+  if (!asrReady || bootedTier === tier) return { ok: true, error: null }
+  logger.info(TAG, 'Whisper tier mismatch, restarting engine', {
+    from: bootedTier ?? 'unknown',
+    to: tier,
   })
-  return restartInFlight
+  return restartLocalEngine(tier)
 }
 
 /** 获取 ASR 服务状态；未就绪时 error 为可直接展示给用户的原因 */

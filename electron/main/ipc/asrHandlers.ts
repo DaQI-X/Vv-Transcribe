@@ -14,7 +14,7 @@ import { extractAudio, cleanupTemp } from '../services/audioProcessor'
 import { dropMediaSessionCookies, releaseMediaSessionsExcept } from '../services/urlDownloader'
 import { runTranscription } from '../services/asr/asrManager'
 import { restartLocalEngine } from '../services/asrServiceManager'
-import { getASRConfig } from '../services/settingsService'
+import { getASRConfig, resolveProfileId } from '../services/settingsService'
 import type { ASRModelInfo, ASRSegment, ASRStage } from '../services/asr/types'
 import { logger } from '../services/logger'
 import { failOkError, ipcHandle } from './guard'
@@ -44,7 +44,7 @@ export function registerASRHandlers() {
     async (
       event,
       filePath: string,
-      options?: { language?: string; mediaSessionId?: string }
+      options?: { language?: string; mediaSessionId?: string; profileId?: string }
     ) => {
       const jobId = randomUUID()
       const signal = new AbortController()
@@ -85,9 +85,16 @@ export function registerASRHandlers() {
 
         sendProgress(5)
 
-        const config = await getASRConfig()
+        // 界面传来的方案 id 可能已被另一扇窗删掉，那时这条落回该档当前默认方案；
+        // 日志与历史记录（#247）要记的是**实际用到**的那条，不是传进来的那个
+        const profileId = await resolveProfileId('asr', options?.profileId)
+        const config = await getASRConfig(profileId)
         // 只报模式与「有没有 Key」这两个布尔：apiKey 本身和它的长度都不能进日志
-        logger.info(TAG, 'Transcription config', { provider: config.provider, hasApiKey: !!config.apiKey })
+        logger.info(TAG, 'Transcription config', {
+          provider: config.provider,
+          hasApiKey: !!config.apiKey,
+          profileId,
+        })
 
         const result = await runTranscription(extractResult.wavPath, config, {
           language: options?.language ?? 'zh',
