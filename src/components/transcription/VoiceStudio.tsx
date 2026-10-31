@@ -15,6 +15,7 @@
  * - 「配音方案」那个下拉（#222 第④步）也不开「这一次用哪套」的口子：一条方案里就带着上面那一档，
  *   做成单次覆盖等于把那扇关着的门从侧面推开。它做的是设置页那颗「设为当前使用」同一件事——
  *   语义、文案、禁用条件都跟那边一个口径，界面上不留第二种「切方案」。
+ *   转写页和校对那一格挂的是同一个控件（ProfileSwitchSelect），落盘与话术都在 useProfileStore 一处。
  *
  * 合成中那张卡复用转写的 processing 视觉（徽章 + 波形 + 进度 + 取消），因为它是同一件事：
  * 一个分钟级的活儿在后台跑。段号是主进程推回来的真实段号，不是编出来的百分比。
@@ -25,6 +26,8 @@ import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
+import { switchableProfiles, useProfileStore } from '@/stores/useProfileStore'
+import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
 import { formatBytes } from '@/utils/formatBytes'
 import { formatTime } from '@/utils/formatTime'
 import {
@@ -295,9 +298,8 @@ export function VoiceStudio() {
   const configEngine = useVoiceStudioStore((s) => s.configEngine)
   const speakers = useVoiceStudioStore((s) => s.speakers)
   const engineModelPresent = useVoiceStudioStore((s) => s.engineModelPresent)
-  const profiles = useVoiceStudioStore((s) => s.profiles)
-  const profileId = useVoiceStudioStore((s) => s.profileId)
-  const switchingProfile = useVoiceStudioStore((s) => s.switchingProfile)
+  const profiles = useProfileStore((s) => s.slice.tts.profiles)
+  const profileId = useProfileStore((s) => s.slice.tts.profileId)
   const setProfile = useVoiceStudioStore((s) => s.setProfile)
   const phase = useVoiceStudioStore((s) => s.phase)
   const preview = useVoiceStudioStore((s) => s.preview)
@@ -317,12 +319,12 @@ export function VoiceStudio() {
 
   const local = mode === 'local'
   /**
-   * 方案列表：只在这条档确实有第二套可换时才长成一行控件。null＝这次没读出来，
-   * 整块收起而不是显示「只有默认那套」——那句话会把用户已有的方案说成不存在。
+   * 方案列表：只在这条档确实有第二套可换时才长成一行控件（判断收在 switchableProfiles，
+   * 下拉自己也用它）。null＝这次没读出来，整块收起而不是显示「只有默认那套」——
+   * 那句话会把用户已有的方案说成不存在。
    */
-  const profileOptions = profiles ?? []
-  const showProfileSelect = profileOptions.length > 1
-  const currentProfile = profileOptions.find((profile) => profile.id === profileId)
+  const showProfileSelect = !!switchableProfiles(profiles)
+  const currentProfile = (profiles ?? []).find((profile) => profile.id === profileId)
   /** 下拉的当前值：界面上没改过就用设置里那一档/那个编号 */
   const selectedEngine = engine || configEngine
   const voiceValue = voice || (local ? (/^\d+$/.test(configVoice) ? configVoice : '0') : '')
@@ -387,21 +389,14 @@ export function VoiceStudio() {
           {showProfileSelect && (
             <>
               <div className="voice-studio__fields">
-                <label className="voice-studio__field" style={{ flex: '0 1 220px', minWidth: 150 }}>
-                  <span className="voice-studio__label">配音方案</span>
-                  <select
-                    className="settings-form-select"
-                    value={profileId}
-                    onChange={(e) => void setProfile(e.target.value)}
-                    disabled={running || previewing || switchingProfile}
-                  >
-                    {profileOptions.map((profile) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <ProfileSwitchSelect
+                  capability="tts"
+                  className="voice-studio__field"
+                  labelClassName="voice-studio__label"
+                  style={{ flex: '0 1 220px', minWidth: 150 }}
+                  disabled={running || previewing}
+                  switchTo={(picked) => setProfile(picked)}
+                />
               </div>
               <p className="voice-studio__hint">
                 {/* 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 下一次」 */}

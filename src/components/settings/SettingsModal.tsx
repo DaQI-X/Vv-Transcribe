@@ -42,6 +42,7 @@ import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { useThemeStore } from '@/stores/useThemeStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
+import { useProfileStore } from '@/stores/useProfileStore'
 import { ASR_LANGUAGE_OPTIONS } from '@/utils/asrLanguage'
 import {
   LOCAL_TTS_DEFAULT_ENGINE,
@@ -554,6 +555,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    */
   const applyProfiles = (view: ProfilesView) => {
     setProfiles(view)
+    // 同一份列表还要推给三个页面的那条下拉（转写首页 / 校对着 / 字幕配音）：
+    // 在设置里新建或删掉一套之后，回去的那一页不能还拿着开设置时读到的旧清单。
+    useProfileStore.getState().applyView(view)
     setKeyStates((prev) => {
       const next = { ...prev }
       for (const cap of ['asr', 'ai', 'tts'] as const) {
@@ -743,7 +747,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         view = null
       }
       if (view) {
-        setProfiles(view)
+        // 走 applyProfiles 而不是只 setProfiles：开设置这一次读也是「磁盘此刻的样子」，
+        // 三个页面那条下拉得跟它一起对齐，否则在别处改过方案（或上一次 CRUD 的回执没回来）时，
+        // 回到页面上看到的还是开设置之前那份清单。
+        applyProfiles(view)
         // settings:get 回的那一套字段就是各档默认方案的，所以「正在编辑」从默认那条起步对得上
         setEditing({ ...view.defaultProfileId })
       } else if (settingsRead) {

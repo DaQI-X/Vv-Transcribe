@@ -17,8 +17,8 @@ import { toast } from '@/components/ui/Toast'
 import { checkVoiceReady, raiseReadinessBlock } from '@/utils/readiness'
 import { splitPlainText } from '@/utils/splitPlainText'
 import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS } from '@/utils/localTtsEngines'
-import type { ProfileView } from '@/types/settingsProfile'
 import type { VoiceProgress, VoiceSegment, VoiceSynthesizeResult } from '@/types/voice'
+import { useProfileStore } from './useProfileStore'
 import { useTranscriptionStore } from './useTranscriptionStore'
 
 /** 首页与工作台共用的顶部 tab：转写的两个入口 + 配音 */
@@ -67,16 +67,6 @@ interface VoiceStudioState {
    * 否则用户在别处下载完或手工挪走目录之后，这里会一直按旧账拦人或放人。
    */
   engineModelPresent: Record<string, boolean>
-
-  /**
-   * 配音这一档的方案列表（脱敏）。null＝这次没读出来，界面不许按「一条都没有」显示，
-   * 那句话会把用户已有的方案说成不存在——所以是 null 而不是空数组。
-   */
-  profiles: ProfileView[] | null
-  /** 这一页取值走的那条＝配音档**当前使用**的那条（磁盘上的 defaultProfileId.tts） */
-  profileId: string
-  /** 切换在途：下拉要禁用，否则连点两次会发两次「设为当前使用」 */
-  switchingProfile: boolean
 
   phase: VoicePhase
   /** 这一批实际提交出去的段，进行中按段号回显文本用；用户中途改输入不影响它 */
@@ -185,9 +175,6 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   configEngine: LOCAL_TTS_DEFAULT_ENGINE,
   speakers: 0,
   engineModelPresent: {},
-  profiles: null,
-  profileId: '',
-  switchingProfile: false,
 
   phase: 'idle',
   queue: [],
@@ -255,64 +242,31 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     }
     if (mode === 'local') await refreshLocalVoiceState(get().engine || requested)
     // 方案列表和设置是两回事：设置读不出（null）不代表列表读不出，反过来也一样。
-    // 这一页显示「当前用的是哪一套」靠的是列表那份，读不出时留 null 让界面闭嘴，
-    // 不许按「只有一套默认的」显示——那一句话会把用户已有的方案说成不存在。
-    const view = await api.listProfiles().catch(() => null)
-    set({ profiles: view ? view.profiles.tts : null, profileId: view?.defaultProfileId.tts ?? '' })
+    // 列表那份归 useProfileStore（三档共用，见那个文件头），换完方案必须跟着重读一次，
+    // 否则下拉里挂的还是切之前的「当前使用」。
+    await useProfileStore.getState().load()
   },
 
   /**
-   * 这一页的「配音方案」下拉：选中的那条＝把配音档的**当前使用**换过去（#222 第③步在设置页做过同一件事，
-   * 语义、文案、禁用条件都照它，不留第二个口径）。
+   * 这一页的「配音方案」下拉：选中的那条＝把配音档的**当前使用**换过去。
+   * 落盘、话术、失败分支都在 useProfileStore.setProfile 那一个动作里（转写页、校对那一格走的是
+   * 同一条），这里只留配音这一档独有的收尾。
    * 为什么这不是「这一次配音用哪套」的覆盖：一条方案里带着「云端还是本地」这一档（ttsEngine），
    * 而这一档本页刻意不给选——它决定花不花钱、要不要拉起本机进程（见文件头 #238 那段）。
    * 做成当场覆盖等于把那扇门从侧面推开；做成「设为当前使用」，用户看到的还是同一个长期选择换了哪条，
    * 引擎那边由 ensureLocalTtsEngine 在下一次配音时对齐（档位不同会收掉上一代重起）。
    */
   setProfile: async (profileId) => {
-    const api = getElectronAPI()
-    if (!api) return
-    const { profiles, phase, previewing, switchingProfile } = get()
+    const { phase, previewing } = get()
     // 跑着的那一批用的是开跑时读好的那套；试听也是同一条链路（引擎可能被换档的这次起停打断）
-    if (phase === 'running' || previewing || switchingProfile) return
-    const target = (profiles ?? []).find((profile) => profile.id === profileId)
-    // 列表是进页面时缓存的那份，别处（设置窗口）刚删掉这条时它还在：
-    // 拿一个已经不存在的 id 去发「设为当前使用」，主进程会照实报错，界面就不自己编一句
-    if (!target) {
-      toast.error('这条方案已经不在列表里了，重开这一页再看一次', 12000)
-      return
-    }
-    set({ switchingProfile: true })
-    try {
-      const result = await api.setDefaultProfile('tts', profileId)
-      if (result?.error) {
-        toast.error(result.error, 12000)
-        return
-      }
-      // error 为 null 却没有列表＝这次到底改没改成都不知道（IPC 自己挂了），不许报成功
-      if (!result?.profiles) {
-        toast.error('这次切换没能确认。重开这一页，再看用的是哪一套', 12000)
-        return
-      }
-      // 单次参数是照着**原来那套**挑的：模型、音色、本地引擎都跟着方案走，留着就会出现
-      // 「下拉里挂着 A 套挑的音色、实际按 B 套跑」。倍速不在方案字段里，是这一页自己的参数，留着。
-      set({
-        profiles: result.profiles.profiles.tts,
-        profileId: result.profiles.defaultProfileId.tts,
-        model: '',
-        voice: '',
-        engine: '',
-        speakers: 0,
-      })
-      // 换完必须重读设置：下面那行「配音引擎：云端/本地 · 模型 X」和 checkVoiceReady 走的都是这一份
-      await get().loadConfig()
-      toast.success(`已把「${target.name}」设为当前使用的配音配置，下一次配音就按这套干活`)
-    } catch {
-      // 这一条正常走不到（IPC 都收在 guard 里）；真走到就是通道本身炸了，也要说得出「没改成」
-      toast.error('这次切换没能确认。重开这一页，再看用的是哪一套', 12000)
-    } finally {
-      set({ switchingProfile: false })
-    }
+    if (phase === 'running' || previewing) return
+    // 切换在途那一层由 store 的那个动作自己挡（三档共用同一个标记）
+    if (!(await useProfileStore.getState().setProfile('tts', profileId))) return
+    // 单次参数是照着**原来那套**挑的：模型、音色、本地引擎都跟着方案走，留着就会出现
+    // 「下拉里挂着 A 套挑的音色、实际按 B 套跑」。倍速不在方案字段里，是这一页自己的参数，留着。
+    set({ model: '', voice: '', engine: '', speakers: 0 })
+    // 换完必须重读设置：下面那行「配音引擎：云端/本地 · 模型 X」和 checkVoiceReady 走的都是这一份
+    await get().loadConfig()
   },
 
   buildQueue: () => {

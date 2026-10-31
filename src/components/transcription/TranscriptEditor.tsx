@@ -17,6 +17,7 @@ import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
 import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
+import { useProfiles } from '@/hooks/useProfiles'
 import { SegmentRow } from './SegmentRow'
 import { ProofreadModeDialog, type ProofreadMode } from './ProofreadModeDialog'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
@@ -104,6 +105,10 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
     referenceText, referenceFileName, segmentDiffs,
     setReference, clearReference, setAllSegmentDiffs, setStatus, setError,
   } = useReferenceStore()
+  // 校对这一档的方案列表在这里读，不交给那一格下拉自己：它在「只有一套」时压根不挂载，
+  // 还得等用户点「校对」把方式弹窗打开才出现在树上。让挂载决定读不读就成了先有鸡还是先有蛋——
+  // 不读就永远长不出第二套来选。
+  useProfiles('ai')
 
   // 本地校对吃的是「常见误听表 + 中文词库」，非中文素材跑它等于空转。
   // 不是禁用了事：大模型那条路照走，只是把这条的限制说清楚。

@@ -1992,6 +1992,14 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-secondary);
 }
 
+/* 弹窗里那一格「校对方案」：上面两张卡问的是「这一次怎么校」，这一格改的是「以后用哪套」，
+   中间划一条线，别让两者看着像同一层的东西 */
+.proofread-dialog__profile {
+  margin-top: 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+}
+
 /* ============================================
  * 字幕配音工作台（页面）
  *
