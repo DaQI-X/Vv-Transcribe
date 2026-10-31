@@ -48,6 +48,22 @@ describe('按键名隐去：凭据与用户原文', () => {
     expect(keep.asrKeyStatus).toBe('plain')
   })
 
+  /**
+   * 布尔状态位撞了键名规则：`hasApiKey` 归一化后是 `hasapikey`，含 `apikey` → 整值被换成
+   * `[已隐去:boolean]`。隐掉它一个字节的安全也没多（值本来就不是 Key），代价是把
+   * 「这套配置到底有没有 Key」这条诊断信息读没了——转写/校对那几条日志记的就是它。
+   * 所以钉成两句：撞名字的样子确实会被吃掉，换个名字（`keyStatus`，界面那侧叫 `keyStates`）就留得住。
+   */
+  it('状态位撞名会被吃掉、避开 apikey 就留得住', () => {
+    const out = redactValue({
+      profileId: 'ai-probe-2',
+      hasApiKey: true,
+      keyStatus: true,
+    }) as Record<string, unknown>
+    expect(out.hasApiKey).toBe('[已隐去:boolean]')
+    expect(out.keyStatus).toBe(true)
+  })
+
   it('装原文的字段隐掉，派生出来的长度留着——不然查不出「接口返回了 0 字节」', () => {
     const out = redactValue({
       text: '嘉宾甲：今天我们来聊聊这个选题',

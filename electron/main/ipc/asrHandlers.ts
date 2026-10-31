@@ -89,10 +89,12 @@ export function registerASRHandlers() {
         // 日志与历史记录（#247）要记的是**实际用到**的那条，不是传进来的那个
         const profileId = await resolveProfileId('asr', options?.profileId)
         const config = await getASRConfig(profileId)
-        // 只报模式与「有没有 Key」这两个布尔：apiKey 本身和它的长度都不能进日志
+        // 只报模式与「有没有 Key」这两个：apiKey 本身和它的长度都不能进日志。
+        // 键名要避开 `apikey` 这个词——`hasApiKey` 会被脱敏闸门按键名隐成 [已隐去:boolean]，
+        // 而这一条的全部用途就是回答「到底有没有 Key」（理由写在 logRedact.ts）
         logger.info(TAG, 'Transcription config', {
           provider: config.provider,
-          hasApiKey: !!config.apiKey,
+          keyStatus: !!config.apiKey,
           profileId,
         })
 

@@ -9,7 +9,8 @@
  * 配置文件读不出来时那一下是真会 reject 到渲染层的。
  */
 import { OpenAICompatibleProvider } from '../services/ai/openaiCompatible'
-import { getAIConfig } from '../services/settingsService'
+import { getAIConfig, resolveProfileId } from '../services/settingsService'
+import { logger } from '../services/logger'
 import type { DifferenceItem } from '../services/ai/types'
 import { ipcHandle } from './guard'
 
@@ -22,8 +23,13 @@ export function registerAIHandlers() {
       options?: { language?: string; promptTemplate?: string; profileId?: string }
     ) => {
       // profileId＝「这次校对用哪套校对配置」；空或指不到人时走该档当前默认方案，
-      // 也就是界面上还没长出方案选择器时的行为
-      const config = await getAIConfig(options?.profileId)
+      // 也就是界面上还没长出方案选择器时的行为。
+      // 日志记的是 resolveProfileId 问出来的**实际**那条，不是传进来的那个——落回默认时后者会说谎
+      const profileId = await resolveProfileId('ai', options?.profileId)
+      const config = await getAIConfig(profileId)
+      // 只报「有没有 Key」这一个布尔：Key 本身和它的长度都不能进日志。
+      // 键名要避开 `apikey` 这个词（`hasApiKey` 会被脱敏闸门按键名吃掉，理由见 logRedact.ts）
+      logger.info('AI', 'Correction config', { profileId, keyStatus: !!config.apiKey })
 
       if (!config.apiKey) {
         return {
@@ -48,7 +54,13 @@ export function registerAIHandlers() {
   ipcHandle(
     'ai:explainDifferences',
     async (_event, differences: DifferenceItem[], profileId?: string) => {
-      const config = await getAIConfig(profileId)
+      const usedProfileId = await resolveProfileId('ai', profileId)
+      const config = await getAIConfig(usedProfileId)
+      logger.info('AI', 'Explain differences config', {
+        profileId: usedProfileId,
+        keyStatus: !!config.apiKey,
+        count: differences.length,
+      })
 
       if (!config.apiKey) {
         return differences.map(() => ({
@@ -76,7 +88,13 @@ export function registerAIHandlers() {
   ipcHandle(
     'ai:analyzeReference',
     async (_event, referenceText: string, profileId?: string) => {
-      const config = await getAIConfig(profileId)
+      const usedProfileId = await resolveProfileId('ai', profileId)
+      const config = await getAIConfig(usedProfileId)
+      // 参考稿的正文与长度都不进日志，这里只记「按哪套跑的、有没有 Key」
+      logger.info('AI', 'Analyze reference config', {
+        profileId: usedProfileId,
+        keyStatus: !!config.apiKey,
+      })
 
       if (!config.apiKey) {
         return {

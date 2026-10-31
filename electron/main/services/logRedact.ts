@@ -46,6 +46,11 @@ function normKey(key: string): string {
  * 单靠包含抓不到 `...Subscription-Key` 这种把 key 放在词尾的写法，所以补 `key$`；
  * 它同时会误伤 `cacheKey` / `sortKey` 这类调试字段——代价只是日志里少一个无所谓的名字，
  * 而漏掉一把 Key 的代价是把它发给任何人。
+ *
+ * 误伤还有一种要单独说：布尔状态位 `hasApiKey` 归一化后是 `hasapikey`，含 `apikey` → 整值被换成
+ * `[已隐去:boolean]`。字段名撞规则、值本来就不是凭据，隐掉什么也没保住，只把「这套配置到底有没有
+ * Key」这条诊断信息读没了（转写/校对链路上记的就是它）。所以状态位取 `keyStatus` 这类避开
+ * `apikey` 与词尾 `key` 的名字；界面那一侧早就用 `keyStates` 说同一件事了。
  */
 const CREDENTIAL_KEY =
   /apikey|apisecret|secret|token|password|passwd|authorization|credential|accesskey|signingkey|sessionkey|privatekey|cookie|setcookie|key$/

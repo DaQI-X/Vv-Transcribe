@@ -62,9 +62,10 @@ export async function runTranscription(
     }
   } else {
     // provider 是设置里的「转写模式」，用户以为自己选了云端时这一条就能看出是没选还是没配 Key
+    // （键名不能叫 hasApiKey：那个名字会被日志脱敏按键名吃掉，见 logRedact.ts）
     logger.info(TAG, 'Cloud not selected or unavailable, using local transcription', {
       provider: config.provider,
-      hasApiKey: !!config.apiKey,
+      keyStatus: !!config.apiKey,
     })
   }
 

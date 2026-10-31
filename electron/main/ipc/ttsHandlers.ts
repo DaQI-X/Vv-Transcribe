@@ -12,7 +12,7 @@
 import { dialog, BrowserWindow } from 'electron'
 import { basename } from 'node:path'
 import { copyFile, stat } from 'node:fs/promises'
-import { getTTSConfig, type TtsEngineMode } from '../services/settingsService'
+import { getTTSConfig, resolveProfileId, type TtsEngineMode } from '../services/settingsService'
 import type { TTSConfig, TTSProgress, TTSSegmentInput, VoiceTrack } from '../services/ttsService'
 import {
   cancelTTSSynthesis,
@@ -173,16 +173,18 @@ export function toSegments(input: unknown): TTSSegmentInput[] {
 
 export function registerTTSHandlers() {
   // 端点、模型、音色三样里任何一样不对，失败原因都落进 error 那一句给界面弹出来。
-  // 日志由 guard 落，只带通道名和 message——Key 与接口地址不进日志，因为入参从来就不记。
+  // 失败那一句由 guard 落，只带通道名和 message；这里另记一条「这次按哪套方案跑的」——
+  // 记的只有方案 id 和云端/本地这一档，Key、接口地址、文稿正文从来不入日志（入参不整份记）。
   ipcHandle(
     'tts:preview',
-    async (_event, text: string, opts?: unknown): Promise<TTSPreviewResult> => ({
-      clip: await previewSpeech(
-        String(text ?? ''),
-        withOverrides(await getTTSConfig(profileIdOf(opts)), opts)
-      ),
-      error: null,
-    }),
+    async (_event, text: string, opts?: unknown): Promise<TTSPreviewResult> => {
+      // 记的是 resolveProfileId 问出来的**实际**那条：界面传来的 id 可能已经被另一扇窗删掉，
+      // 那时这次取值落回配音档默认方案，按传进来的记会说谎
+      const profileId = await resolveProfileId('tts', profileIdOf(opts))
+      const config = withOverrides(await getTTSConfig(profileId), opts)
+      logger.info('TTS', 'Preview config', { profileId, engine: config.engine })
+      return { clip: await previewSpeech(String(text ?? ''), config), error: null }
+    },
     (message) => ({ clip: null, error: message })
   )
 
@@ -215,11 +217,15 @@ export function registerTTSHandlers() {
       // 逐段合成的失败由 guard 收成一份空账目 + error；下面拼轨那一步不能交给它，
       // 因为拼接是本地 ffmpeg，它失败不代表前面几十段没成，把 clipCount/failures/skipped
       // 抹成 0 会让界面报「一段都没成」，用户白等了一轮。
-      const batch = await synthesizeSegments(
-        queue,
-        withOverrides(await getTTSConfig(profileIdOf(opts)), opts),
-        sendProgress
-      )
+      const profileId = await resolveProfileId('tts', profileIdOf(opts))
+      const config = withOverrides(await getTTSConfig(profileId), opts)
+      // 开跑前记一句「按哪套跑的」：这批是分钟级的活，崩在中途时日志里得能看出当时用的是哪条方案
+      logger.info('TTS', 'Batch config', {
+        profileId,
+        engine: config.engine,
+        total: queue.length,
+      })
+      const batch = await synthesizeSegments(queue, config, sendProgress)
       const jobId = batch.job.id
       const result = batch.result
 
