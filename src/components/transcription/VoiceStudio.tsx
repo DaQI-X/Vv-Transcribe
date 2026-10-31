@@ -12,6 +12,9 @@
  *   把云端也做成下拉就得编一份模型/音色清单，那份清单错了比没有更糟。
  * - 「云端还是本地」这一档不在页面上给选择：它决定花不花钱、要不要拉起本机进程，
  *   是用户保存过的长期配置，只在「设置 → 配音配置」里改。
+ * - 「配音方案」那个下拉（#222 第④步）也不开「这一次用哪套」的口子：一条方案里就带着上面那一档，
+ *   做成单次覆盖等于把那扇关着的门从侧面推开。它做的是设置页那颗「设为当前使用」同一件事——
+ *   语义、文案、禁用条件都跟那边一个口径，界面上不留第二种「切方案」。
  *
  * 合成中那张卡复用转写的 processing 视觉（徽章 + 波形 + 进度 + 取消），因为它是同一件事：
  * 一个分钟级的活儿在后台跑。段号是主进程推回来的真实段号，不是编出来的百分比。
@@ -292,6 +295,10 @@ export function VoiceStudio() {
   const configEngine = useVoiceStudioStore((s) => s.configEngine)
   const speakers = useVoiceStudioStore((s) => s.speakers)
   const engineModelPresent = useVoiceStudioStore((s) => s.engineModelPresent)
+  const profiles = useVoiceStudioStore((s) => s.profiles)
+  const profileId = useVoiceStudioStore((s) => s.profileId)
+  const switchingProfile = useVoiceStudioStore((s) => s.switchingProfile)
+  const setProfile = useVoiceStudioStore((s) => s.setProfile)
   const phase = useVoiceStudioStore((s) => s.phase)
   const preview = useVoiceStudioStore((s) => s.preview)
   const previewing = useVoiceStudioStore((s) => s.previewing)
@@ -309,6 +316,13 @@ export function VoiceStudio() {
   const running = phase === 'running'
 
   const local = mode === 'local'
+  /**
+   * 方案列表：只在这条档确实有第二套可换时才长成一行控件。null＝这次没读出来，
+   * 整块收起而不是显示「只有默认那套」——那句话会把用户已有的方案说成不存在。
+   */
+  const profileOptions = profiles ?? []
+  const showProfileSelect = profileOptions.length > 1
+  const currentProfile = profileOptions.find((profile) => profile.id === profileId)
   /** 下拉的当前值：界面上没改过就用设置里那一档/那个编号 */
   const selectedEngine = engine || configEngine
   const voiceValue = voice || (local ? (/^\d+$/.test(configVoice) ? configVoice : '0') : '')
@@ -368,6 +382,33 @@ export function VoiceStudio() {
               {emptyCount > 0 && <div className="voice-studio__hint">另外 {emptyCount} 段是空的，会被跳过、不占用一次合成。</div>}
               <div className="voice-studio__hint">文字要改请回转写页编辑，这里按当前段落原样念。</div>
             </div>
+          )}
+
+          {showProfileSelect && (
+            <>
+              <div className="voice-studio__fields">
+                <label className="voice-studio__field" style={{ flex: '0 1 220px', minWidth: 150 }}>
+                  <span className="voice-studio__label">配音方案</span>
+                  <select
+                    className="settings-form-select"
+                    value={profileId}
+                    onChange={(e) => void setProfile(e.target.value)}
+                    disabled={running || previewing || switchingProfile}
+                  >
+                    {profileOptions.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <p className="voice-studio__hint">
+                {/* 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 下一次」 */}
+                {'这一格切的是「当前使用的配音配置」：那套的接口地址、Key、模型和引擎（云端还是本地）都跟着换。' +
+                  '下一次配音起效，正在跑的这一批还是原来那套。'}
+              </p>
+            </>
           )}
 
           <div className="voice-studio__fields">
@@ -454,6 +495,12 @@ export function VoiceStudio() {
           {local && engineCaveat && <p className="voice-studio__hint">{engineCaveat}</p>}
 
           <div className="voice-studio__config">
+            {!showProfileSelect && currentProfile && (
+              <>
+                配音方案 <code>{currentProfile.name}</code>
+                {' · '}
+              </>
+            )}
             {local ? '配音引擎：本地（在你这台电脑上跑，不调接口）' : '配音引擎：云端接口'}
             {' · '}
             {local ? (
