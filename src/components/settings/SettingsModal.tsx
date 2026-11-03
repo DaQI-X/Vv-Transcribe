@@ -548,6 +548,20 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   }
 
   /**
+   * 删到一条不剩时把编辑指针收回到「没有方案」。
+   * 留着那个 id，保存就带着一条磁盘上已经不存在的人去写盘（主进程按 id 找不到人直接报错），
+   * 「新建一套」也会照着这条鬼 id 复制，同样报错——用户会以为按钮坏了。
+   * 表单里那几格**不清**：接口地址和模型是他刚才看到的那一套，删完多半想照着建回来；
+   * 但「密钥已保存」那个标记必须改口，它说的是这条已经不存在的方案。
+   */
+  const dropEditingProfile = (cap: ProfileCapability) => {
+    setEditing((prev) => ({ ...prev, [cap]: '' }))
+    setKeyStates((prev) => ({ ...prev, [cap]: 'none' }))
+    setPendingKeyClear((prev) => (prev[cap] ? { ...prev, [cap]: false } : prev))
+    invalidateTest(cap)
+  }
+
+  /**
    * 列表读回来之后要刷的两样：列表本身，和表单上那三个「密钥已保存 / 未填写」标记。
    * 标记说的是**正在编辑的那条**，而 settings:get 回的那三把说的是各档**默认**那条——
    * 编辑非默认方案时照它刷，等于把刚存进去的 Key 说成没填。id 找不到人时不动原值，
@@ -612,18 +626,35 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
 
   const handleCreateProfile = async (cap: ProfileCapability): Promise<void> => {
     if (!api) return
-    const before = new Set((profiles?.profiles[cap] ?? []).map((profile) => profile.id))
+    const list = profiles?.profiles[cap] ?? []
+    const before = new Set(list.map((profile) => profile.id))
     // 从「此刻在编辑的那条」复制：同一家网关换个模型是最常见的第二次配置。
     // 不传 id 时主进程复制的是该档**默认**那条，用户编辑非默认方案时点新建，拿到的却是别套的内容。
+    // 只带列表里真的存在的那条：删到一条不剩之后，编辑指针可能还留着刚删掉的鬼 id，
+    // 而主进程对「按 id 找不到人」是报错而不是落回默认。
+    const source = list.find((profile) => profile.id === editing[cap])
     const view = await runProfileAction(() =>
-      api.createProfile(cap, undefined, editing[cap] || undefined)
+      api.createProfile(cap, { fromProfileId: source?.id || undefined })
     )
     if (!view) return
     const created = view.profiles[cap].find((profile) => !before.has(profile.id))
     if (!created) return
     switchProfile(cap, created)
+    // 原来一条都没有时，主进程手里没有可复制的对象，建出来的是这一档的初值；
+    // 这时说「照原来那套填好了」就是在编。第一条落盘即当前使用，这句倒是真的。
+    if (list.length === 0) {
+      toast.success(
+        `已新建「${created.name}」并设为当前使用的这套${CAPABILITY_NOUN[cap]}配置：这一档之前一条方案都没有，下面这几格是它的初值，填完点「保存设置」才算存下`,
+        10000
+      )
+      return
+    }
+    const copiedName = source?.name ?? list.find((profile) => profile.id === view.defaultProfileId[cap])?.name
     toast.success(
-      `已新建「${created.name}」并切过来编辑：接口地址、模型和已保存的 API Key 都照原来那套填好了，改完点「保存设置」才算存下`
+      `已新建「${created.name}」并切过来编辑：接口地址、模型${
+        created.keyStatus === 'none' ? '' : '和已保存的 API Key'
+      }都照${copiedName ? `「${copiedName}」` : '原来那套'}填好了，改完点「保存设置」才算存下`,
+      10000
     )
   }
 
@@ -654,11 +685,13 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         view.profiles[cap][0])
       : undefined
     if (nextProfile) switchProfile(cap, nextProfile)
-    toast.success(
-      `已删掉「${deletedName}」（含它保存的 API Key），${
-        nextProfile ? `表单切到「${nextProfile.name}」` : '正在编辑的那套没动'
-      }`
-    )
+    else if (wasEditing) dropEditingProfile(cap)
+    let tail: string
+    if (!wasEditing) tail = '正在编辑的那套没动'
+    else if (nextProfile) tail = `表单切到「${nextProfile.name}」`
+    else
+      tail = `这一档现在一条方案都没有了，下面那几格还没有归宿：要用它先点「新建一套」，填完再点「保存设置」`
+    toast.success(`已删掉「${deletedName}」（含它保存的 API Key），${tail}`, 10000)
     return true
   }
 

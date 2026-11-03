@@ -123,10 +123,17 @@ export function ProfileBar({
         <select
           className="settings-form-select"
           style={{ flex: '0 1 220px', minWidth: 180, width: 'auto' }}
-          value={editingId}
-          disabled={busy}
+          value={editing ? editingId : ''}
+          disabled={busy || list.length === 0}
           onChange={(e) => requestSwitch(e.target.value)}
         >
+          {!editing && (
+            // 没在编辑任何一条时（一条都没有，或磁盘上「当前使用」那个 id 指不到人），
+            // 下拉不能是个空白的框：那看着像界面坏了，而它要说的是「还没有选到哪一套」
+            <option value="" disabled hidden>
+              （没有正在编辑的方案）
+            </option>
+          )}
           {list.map((profile) => (
             <option key={profile.id} value={profile.id}>
               {profile.name}
@@ -172,7 +179,7 @@ export function ProfileBar({
           type="button"
           className="settings-modal__dict-update-btn"
           style={ROW_STYLE}
-          disabled={busy || !editing || list.length <= 1}
+          disabled={busy || !editing}
           onClick={() => {
             setConfirmingDelete(true)
             setRenaming(false)
@@ -184,27 +191,37 @@ export function ProfileBar({
         </button>
       </div>
 
-      {editingIsCurrent ? (
+      {editing ? (
+        editingIsCurrent ? (
+          <span className="settings-form-hint">
+            这套正在被应用使用。新建或编辑别的{noun}方案都不影响它，点「设为当前使用」才切过去。
+            这里的四个按钮当场就写进磁盘，只有下面那些字段是点「保存设置」才生效。
+          </span>
+        ) : (
+          <span className="settings-form-hint">
+            正在编辑的是没在用的{noun}方案，改完点「保存设置」只会写进这一套，
+            正在用的那套一个字都不动；要让应用开始用它，点「设为当前使用」。
+            这里的四个按钮当场就写进磁盘。
+          </span>
+        )
+      ) : list.length === 0 ? (
         <span className="settings-form-hint">
-          这套正在被应用使用。新建或编辑别的{noun}方案都不影响它，点「设为当前使用」才切过去。
-          这里的四个按钮当场就写进磁盘，只有下面那些字段是点「保存设置」才生效。
+          {noun}现在一条配置方案都没有，所以下面那些字段还没有归宿：点「新建一套」先落一条，
+          填完再点「保存设置」才存进去。第一条落盘后自动就是当前使用的那套
         </span>
       ) : (
+        // 列表有方案、表单却没在编辑任何一条：磁盘上「当前使用」那个 id 指不到人，
+        // 主进程把它收口成空串（转写这一档不擅自抓第一条）。这时既不能说「一条都没有」，
+        // 也不能说正在编辑某一套——只能让用户自己从下拉里点一条。
         <span className="settings-form-hint">
-          正在编辑的是没在用的{noun}方案，改完点「保存设置」只会写进这一套，
-          正在用的那套一个字都不动；要让应用开始用它，点「设为当前使用」。
-          这里的四个按钮当场就写进磁盘。
+          {noun}这几格现在不属于任何一套方案（列表里那几条都没被选中来编辑）：从上面选一条，
+          填完点「保存设置」就写进那一条。
         </span>
       )}
 
       {atLimit && (
         <span className="settings-form-hint">
           每类配置最多 {profiles.maxProfiles} 套，{noun}已经满了——要再建一套，先删掉一套
-        </span>
-      )}
-      {list.length <= 1 && (
-        <span className="settings-form-hint">
-          至少得留一套{noun}配置，所以现在不能删。新建一套之后再删旧的就行
         </span>
       )}
 
@@ -253,7 +270,10 @@ export function ProfileBar({
         <div style={{ ...ROW_STYLE, marginTop: 6 }}>
           <span className="settings-form-hint">
             删掉「{editing.name}」？磁盘上这一套（含它的 API Key）会一起没掉，撤不回来
-            {hasUnsavedEdits ? '；表单里那几处还没保存的修改也一起丢' : ''}。
+            {hasUnsavedEdits ? '；表单里那几处还没保存的修改也一起丢' : ''}
+            {list.length === 1
+              ? `；这是最后一条，删掉之后${noun}就没有正在使用的方案，云端${noun}要用它得重新建一条`
+              : ''}。
           </span>
           <button
             type="button"

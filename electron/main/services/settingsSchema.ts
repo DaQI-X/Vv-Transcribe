@@ -20,7 +20,22 @@
 
 /**
  * 本应用读写认到这一版。
- * v1 = 扁平的 17 个键（1.0.5～1.0.8）；v2 = 按能力分列表的多方案（1.0.9）。
+ * v1 = 扁平的 17 个键（1.0.5～1.0.8）；v2 = 云端方案按能力各一个列表（1.0.9）。
+ *
+ * v2 在 1.0.9 开发中途改过一次口径，这里记下的是改完的那版：方案**只装凭据**
+ * （接口地址 / Key / 模型），「用本地还是云端」「本地档位」「转写语言」这类不进方案，
+ * 留在文档根上那批扁平键里（读进内存后叫 store.globals）。原先那版把 17 个键全搬进了
+ * 方案，于是每条方案各自带着一份转写语言和本地档位——用户要的是「多家网关换着使」，
+ * 不是「每家一套语言」。
+ * 这轮先按用户的话只做转写（「先以转写配置来做修改，我在确认没问题后在推进校对和配音」），
+ * 所以下面那张表里 asr 已经收成三项、ai / tts 还带着各自的非凭据字段，全局段此刻只有
+ * asrProvider / asrLocalModel / asrLanguage 三个键；那两档改完时表一窄，全局段自己会长。
+ * 这一版没发到任何用户手上，所以改的是 v2 自己的定义，不另起 v3：发出去的人只有 v1→v2
+ * 这一条路要走，而它现在搬的是对的形状。
+ *
+ * 「哪些键算全局」这件事不在这张表里再列一遍：CAPABILITY_FIELDS 没认领的扁平键就是全局段，
+ * 那个集合由 settingsService 从 DEFAULT_SETTINGS 推出来。所以这一版改字段归属只改那张表，
+ * 迁移与读写跟着就对了——v1→v2 也只删它真正搬走的那几个键，剩下的原样躺在根上。
  */
 export const CURRENT_SETTINGS_VERSION = 2
 
@@ -48,39 +63,58 @@ export const PROFILE_CAPABILITIES: readonly ProfileCapability[] = ['asr', 'ai', 
 export interface Profile {
   /** 稳定标识：defaultProfileId 与历史记录都按它指人，改名不该让引用断掉 */
   id: string
-  /** 界面上给用户看的方案名 */
+  /**
+   * 界面上给用户看的方案名。新口径里列表那一行说的是「模型名 · 接口域名」，不再让用户
+   * 起名，所以这里退成**兜底标签**：模型名空着的时候（新建还没填完、手改的文件里没写）
+   * 界面总得有个能指人的词。改名那条通道还在（`settings:renameProfile`），只是按新口径
+   * 它不再出现在转写这一档的界面上。
+   */
   name: string
   /** 密文原样（`v1:<base64>`）——迁移与就地加密之外，任何一步都不许重新加密 */
   apiKey: string
   [field: string]: string
 }
 
+/** 这一档一条方案都没有也是合法状态：云端模式下还没建过任何方案（#222 新口径） */
 export type SettingsProfiles = Record<ProfileCapability, Profile[]>
 
-/** 每档当前选用的方案；历史记录要按档记下这三个 id（#247） */
+/**
+ * 每档当前选用的方案；历史记录要按档记下这三个 id（#247）。
+ * 空串＝这一档现在没有「当前使用」的方案，不是「第 0 条」——列表空着，或者用户删掉了
+ * 正当前使用那条且不打算让应用猜下一个该用谁，都是这个值。
+ */
 export type DefaultProfileId = Record<ProfileCapability, string>
 
+/**
+ * 全局段：不属于任何一档方案的扁平配置（此刻是 asrProvider / asrLocalModel / asrLanguage）。
+ * 键就是 v1 那批扁平键的名字，落盘时也平铺在文档根上，不再嵌一层——嵌进去就得让迁移知道
+ * 哪些键归全局，而那份知识已经在 CAPABILITY_FIELDS 里了，抄第二遍迟早分叉。
+ */
+export type SettingsGlobals = Record<string, string>
+
 export interface SettingsStore {
+  globals: SettingsGlobals
   profiles: SettingsProfiles
   defaultProfileId: DefaultProfileId
 }
 
 /**
- * v1 那 17 个扁平键与 v2 方案字段的对应表：`[扁平键, 方案字段]`。
- * 6 + 4 + 7 = 17，一项不落——这张表就是「旧配置搬新家」的全部依据，也是
- * 「新磁盘形状投回扁平视图」的依据，两处共用一份才不会各认各的。
+ * v1 那些扁平键与 v2 方案字段的对应表：`[扁平键, 方案字段]`。表里只列**进方案**的那些键，
+ * 没被这张表认领的扁平键就留在文档根上（`SettingsGlobals`）——所以「这一档有哪几项配置」
+ * 和「哪些配置全局共用」两件事仍然只有这一处定义，读盘、落盘、投给界面的扁平视图都按它走。
+ *
+ * asr 只有三项是有意的：接口地址 / Key / 模型才是「换一家网关」要换的东西，
+ * 「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，不是这家网关的参数。
+ * ai / tts 还带着各自的非凭据字段，是这一轮还没改到它们（口径同上，改完照样只剩三项）。
  */
 export const CAPABILITY_FIELDS: Record<
   ProfileCapability,
   ReadonlyArray<readonly [string, string]>
 > = {
   asr: [
-    ['asrProvider', 'provider'],
     ['asrApiKey', 'apiKey'],
     ['asrApiBase', 'apiBase'],
     ['asrModel', 'model'],
-    ['asrLocalModel', 'localModel'],
-    ['asrLanguage', 'language'],
   ],
   ai: [
     ['aiProvider', 'provider'],
@@ -121,7 +155,7 @@ export const MAX_PROFILES_PER_CAPABILITY = 3
 /** 版本字段的名字只在这里出现一次，写盘与读盘都取它，避免拼写分叉 */
 export const CURRENT_SETTINGS_VERSION_FIELD = 'schemaVersion'
 
-/** v2 那两个新段落的名字，同上：写盘、读盘、迁移三处共用 */
+/** v2 那两个新段落的名字，同上：写盘、读盘、迁移三处共用（全局段没有自己的段落——它就平铺在根上） */
 export const PROFILES_FIELD = 'profiles'
 export const DEFAULT_PROFILE_ID_FIELD = 'defaultProfileId'
 
@@ -158,15 +192,22 @@ function adoptLegacyTtsFields(doc: SettingsDocument): SettingsDocument {
 }
 
 /**
- * v1 → v2：把 17 个扁平键按能力拆成三份各只有一条「默认」方案的列表。
+ * v1 → v2：把 CAPABILITY_FIELDS 认领的那些扁平键按能力搬进各自那条「默认」方案。
  *
- * 三条规矩，都是「用户填过的东西不能再这一次搬运里丢掉」：
+ * 四条规矩，都是「用户填过的东西不能再这一次搬运里丢掉」：
  * - 密钥原样搬。`v1:<base64>` 是上一版按这台机器的密钥库封的，重新加密会变成
  *   「前缀对但解不开」，界面上就显示成「Key 没配」——那是不可恢复的谎报。
  * - 扁平键搬完一律删掉。留着会出现「界面读默认方案、旧键还趴在磁盘上」，
  *   下一次保存只写方案列表，那些旧键就成了永远没人读的残留（同 v0→v1 的理由）。
  * - 只搬字符串。类型不对的值不搬，也不删掉方案里对应的位置——取值收口在
  *   settingsService 按默认值补，这一步只管形状。
+ * - 表里没认领的键**一个都不碰**（转写模式、本地档位、转写语言这些照原样躺在根上，
+ *   读的时候进 store.globals）。所以这里不需要知道「哪些是全局键」那份清单，
+ *   以后把某一档的字段挪回全局也只改那张表，这条迁移不用跟着动。
+ *
+ * 老文件里那三项凭据不管填没填都会搬成一条方案：这一档从此有了「当前使用」那条，
+ * 界面按它的模型名/域名列表。空着的那条不删——删空方案等于在这一步替用户决定
+ * 「你没填的那些不算配置」，而它多半只是还没填完。
  */
 function splitFlatIntoProfiles(doc: SettingsDocument): SettingsDocument {
   const next = { ...doc }

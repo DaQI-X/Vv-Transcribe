@@ -4,14 +4,17 @@
  * 支持内存缓存，避免重复读取磁盘。
  *
  * 磁盘形状和对外形状是两件事，这一层刻意把它们分开：
- * - 磁盘上（配置格式 v2，1.0.9 起）按能力存三份方案列表（profiles.asr / ai / tts）
- *   加一个 defaultProfileId，形状与迁移都在 settingsSchema。
- * - 对外的 AppSettings 仍是那 17 个扁平键，含义是「这一档当前默认方案的投影」。
+ * - 磁盘上（配置格式 v2，1.0.9 起）按能力存三份**云端方案**列表（profiles.asr / ai / tts）
+ *   加一个 defaultProfileId，其余没进方案的键平铺在文档根上（内存里叫 store.globals），
+ *   形状与迁移都在 settingsSchema。
+ * - 对外的 AppSettings 仍是那 17 个扁平键，含义是「全局段 + 这一档当前那条方案的投影」。
  *   这么分的理由是增量落地：转写、校对、配音的取值点，设置表单，preload 与 IPC 全都按
  *   扁平字段读，先把内部形状换成方案列表、契约不动，界面那一半才不用跟着返工（#222 第①步）。
  *   第②步把 profileId 接到了 getter 与增删改上（#222 第②步）：外面那套字段名仍然没改，
- *   只是每处取值多了「按哪个 id 取」这一问——缺省都是该档当前默认方案，与第①步的行为一致，
- *   所以界面还没长出方案选择器时，这条路走的就是老路。
+ *   只是每处取值多了「按哪个 id 取」这一问——缺省都是该档当前默认方案，与第①步的行为一致。
+ * - 一条方案都可以没有（#222 新口径）：这一档的列表是空的、defaultProfileId 是空串，
+ *   投影出来的凭据就是默认值（＝没填）。转写选「云端优先」而一条方案都没建过时，
+ *   界面说的是「先新建一套」，不是「你的 Key 丢了」。
  *
  * API Key 单独说：磁盘上方案里的 apiKey 走系统的 safeStorage（macOS Keychain /
  * Windows DPAPI）加密后写入，值形如 `v1:<base64>`。没有前缀的按历史明文处理——首次读到且本机
@@ -50,6 +53,7 @@ import {
   type Profile,
   type ProfileCapability,
   type SettingsDocument,
+  type SettingsGlobals,
   type SettingsProfiles,
   type SettingsStore,
 } from './settingsSchema'
@@ -131,10 +135,11 @@ export type SettingsView = Omit<AppSettings, SecretField> & {
 }
 
 /**
- * 界面上的一条方案（脱敏）。`values` 的键名是**界面上那 17 个扁平名**（asrProvider /
- * ttsLocalEngine / …），不是磁盘上的字段名（provider / localEngine）：表单状态、
- * getSettings 的脱敏视图、保存补丁说的都是扁平名这一套，这里换成磁盘名就等于让渲染层再抄一份
- * 字段对照表——那张表一旦和 CAPABILITY_FIELDS 分叉，「界面显示 A、存进去的是 B」就又回来了。
+ * 界面上的一条方案（脱敏）。`values` 的键名是**界面上那套扁平名**（asrApiBase / ttsLocalEngine / …），
+ * 不是磁盘上的字段名（apiBase / localEngine）：表单状态、getSettings 的脱敏视图、保存补丁说的
+ * 都是扁平名这一套，这里换成磁盘名就等于让渲染层再抄一份字段对照表——那张表一旦和
+ * CAPABILITY_FIELDS 分叉，「界面显示 A、存进去的是 B」就又回来了。
+ * 每档给哪几项也取自那张表：转写此刻只有凭据三项，模式/档位/语言是全局段，不在任何一条方案里。
  * apiKey 一律不在这里——跨 IPC 只带状态位，与 SettingsView 同一个规矩。
  */
 export interface ProfileView {
@@ -144,7 +149,11 @@ export interface ProfileView {
   keyStatus: SecretStatus
 }
 
-/** 三档的方案列表 + 每档当前选哪条 + 上限，一次给全：界面不用为「第几条是不是默认」再问一次 */
+/**
+ * 三档的方案列表 + 每档当前选哪条 + 上限，一次给全：界面不用为「第几条是不是默认」再问一次。
+ * 某一档的数组可以是空的（还没建过云端方案），此时该档的 defaultProfileId 是空串——
+ * 界面要的是「0 配置」这句话，不是把空列表演成「有一条但读不出来」。
+ */
 export interface ProfilesView {
   profiles: Record<ProfileCapability, ProfileView[]>
   defaultProfileId: DefaultProfileId
@@ -164,9 +173,19 @@ export interface ProfilesView {
  * `profileIds` 是第②步加的：这份补丁写进哪几条方案，缺省＝各档当前默认方案（就是第①步
  * 的行为）。传了 id 却指不到人时是**报错**而不是落回默认——静默写到默认那条会吃掉用户
  * 另一套配置，而那是他没碰过的那一条。
+ *
+ * `defaultProfileIds` 是重写这版加的：界面上那颗「是否默认」开关在**编辑表单里**翻，
+ * 跟着「保存设置」一起落盘，所以保存要能顺带改指针。每档只给一个值，互斥是结构保证的
+ * （磁盘上就一个 defaultProfileId）；给空串＝明确「这一档现在没有正在使用的方案」，
+ * 给一个指不到人的 id 是报错。
+ *
+ * handlers 与 preload 都引用这个类型，别再各写一遍。
  */
 export type SettingsPatch = Partial<Omit<AppSettings, SecretField>> &
-  Partial<Record<SecretField, string | null>> & { profileIds?: Partial<DefaultProfileId> }
+  Partial<Record<SecretField, string | null>> & {
+    profileIds?: Partial<DefaultProfileId>
+    defaultProfileIds?: Partial<DefaultProfileId>
+  }
 
 const DEFAULT_SETTINGS: AppSettings = {
   asrProvider: 'local',
@@ -191,7 +210,31 @@ const DEFAULT_SETTINGS: AppSettings = {
 }
 
 /**
- * 一份缓存三样用途：raw 是磁盘上该原样写回的样子（方案列表，密文不动它），
+ * 全局段的键＝DEFAULT_SETTINGS 里那些**没被 CAPABILITY_FIELDS 认领**的扁平键。
+ * 从两张表推出来而不是在这里再列一遍：那张表是「哪一档有哪几项」唯一的事实来源，
+ * 这里抄一份就会出现「asr 已经把 provider 退回全局、全局段还当它是方案字段」这种分叉，
+ * 而分叉的方向是把用户填过的值写进一个没人读的位置——读得到、写进去、东西没了。
+ * 此刻是 asrProvider / asrLocalModel / asrLanguage 三个（校对、配音的非凭据字段还留在各自方案里）。
+ */
+const GLOBAL_FLAT_KEYS: readonly string[] = (() => {
+  const claimed = new Set<string>()
+  for (const cap of PROFILE_CAPABILITIES) {
+    for (const [flatKey] of CAPABILITY_FIELDS[cap]) claimed.add(flatKey)
+  }
+  return Object.keys(DEFAULT_SETTINGS).filter((flatKey) => !claimed.has(flatKey))
+})()
+
+/** 全局段该长什么样（首次运行、以及读盘收口时的落点）：逐项取 DEFAULT_SETTINGS */
+function defaultGlobals(): SettingsGlobals {
+  const globals: SettingsGlobals = {}
+  for (const flatKey of GLOBAL_FLAT_KEYS) {
+    globals[flatKey] = DEFAULT_SETTINGS[flatKey as keyof AppSettings]
+  }
+  return globals
+}
+
+/**
+ * 一份缓存三样用途：raw 是磁盘上该原样写回的样子（全局段 + 方案列表，密文不动它），
  * plain / status 是按「能力 + 方案 id」索引的两张查找表——解密后的 Key 和它给界面看的状态。
  *
  * 为什么不干脆再存一份「解密后的方案列表」：那要把整个 store 深拷贝一遍，而两处列表
@@ -311,8 +354,13 @@ const CAPABILITY_LABEL: Record<ProfileCapability, string> = {
 /** 到了上限那句（第③步的「新建方案」按钮与这里的判断共用一句话，别各写一份） */
 export const PROFILE_LIMIT_MESSAGE = `每一类配置最多 ${MAX_PROFILES_PER_CAPABILITY} 套，先删掉一套再新建`
 
-/** 只剩一条不许删：删空了这一档就没有「当前方案」可指，getter 与界面都得再判一次「没有方案」 */
-export const PROFILE_LAST_DELETE_MESSAGE = '至少要留一套配置，否则这一类没有可以用的方案'
+/**
+ * 这一档一条方案都没有，用户却在表单里填了云端凭据并点了「保存设置」。
+ * 不自动替他建一条：刚删光方案的人下一步点保存，如果保存又把那条建回来，删掉的到底是什么
+ * 就没人说得清了。出路界面上已经摆着——那颗「新建一套」。
+ */
+export const PROFILE_CREATE_FIRST_MESSAGE =
+  '这一类现在还没有任何配置方案，要先点「新建一套」把这几项存下来，直接点「保存设置」不会建方案'
 
 /**
  * 界面传回来的 id 指不到人。多半是另一扇窗刚删了这条方案，不能把它当成「写默认那条」。
@@ -439,6 +487,10 @@ async function writeRaw(store: SettingsStore): Promise<void> {
     settingsFile(),
     {
       [CURRENT_SETTINGS_VERSION_FIELD]: CURRENT_SETTINGS_VERSION,
+      // 全局段平铺在根上（键名来自 GLOBAL_FLAT_KEYS 那份白名单，所以这里不会冒出
+      // 一个恰好叫 profiles / schemaVersion 的键把下面两段盖掉）；顺序把它放在两段之前，
+      // 真撞名时也是磁盘上那两个 v2 段落赢。
+      ...store.globals,
       [PROFILES_FIELD]: store.profiles,
       [DEFAULT_PROFILE_ID_FIELD]: store.defaultProfileId,
     },
@@ -491,16 +543,29 @@ function defaultProfileFor(cap: ProfileCapability): Profile {
   return profile
 }
 
-/** 首次运行、以及「读盘失败退回默认配置」用的那份：每档一条默认方案，指着自己 */
+/**
+ * 首次运行、以及「读盘失败退回默认配置」用的那份。
+ *
+ * 转写档是**空列表**：用户选了「云端优先」而一条方案都没建过时，界面要给的正是
+ * 「新建一套」那颗按钮，而不是一条空凭据的方案占着列表（#222 新口径里的 0 配置）。
+ * 校对、配音仍各留一条默认方案——这一轮没改它们的界面，那两条还是「设为当前使用」那套
+ * 老交互，列表空着会让它们没有可编辑的对象。
+ * 全局段照 DEFAULT_SETTINGS 起步：转写模式默认本地，所以空列表不影响首次运行能用。
+ */
 function defaultStore(): SettingsStore {
   const profiles = {} as SettingsProfiles
   const defaultProfileId = {} as DefaultProfileId
   for (const cap of PROFILE_CAPABILITIES) {
+    if (cap === 'asr') {
+      profiles[cap] = []
+      defaultProfileId[cap] = ''
+      continue
+    }
     const profile = defaultProfileFor(cap)
     profiles[cap] = [profile]
     defaultProfileId[cap] = profile.id
   }
-  return { profiles, defaultProfileId }
+  return { globals: defaultGlobals(), profiles, defaultProfileId }
 }
 
 /** 逐条浅拷贝：方案字段全是字符串，一层就够；深拷贝会把不存在的对象形状也猜出来 */
@@ -509,25 +574,59 @@ function cloneStore(store: SettingsStore): SettingsStore {
   for (const cap of PROFILE_CAPABILITIES) {
     profiles[cap] = store.profiles[cap].map((profile) => ({ ...profile }))
   }
-  return { profiles, defaultProfileId: { ...store.defaultProfileId } }
+  return {
+    globals: { ...store.globals },
+    profiles,
+    defaultProfileId: { ...store.defaultProfileId },
+  }
 }
 
 /**
- * 这一档当前选用的那条方案（没指定 id 时的落点）。normalizeStore 已经保证每档至少一条
- * 且 id 指得到人，增删改那几步也在写盘前重新对过一遍，所以 `?? list[0]` 是兜底而不是主路径。
+ * 「这一档的当前使用该写谁」——读盘收口与每条增删改写盘前共用这一句，两处的规则不许分叉。
+ *
+ * - 列表空 → 空串。没有可指的方案，硬指一条等于凭空造配置。
+ * - id 指得到人 → 原样。
+ * - id 指不到人（缺失、被删、手写坏）：转写落空串，校对/配音落回第一条。
+ *   转写这档按 #222 新口径来：用户删掉「当前使用」那条之后，界面和 readiness 会直接说
+ *   「现在没有正在使用的转写方案」，让应用悄悄换成列表里排第一的那条等于替他选了家网关，
+ *   而下一次转写花的钱是按那条网关计价的。校对/配音这一轮还是「设为当前使用」那套交互，
+ *   没人指路时 `getAIConfig` 会回一份空凭据、正在用的校对当场失败——所以这里先替它们兜住。
+ *   第②③步把那两档改成同一口径后，这个分支就该删掉。
  */
-function pickDefault(store: SettingsStore, cap: ProfileCapability): Profile {
-  const list = store.profiles[cap]
-  return list.find((profile) => profile.id === store.defaultProfileId[cap]) ?? list[0]
+const REPOINT_DEFAULT_WHEN_MISSING: readonly ProfileCapability[] = ['ai', 'tts']
+
+function fixDefaultId(
+  cap: ProfileCapability,
+  list: Profile[],
+  wanted: string
+): string {
+  if (list.length === 0) return ''
+  if (list.some((profile) => profile.id === wanted)) return wanted
+  return REPOINT_DEFAULT_WHEN_MISSING.includes(cap) ? list[0].id : ''
 }
 
 /**
- * 按 id 取这一档的一条方案；id 空或指不到人时落回该档当前默认方案。
+ * 这一档当前选用的那条方案（没指定 id 时的落点）。列表真的可以是空——云端模式下还没建过任何
+ * 方案，那时返回 null，投出来的凭据落回默认值（＝没填）而不是随便抓一条。
+ * defaultProfileId 是空串时也走 null：上面那句 fixDefaultId 保证了「要么指得到人、要么是空串」，
+ * 所以这里不再需要「找不到就抓第一条」那种兜底——那种兜底会把「用户明确不要当前使用这条」
+ * 读成「用列表里第一个」，而那正是新口径要禁掉的猜测。
+ */
+function pickDefault(store: SettingsStore, cap: ProfileCapability): Profile | null {
+  return store.profiles[cap].find((profile) => profile.id === store.defaultProfileId[cap]) ?? null
+}
+
+/**
+ * 按 id 取这一档的一条方案；id 空或指不到人时落回该档当前默认方案（可能是 null）。
  * 落回而不是报错是给「干活那条路」用的：界面传回来的 id 可能刚被另一扇窗删掉，
  * 这时候把手上那次转写打断，比「用你当前选着的那套跑完」更糟。
  * 所以要知道实际用的是哪一条，读返回值的 id 或调 resolveProfileId，别信传进来的那个。
  */
-function pickProfile(store: SettingsStore, cap: ProfileCapability, profileId?: string | null): Profile {
+function pickProfile(
+  store: SettingsStore,
+  cap: ProfileCapability,
+  profileId?: string | null
+): Profile | null {
   const wanted = (profileId ?? '').trim()
   if (!wanted) return pickDefault(store, cap)
   return store.profiles[cap].find((profile) => profile.id === wanted) ?? pickDefault(store, cap)
@@ -544,12 +643,15 @@ function mustFindProfile(store: SettingsStore, cap: ProfileCapability, profileId
  * 这次取值实际会落到哪条方案上（与 pickProfile 同一条规则，单独问一次而已）。
  * 历史记录要按档记下这个 id（#247），日志与 readiness 也用它——用传进来的那个会记错，
  * 因为未知 id 已经落回默认了。
+ *
+ * 空串＝这次没有任何方案在用（这一档一条都没建过，或当前使用那条刚被删掉）。
+ * 调用方要把它当成一个真状态：日志里就落 `profileId: ''`，别补一个看起来像 id 的词。
  */
 export async function resolveProfileId(
   cap: ProfileCapability,
   profileId?: string | null
 ): Promise<string> {
-  return pickProfile((await readCache()).raw, cap, profileId).id
+  return pickProfile((await readCache()).raw, cap, profileId)?.id ?? ''
 }
 
 /** 新方案的 id：随机一段而不是「第几条」。删掉中间那条后按序号编会复用老 id，而历史记录是按 id 认的 */
@@ -561,10 +663,10 @@ function freshProfileId(cap: ProfileCapability, taken: Set<string>): string {
   return id
 }
 
-/** 没起名时给一个不重样的默认名：方案 2、方案 3……（「默认」那条占用时往后跳） */
+/** 没起名时给一个不重样的默认名：方案 1、方案 2……（转写这一档从 0 条起步，第一条就叫「方案 1」） */
 function nextProfileName(cap: ProfileCapability, list: Profile[]): string {
   const used = new Set(list.map((profile) => profile.name))
-  for (let n = 2; n <= MAX_PROFILES_PER_CAPABILITY + 1; n += 1) {
+  for (let n = 1; n <= MAX_PROFILES_PER_CAPABILITY; n += 1) {
     const candidate = `方案 ${n}`
     if (!used.has(candidate)) return candidate
   }
@@ -592,11 +694,27 @@ function normalizeProfile(cap: ProfileCapability, entry: unknown): Profile | nul
 }
 
 /**
+ * 全局段从文档根上读：只认 GLOBAL_FLAT_KEYS 里那几个名字，且只收字符串。
+ * 所以手改文件里多出来的怪键、以及已经被方案认领的那批扁平键（`asrApiBase` 这种残影）
+ * 都不会进内存，下一次 writeRaw 也就不会把它们再写回去——磁盘上那份文件里躺着的
+ * 是「这个版本认得的配置」，不是原文件的副本。
+ */
+function normalizeGlobals(doc: SettingsDocument): SettingsGlobals {
+  const globals = defaultGlobals()
+  for (const flatKey of GLOBAL_FLAT_KEYS) {
+    const value = doc[flatKey]
+    if (typeof value === 'string') globals[flatKey] = value
+  }
+  return globals
+}
+
+/**
  * 把迁移过的文档落成 SettingsStore。
  *
  * 这一层存在的理由就写在名字里：v1 时代的读盘收口「只收字符串」，而方案列表是对象数组——
  * 照那份写法读 v2 的文件会「读成功、写成功、东西没了」，用户的多套配置静默消失。
- * 所以列表要单独按形状收，并且收完自己站得住：每档至少一条、defaultProfileId 一定指得到人。
+ * 所以列表要单独按形状收，并且收完自己站得住：defaultProfileId 要么指得到人、要么是空串
+ * （空串＝这一档现在没有正在使用的方案）。列表本身可以空，那是「还没建过云端方案」的正常状态。
  */
 function normalizeStore(doc: SettingsDocument): SettingsStore {
   const profiles = {} as SettingsProfiles
@@ -618,17 +736,20 @@ function normalizeStore(doc: SettingsDocument): SettingsStore {
       seen.add(profile.id)
       list.push(profile)
     }
-    // 一条都没收到（整段缺失、写成字符串、每条都没 id）就补一条默认方案：
-    // 这一档必须有东西可选，否则 getter 与界面都得再判一次「没有方案」
+    // 一条都没收到（整段缺失、写成字符串、每条都没 id）就留空列表，**不补一条默认方案**：
+    // 那是凭空造出一条用户没建过的配置，而新口径下「0 条」正是界面要说清楚的那个状态。
     //
     // 这里刻意**不按 MAX_PROFILES_PER_CAPABILITY 剪**：那个数是产品上限，只在写入侧拦新建
     // （createProfile），读侧剪掉就是「读成功、写成功、东西没了」——破的是「绝不静默丢用户
     // 的东西」。手改文件里有 5 条就照 5 条读，界面上多出来的那几条照样能选、能删。
-    profiles[cap] = list.length ? list : [defaultProfileFor(cap)]
-    const wanted = typeof ids[cap] === 'string' ? ids[cap] : ''
-    defaultProfileId[cap] = profiles[cap].some((p) => p.id === wanted) ? wanted : profiles[cap][0].id
+    profiles[cap] = list
+    defaultProfileId[cap] = fixDefaultId(
+      cap,
+      list,
+      typeof ids[cap] === 'string' ? ids[cap] : ''
+    )
   }
-  return { profiles, defaultProfileId }
+  return { globals: normalizeGlobals(doc), profiles, defaultProfileId }
 }
 
 /**
@@ -638,15 +759,19 @@ function normalizeStore(doc: SettingsDocument): SettingsStore {
 export type ProfileSelection = Partial<DefaultProfileId>
 
 /**
- * 方案 store 投成对外那 17 个扁平键：每档按 selection 取一条（取不到落回该档默认），
- * 密钥按它的 id 从解密表里取。
+ * store 投成对外那 17 个扁平键：全局段原样铺上，每档再按 selection 取一条方案盖上去
+ * （取不到落回该档当前默认，那条也没有就留默认值）。密钥按它的 id 从解密表里取。
  * 这是「磁盘形状」与「对外契约」唯一的交界处——别处再各自拼 store 就会出现
  * 「转写读默认方案、界面读第一条」这种两边不一致的分歧。
+ *
+ * 某一档没有方案时那几项**留空**而不是猜一条：转写选云端却还没建过方案，投出来的
+ * apiBase/model 就是空，readiness 那句「先新建一套」才有东西可判。
  */
 function flattenFor(current: SettingsCache, selection?: ProfileSelection): AppSettings {
-  const out: AppSettings = { ...DEFAULT_SETTINGS }
+  const out: AppSettings = { ...DEFAULT_SETTINGS, ...current.raw.globals }
   for (const cap of PROFILE_CAPABILITIES) {
     const profile = pickProfile(current.raw, cap, selection?.[cap])
+    if (!profile) continue
     for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
       const value = field === 'apiKey' ? current.plain[cap][profile.id] : profile[field]
       out[flatKey as keyof AppSettings] = typeof value === 'string' ? value : ''
@@ -661,7 +786,10 @@ function keyStatusFor(
   cap: ProfileCapability,
   selection?: ProfileSelection
 ): SecretStatus {
-  return current.status[cap][pickProfile(current.raw, cap, selection?.[cap]).id] ?? 'none'
+  const profile = pickProfile(current.raw, cap, selection?.[cap])
+  // 这一档现在没有方案，「有没有 Key」的答案就是「没有」——不是「读不出来」
+  if (!profile) return 'none'
+  return current.status[cap][profile.id] ?? 'none'
 }
 
 /**
@@ -763,10 +891,32 @@ export async function getSettingsView(selection?: ProfileSelection): Promise<Set
 }
 
 /**
- * 保存。这份补丁写进哪几条方案由 `patch.profileIds` 决定，缺席＝各档当前默认方案：
- * 界面此刻还是那套扁平表单（#222 第③步才长出方案列表），所以不带 id 的保存就是第①步的落点。
+ * 这份补丁是不是真的带着要写进方案的凭据。用在「这一档一条方案都没有」那句提示上：
+ * 只改了转写模式/本地档位/语言（全局段）的保存不该被拦，而填了接口地址或模型或 Key
+ * 却没地方写，才是用户以为存下来了、其实没存的那一种。
+ * 密钥那格只认非空字符串：留空＝不改，null＝清除——一条方案都不在，这两样都没有东西可做。
+ */
+function hasCredentialInput(patch: SettingsPatch, cap: ProfileCapability): boolean {
+  for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
+    if (field === 'apiKey') {
+      const secret = patch[flatKey as SecretField]
+      if (typeof secret === 'string' && secret) return true
+      continue
+    }
+    const value = (patch as Partial<AppSettings>)[flatKey as keyof AppSettings]
+    if (typeof value === 'string' && value.trim()) return true
+  }
+  return false
+}
+
+/**
+ * 保存。补丁里属于全局段的键写进 `store.globals`，属于某一档的凭据写进那条方案——
+ * 写进哪条由 `patch.profileIds` 决定，缺席＝各档当前默认方案。
  * 传了 id 却指不到人时**报错**而不是落回默认那条——静默写到默认方案会吃掉用户另一套配置，
  * 而那是他没碰过的那一条。
+ * 这一档现在没有方案（还没新建过，或刚删完）而补丁带着凭据时也只报错、不代建：
+ * 界面上那颗「新建一套」才是建方案的入口，保存里偷偷建一条会让「删掉最后一条」
+ * 这件事看起来像没生效。
  *
  * 密钥字段的语义和普通字段不同，界面上的输入框是「留空＝不改」：
  * - 缺席 / 空串：保留磁盘上已有的那把（改个接口地址不用重贴 Key）
@@ -777,10 +927,23 @@ export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> 
   const current = await readCache()
   const merged = cloneStore(current.raw)
   const incoming = patch as Partial<AppSettings>
+  // 全局段只认 GLOBAL_FLAT_KEYS 里那几个名字，且只收字符串：界面上多带的字段
+  // （脱敏视图的状态位、profileIds 这种）都不会被当成配置写回磁盘
+  for (const flatKey of GLOBAL_FLAT_KEYS) {
+    const value = incoming[flatKey as keyof AppSettings]
+    if (typeof value === 'string') merged.globals[flatKey] = value
+  }
   const target = {} as DefaultProfileId
   for (const cap of PROFILE_CAPABILITIES) {
     const wanted = (patch.profileIds?.[cap] ?? '').trim()
     const profile = wanted ? mustFindProfile(merged, cap, wanted) : pickDefault(merged, cap)
+    if (!profile) {
+      target[cap] = ''
+      if (hasCredentialInput(patch, cap)) {
+        throw new SettingsProfileRuleError(PROFILE_CREATE_FIRST_MESSAGE)
+      }
+      continue
+    }
     target[cap] = profile.id
     for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
       if (SECRET_FIELDS.includes(flatKey as SecretField)) {
@@ -794,6 +957,18 @@ export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> 
       const value = incoming[flatKey as keyof AppSettings]
       if (typeof value === 'string') profile[field] = value
     }
+  }
+  // 「是否默认」那颗开关在编辑表单里翻，跟着这次保存一起落盘；空串是用户明确表示
+  // 「这一档现在不要当前使用的方案」，不是「没填」——所以缺席才是不改，给了就必须是真人
+  for (const cap of PROFILE_CAPABILITIES) {
+    const raw = patch.defaultProfileIds?.[cap]
+    if (raw === undefined) continue
+    const next = raw.trim()
+    merged.defaultProfileId[cap] = next ? mustFindProfile(merged, cap, next).id : ''
+  }
+  // 写盘前把「默认 id 指得到人」这条不变量再对一遍，与每条增删改共用同一个规则
+  for (const cap of PROFILE_CAPABILITIES) {
+    merged.defaultProfileId[cap] = fixDefaultId(cap, merged.profiles[cap], merged.defaultProfileId[cap])
   }
   await writeRaw(merged)
   // 回来的视图要说的是「刚写进去的那几条」，不然界面编辑一条非默认方案时
@@ -854,35 +1029,58 @@ export async function listProfiles(): Promise<ProfilesView> {
 }
 
 /**
- * 改完 store 的收尾，五条增删改共用：先把「每档至少一条、默认 id 一定指得到人」这两条
- * 不变量重新对正，再落盘。写盘走唯一的 writeRaw 出口，所以读失败时的闸门、版本戳、
- * 原子写与 .bak 对增删改同样生效——这几件事少做一件，配置列表就成了绕过闸门的旁路。
+ * 改完 store 的收尾，五条增删改共用：把「默认 id 要么指得到人、要么是空串」这条不变量
+ * 重新对正（规则与读盘收口是同一句 `fixDefaultId`），再落盘。
+ * 写盘走唯一的 writeRaw 出口，所以读失败时的闸门、版本戳、原子写与 .bak 对增删改同样生效
+ * ——这几件事少做一件，配置列表就成了绕过闸门的旁路。
+ *
+ * 列表可以是空的，这里不再拦「删到一条不剩」：那正是 #222 新口径里的 0 配置状态。
  */
 async function commitStore(merged: SettingsStore): Promise<ProfilesView> {
   for (const cap of PROFILE_CAPABILITIES) {
-    const list = merged.profiles[cap]
-    if (list.length === 0) throw new SettingsProfileRuleError(PROFILE_LAST_DELETE_MESSAGE)
-    if (!list.some((profile) => profile.id === merged.defaultProfileId[cap])) {
-      merged.defaultProfileId[cap] = list[0].id
-    }
+    merged.defaultProfileId[cap] = fixDefaultId(
+      cap,
+      merged.profiles[cap],
+      merged.defaultProfileId[cap]
+    )
   }
   await writeRaw(merged)
   return listProfiles()
 }
 
 /**
- * 新建一套方案。第三个参数有三种意思，界面上「新建」与「复制这一套」就是靠它分开的：
- * - 不给：从该档当前那条**复制**（同一家网关换个模型是最常见的第二次配置，
- *   而密钥跟着复制走的是原样搬运——让用户重贴一次 Key，多半换来一把填错的）
- * - 给那条方案的 id：照着它复制
- * - 给空串：要一条全空白的
+ * 新建一条方案的入参。渲染层传来的是界面此刻的样子，主进程这边一律先收口再用：
+ * 这些值来自 IPC，类型不受我们控制。
+ */
+export interface ProfileCreateInput {
+  /** 界面不再让用户起名，只有校对/配音那套老按钮还会给；空则按模型名/「方案 N」兜底 */
+  name?: unknown
+  /**
+   * 照哪一条复制：省略＝该档当前默认那条；给 id＝照那条；给空串＝一条全空白（连 Key 都不带）。
+   * 复制时密钥**原样搬运密文**，不重新封一次——重封会把「能不能解密」变成「换过机器」。
+   */
+  fromProfileId?: unknown
+  /** 以界面当前输入为准：键名是界面上那套扁平名（asrApiBase / asrModel / asrApiKey / …） */
+  values?: unknown
+  /** 是否把这条设为当前使用；这一档原本一条都没有时不用给，第一条自动是它 */
+  setDefault?: unknown
+}
+
+/**
+ * 新建一条方案，当场落盘。
+ *
+ * 凭据以 `values`（＝界面此刻的输入）为准，没给的字段才落回「照来源那条复制」——
+ * 转写这一档点「新建一套」时用户要的就是「我表单里填的这几项变成一条方案」，
+ * 而不是先复制一份再让他改第二遍。Key 那一格给空串是**真的空**（界面上允许「缺 Key」，
+ * 自建网关本来就可能不要 Key），这点和保存不同：保存里的空串是「保留磁盘上那把」，
+ * 两处若都按保存那套走，刚建的方案就躺着上一家的密钥。
+ *
  * 上限只在这里拦：读取侧不按 cap 剪列表，所以手改文件里多出来的几条照样能读能删，
  * 但不能再点「新建」。
  */
 export async function createProfile(
   rawCap: unknown,
-  name?: unknown,
-  fromProfileId?: unknown
+  input?: ProfileCreateInput
 ): Promise<ProfilesView> {
   const cap = normalizeCapability(rawCap)
   const current = await readCache()
@@ -891,13 +1089,12 @@ export async function createProfile(
   if (list.length >= MAX_PROFILES_PER_CAPABILITY) {
     throw new SettingsProfileRuleError(PROFILE_LIMIT_MESSAGE)
   }
-  const sourceId = normalizeProfileIdArg(fromProfileId)
-  const wantsBlank = fromProfileId === ''
-  const source = wantsBlank || !sourceId ? pickDefault(merged, cap) : mustFindProfile(merged, cap, sourceId)
-  const created: Profile = { ...source }
+  const sourceId = normalizeProfileIdArg(input?.fromProfileId)
+  // 「要一条全空白」的暗号是显式给了一个空串；省略这个字段是「照当前那条复制」，两件事不能混
+  const wantsBlank = input?.fromProfileId === ''
+  const source = wantsBlank ? null : sourceId ? mustFindProfile(merged, cap, sourceId) : pickDefault(merged, cap)
+  const created: Profile = { ...(source ?? defaultProfileFor(cap)) }
   created.id = freshProfileId(cap, new Set(list.map((profile) => profile.id)))
-  const trimmedName = normalizeProfileName(name)
-  created.name = trimmedName || nextProfileName(cap, list)
   if (wantsBlank) {
     // 「空白一套」真的什么都不带：密钥也清空，否则界面按「新方案」填完字段就以为自己
     // 拿到了一把干净的 Key，实际底下躺着上一套的那把
@@ -907,8 +1104,24 @@ export async function createProfile(
       created[field] = defaultProfileFor(cap)[field]
     }
   }
+  const values = asObject(input?.values)
+  for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
+    const value = values[flatKey]
+    if (typeof value !== 'string') continue
+    if (field === 'apiKey') {
+      created.apiKey = value ? seal(value.trim()) : ''
+      continue
+    }
+    created[field] = value
+  }
+  const named = normalizeProfileName(input?.name)
+  created.name = named || (created.model || '').trim() || nextProfileName(cap, list)
+  const wasEmpty = list.length === 0
   list.push(created)
-  // 新建不改「当前用哪条」：默默把默认切到新方案，等于用户下一次转写用的是他没填完的配置
+  // 第一条自动是当前使用：新建完就能转写，不用再去找开关。之后几条只在表单上那颗
+  // 「是否默认」明确开着时才改指针——把旧那条顶掉就是它该有的意思，互斥由结构保证
+  // （磁盘上每档只有一个 defaultProfileId）。
+  if (wasEmpty || input?.setDefault === true) merged.defaultProfileId[cap] = created.id
   return commitStore(merged)
 }
 
@@ -937,23 +1150,27 @@ export async function renameProfile(
 }
 
 /**
- * 删掉一套方案。至少留一条：删空了这一档就没有「当前方案」可指，getter 与界面都得再判
- * 「没有方案」这一种状态，而那件事在契约上没人定义过。
- * 删的正是当前默认时，默认落回剩下的第一条（commitStore 负责改指），不是删掉引用。
+ * 删掉一条方案，含它保存的密钥。允许删到最后一条：转写这一档从此是「0 配置」，
+ * 界面给的是「新建一套」，getter 投出来的是空凭据，readiness 拦下这次云端转写并说清楚为什么。
+ *
+ * 删掉的正是「当前使用」那条时，转写这边**不落回剩下第一条**（`fixDefaultId` 那句），
+ * 因为那等于用界面上排第一的那家网关替用户做了决定；校对/配音这一轮还兜着，理由在那句的注释里。
  */
 export async function deleteProfile(rawCap: unknown, rawProfileId: unknown): Promise<ProfilesView> {
   const cap = normalizeCapability(rawCap)
   const profileId = normalizeProfileIdArg(rawProfileId)
   const current = await readCache()
   const merged = cloneStore(current.raw)
-  const list = merged.profiles[cap]
-  if (list.length <= 1) throw new SettingsProfileRuleError(PROFILE_LAST_DELETE_MESSAGE)
   mustFindProfile(merged, cap, profileId)
-  merged.profiles[cap] = list.filter((profile) => profile.id !== profileId)
+  merged.profiles[cap] = merged.profiles[cap].filter((profile) => profile.id !== profileId)
   return commitStore(merged)
 }
 
-/** 把这一档当前用的方案换成指定那条。转写/校对/配音下一次取值就走这条，无需重启 */
+/**
+ * 把这一档当前用的方案换成指定那条。转写/校对/配音下一次取值就走这条，无需重启。
+ * 界面上这条通道现在只有校对、配音那两条老方案条还在用；转写那一档的「是否默认」开关
+ * 改由「保存设置」带 `defaultProfileIds` 落盘（#222 新口径：那颗开关在编辑表单里）。
+ */
 export async function setDefaultProfile(
   rawCap: unknown,
   rawProfileId: unknown
@@ -980,7 +1197,8 @@ export function normalizeApiBase(raw: string): string {
 
 /**
  * 转写配置。`profileId` 是界面「这次用哪套转写配置」传下来的那条；空或指不到人时
- * 落回该档当前默认方案（与没长出选择器时同一结果）。
+ * 落回该档当前默认方案（与没长出选择器时同一结果）；该档一条方案都没有时投出来的是空凭据，
+ * 而 `provider` / `localModel` 走的是全局段，不受有没有方案影响——本地转写照样能跑。
  * 真正用到的那条 id 用 resolveProfileId 再问一次——历史记录要按 id 记（#247），
  * 拿传进来的那个记会在落回默认时记错。
  */

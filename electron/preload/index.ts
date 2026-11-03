@@ -44,6 +44,18 @@ interface VoiceProgressEvent {
   note?: string
 }
 
+/** 与 index.d.ts 的 ProfileCreatePayload 对齐：新建方案只收一个对象，不再走三个位置参数 */
+interface ProfileCreatePayload {
+  /** 界面上不再起名时可以不传；主进程按「给的名 → 模型名 → 方案 N」兜底 */
+  name?: string
+  /** 省略＝照该档当前那条复制；给 id＝照那条；空串＝一条全空白（连 Key 都不带） */
+  fromProfileId?: string
+  /** 界面此刻表单上的凭据，键名用界面上那套扁平名（asrApiBase / asrModel / asrApiKey…） */
+  values?: Record<string, string>
+  /** 建完就设为当前使用；该档原本一条都没有时不用给，第一条自动是它 */
+  setDefault?: boolean
+}
+
 const api = {
   /**
    * 平台标识直接带过来，不走 IPC：创建窗口时 `titleBarStyle: 'hiddenInset'` 看的也是这一个值
@@ -158,10 +170,12 @@ const api = {
     ipcRenderer.invoke('settings:testConnection', kind, values, profileId),
 
   // 多套配置（#222）：三档各自的方案列表，增删改各一条。
-  // createProfile 的 fromProfileId：传空串＝要一条全空的（连 Key 都不带），传 id 或省略＝照着那一条复制
+  // createProfile 收一个对象：凭据以界面此刻的输入为准，`fromProfileId` 才是「照哪一条复制」
+  // （空串＝一条全空白，省略＝照该档当前那条）。以前这里是三个位置参数，改名不改成对象
+  // 就会出现「名字被静默吞掉、复制源当成名字」这种不报错的错法。
   listProfiles: () => ipcRenderer.invoke('settings:listProfiles'),
-  createProfile: (capability: 'asr' | 'ai' | 'tts', name?: string, fromProfileId?: string) =>
-    ipcRenderer.invoke('settings:createProfile', capability, name, fromProfileId),
+  createProfile: (capability: 'asr' | 'ai' | 'tts', input?: ProfileCreatePayload) =>
+    ipcRenderer.invoke('settings:createProfile', capability, input),
   renameProfile: (capability: 'asr' | 'ai' | 'tts', profileId: string, name: string) =>
     ipcRenderer.invoke('settings:renameProfile', capability, profileId, name),
   deleteProfile: (capability: 'asr' | 'ai' | 'tts', profileId: string) =>

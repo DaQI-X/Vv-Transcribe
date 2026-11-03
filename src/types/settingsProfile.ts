@@ -8,9 +8,11 @@
 export type ProfileCapability = 'asr' | 'ai' | 'tts'
 
 /**
- * 一条方案的脱敏形状。`values` 用的键名是界面上那 17 个扁平名（asrProvider /
- * ttsLocalEngine / …），和 getSettings 的脱敏视图同一套，所以「切到另一套方案」
+ * 一条方案的脱敏形状。`values` 用的键名是界面上那套扁平名（asrApiBase / ttsLocalEngine / …），
+ * 和 getSettings 的脱敏视图同一套，所以「切到另一套方案」
  * 就是把这一份盖到表单身上，渲染层不需要再存一份字段对照表。
+ * 转写这一档此刻只有凭据三项（地址 / Key / 模型）：模式、本地档位、转写语言是全局段，
+ * 跟着 `settings:get` 那份视图走，不在任何一条方案里。
  * 密钥的键名也不在里面：表单里那一格永远从空开始（留空＝不修改）。
  */
 export interface ProfileView {
@@ -18,6 +20,20 @@ export interface ProfileView {
   name: string
   values: Record<string, string>
   keyStatus: 'none' | 'encrypted' | 'plaintext' | 'unreadable'
+}
+
+/**
+ * 新建一条方案的入参（与 electron/preload/index.d.ts 的同名类型对齐）。
+ * `values` 是界面此刻表单上的凭据——点「新建一套」要的是「把这几项存成一条方案」，
+ * 所以以它为准；`fromProfileId` 只决定没给的那些字段照谁复制。
+ */
+export interface ProfileCreatePayload {
+  name?: string
+  /** 省略＝照该档当前那条复制；给 id＝照那条；空串＝一条全空白（连 Key 都不带） */
+  fromProfileId?: string
+  values?: Record<string, string>
+  /** 建完设为当前使用；该档原本一条都没有时不用给，第一条自动是它 */
+  setDefault?: boolean
 }
 
 /**

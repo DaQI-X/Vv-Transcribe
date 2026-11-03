@@ -5,7 +5,8 @@
  * target / steps 做成入参就是为了那一段能测。
  *
  * v2 落地之后生产注册表本身就有两步了，所以这里分成两半：
- * - 对真链提要求：17 个扁平键一个不落地搬进方案列表、密钥原样搬、旧键删干净。
+ * - 对真链提要求：进方案的扁平键一个不落地搬进对应那档、密钥原样搬、搬走的旧键删干净；
+ *   没被方案认领的那几项（转写模式 / 本地档位 / 转写语言）留在文档根上。
  *   那才是「用户填过的东西有没有在这一次搬运里丢掉」唯一说得清的地方。
  * - 保留假注册表那些极端形状（链中间缺一步、从链中间起步）：它们在第②③步之外
  *   永远证不了，等真缺一步时再测就晚了。
@@ -50,17 +51,18 @@ function profilesOf(doc: SettingsDocument): SettingsProfiles {
 }
 
 /**
- * v1 磁盘上那 17 个扁平键，逐条写死成 [扁平键, 值, 落到哪一档, 落成哪个字段]。
+ * v1 磁盘上那 17 个扁平键，按新口径拆成两张表写死，逐条列成 [扁平键, 值, 落到哪一档, 落成哪个字段]。
  * 这里刻意不 import CAPABILITY_FIELDS：表少写一条、把 localModel 归错档，
  * 用同一张表构造输入再用它断言输出会一起错过去，那样这条测试等于没写。
+ *
+ * asr 只有凭据三项进方案，模式 / 本地档位 / 转写语言落在下面那张全局表里——
+ * 「换一家网关」换的是地址、Key、模型，语言跟着网关走是上一版拆错的地方。
+ * ai / tts 这一轮还没改口径，所以仍带着各自的非凭据字段（provider / engine 等）。
  */
-const V1_FLAT: ReadonlyArray<readonly [string, string, ProfileCapability, string]> = [
-  ['asrProvider', 'cloud', 'asr', 'provider'],
+const V1_TO_PROFILE: ReadonlyArray<readonly [string, string, ProfileCapability, string]> = [
   ['asrApiKey', 'v1:YXNSLUtFWQ==', 'asr', 'apiKey'],
   ['asrApiBase', 'https://asr.example', 'asr', 'apiBase'],
   ['asrModel', 'whisper-1', 'asr', 'model'],
-  ['asrLocalModel', 'small', 'asr', 'localModel'],
-  ['asrLanguage', 'en', 'asr', 'language'],
   ['aiProvider', 'openai', 'ai', 'provider'],
   ['aiApiKey', 'v1:QUktS0VZ', 'ai', 'apiKey'],
   ['aiApiBase', 'https://ai.example', 'ai', 'apiBase'],
@@ -74,11 +76,19 @@ const V1_FLAT: ReadonlyArray<readonly [string, string, ProfileCapability, string
   ['ttsLocalVoice', '3', 'tts', 'localVoice'],
 ]
 
+/** 没被任何一档方案认领的键：迁移一个都不许碰，它们照原样躺在文档根上（读进内存后叫 globals） */
+const V1_GLOBAL: ReadonlyArray<readonly [string, string]> = [
+  ['asrProvider', 'cloud'],
+  ['asrLocalModel', 'small'],
+  ['asrLanguage', 'en'],
+]
+
 /** 一份写全了 v1 扁平键的文档（外加版本戳，好让这一步只测 v1→v2） */
 function v1Document(extra: SettingsDocument = {}): SettingsDocument {
   return {
     [CURRENT_SETTINGS_VERSION_FIELD]: 1,
-    ...Object.fromEntries(V1_FLAT.map(([flatKey, value]) => [flatKey, value])),
+    ...Object.fromEntries(V1_TO_PROFILE.map(([flatKey, value]) => [flatKey, value])),
+    ...Object.fromEntries(V1_GLOBAL),
     ...extra
   }
 }
@@ -145,25 +155,38 @@ describe('v0 → v1：搬旧配音字段', () => {
 })
 
 describe('v1 → v2：扁平键拆成方案列表', () => {
-  it('17 个扁平键一项不落地搬进各自那档，搬完旧键全部消失', () => {
+  it('进方案的扁平键一项不落地搬进各自那档，搬完旧键全部消失', () => {
     const result = migrateSettingsDocument(v1Document())
     if (result.status !== 'migrated') throw new Error(`期望 migrated，实际 ${result.status}`)
     // ran 记下「这一步真的跑过」，而不是「看起来已经是新形状」
     expect(result.ran).toEqual([1])
     const doc = result.doc
     const profiles = profilesOf(doc)
-    for (const [flatKey, value, cap, field] of V1_FLAT) {
+    for (const [flatKey, value, cap, field] of V1_TO_PROFILE) {
       // 带上扁平键名一起报：哪一条搬丢了，失败信息要说得出是哪一条
       expect(profiles[cap][0][field], `${cap}.${flatKey}`).toBe(value)
       expect(flatKey in doc, `旧扁平键 ${flatKey} 还留在文档里`).toBe(false)
     }
   })
 
+  it('没进方案的那几项留在文档根上：搬完照原样，一条方案里都不许多出来', () => {
+    // 上一版把 17 个键全塞进方案，于是每条网关各自带一份转写语言和本地档位——
+    // 用户切一家网关，语言跟着换了。这一条钉的就是拆错的那三键不许再进方案
+    const doc = migrated(migrateSettingsDocument(v1Document()))
+    for (const [flatKey, value] of V1_GLOBAL) {
+      expect(doc[flatKey], `全局键 ${flatKey} 不该被搬走或改掉`).toBe(value)
+    }
+    const asr = profilesOf(doc).asr[0]
+    for (const [flatKey] of V1_GLOBAL) {
+      expect(flatKey in asr, `全局键 ${flatKey} 不该出现在方案里`).toBe(false)
+    }
+    expect(Object.keys(asr).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name'])
+  })
+
   it('三把 Key 原样搬，一个字符都不改', () => {
     // 这一条是整个迁移里最贵的一条：`v1:` 那串是按这台机器的密钥库封的，
     // 搬的时候重新加密（或先解再封）都会变成「前缀对但解不开」，界面上就是「Key 没了」
-    const doc = migrated(migrateSettingsDocument(v1Document()))
-    const profiles = profilesOf(doc)
+    const profiles = profilesOf(migrated(migrateSettingsDocument(v1Document())))
     expect(profiles.asr[0].apiKey).toBe('v1:YXNSLUtFWQ==')
     expect(profiles.ai[0].apiKey).toBe('v1:QUktS0VZ')
     expect(profiles.tts[0].apiKey).toBe('v1:VFQtS0VZ')
@@ -185,7 +208,7 @@ describe('v1 → v2：扁平键拆成方案列表', () => {
     const asr = profilesOf(doc).asr[0]
     expect('model' in asr).toBe(false)
     // 同档其余字段照常搬，别把一条坏值变成整档失败
-    expect(asr.provider).toBe('cloud')
+    expect(asr.apiBase).toBe('https://asr.example')
   })
 
   it('v0 的文件一路走到 v2：先接管旧配音键，再拆进方案', () => {
@@ -193,7 +216,7 @@ describe('v1 → v2：扁平键拆成方案列表', () => {
     const doc = migrated(migrateSettingsDocument({ aiTtsModel: 'cosyvoice-v1', aiTtsVoice: 'zh-x' }))
     const tts = profilesOf(doc).tts[0]
     expect(tts).toMatchObject({ model: 'cosyvoice-v1', voice: 'zh-x' })
-    // 旧键与中转那份扁平键都不该留下：v2 的磁盘上只有方案列表
+    // 旧键与中转那份扁平键都不该留下：ttsModel 被方案认领了，v2 的磁盘上就不该再有它
     expect('aiTtsModel' in doc).toBe(false)
     expect('ttsModel' in doc).toBe(false)
   })

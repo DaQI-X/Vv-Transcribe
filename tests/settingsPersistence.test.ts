@@ -6,9 +6,13 @@
  * 后半段的「配置格式版本」是同一个问题的另一面：旧文件搬上来要盖戳，本版本读不懂的新文件
  * 既不搬、不改名、不写回——读不懂不等于坏了，把它当坏的就会抹掉更新版本正在用的配置。
  *
- * 1.0.9 的第①步把磁盘形状换成了按能力分列的方案列表（v2），这一层因此多出两条新的闸门，
+ * 1.0.9 把磁盘形状换成了按能力分列的**云端方案**列表（v2），这一层因此多出几条新的闸门与契约，
  * 都在下面：一次读盘/保存不许把用户没碰过的那几套方案弄没（列表是对象数组，
  * 「只收字符串」的旧收口会静默吃掉它），也不许把已经封好的 Key 在搬家路上换成一串解不开的。
+ * 新口径还定了字段归属：方案里只躺凭据（接口地址 / Key / 模型），模式、本地档位、转写语言
+ * 平铺在文档根上（内存里叫 store.globals）——所以「磁盘上这条方案的 keys 有哪几个」本身
+ * 就是被测的契约，它是下一个版本要读的东西。某一档列表可以是空的（还没建过云端方案），
+ * 空列表在落盘后仍然是空的：读盘与写盘都不许凭空补一条用户没建过的方案。
  */
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -79,16 +83,22 @@ function diskProfile(
   return found as unknown as Record<string, string>
 }
 
-/** 一份 v2 形状的磁盘内容：默认三档各一条方案，按档整体替换或改默认指向 */
+/**
+ * 一份 v2 形状的磁盘内容：默认三档各一条方案，按档整体替换、改默认指向，以及
+ * **平铺在根上的全局段**（asrProvider / asrLocalModel / asrLanguage 这些不属于任何方案的键）。
+ * 全局段必须能表达，因为新口径下「保存改了档位」看得见的位置就是文档根。
+ */
 function v2Document(
   profiles: Partial<Record<keyof SettingsProfiles, Array<Record<string, unknown>>>> = {},
-  defaultProfileId: Partial<DefaultProfileId> = {}
+  defaultProfileId: Partial<DefaultProfileId> = {},
+  globals: Record<string, unknown> = {}
 ): string {
   return JSON.stringify(
     {
       schemaVersion: 2,
+      ...globals,
       profiles: {
-        asr: [{ id: 'asr-default', name: '默认', apiKey: '', provider: 'local' }],
+        asr: [{ id: 'asr-default', name: '默认', apiKey: '', model: 'asr-default-model' }],
         ai: [{ id: 'ai-default', name: '默认', apiKey: '', model: 'gpt-4o' }],
         tts: [{ id: 'tts-default', name: '默认', apiKey: '', engine: 'cloud' }],
         ...profiles
@@ -121,6 +131,9 @@ describe('首次运行', () => {
 
 describe('正常读写', () => {
   it('Key 以 v1: 密文落盘，重新载入后还能解出来（模拟一次重启）', async () => {
+    // 先放一份磁盘上已有的配置：新口径下转写这一档首次运行是 0 条方案，
+    // 而凭据只能写进某一条方案里（这一条要核的是密文往返，不是「没地方写」那句规矩）
+    await writeFile(file(), v2Document())
     await loadInto(dir)
     await service.saveSettings({ asrApiKey: 'sk-first-abcdef', aiModel: 'gpt-4o' })
     expect(diskProfile(await readJson(file()), 'asr').apiKey).toMatch(/^v1:/)
@@ -134,15 +147,16 @@ describe('正常读写', () => {
   })
 
   it('第二次保存前把上一份复制成 .bak，里面是被替换掉的那一版', async () => {
+    // 用校对那一档测：首次运行时它有一条默认方案，而转写那档还没有任何一条可写
     await loadInto(dir)
-    await service.saveSettings({ asrApiKey: 'sk-first-abcdef' })
-    const first = diskProfile(await readJson(file()), 'asr').apiKey
+    await service.saveSettings({ aiApiKey: 'sk-first-abcdef' })
+    const first = diskProfile(await readJson(file()), 'ai').apiKey
     expect(await namesWith('settings.json.bak')).toEqual([])
 
-    await service.saveSettings({ asrApiKey: 'sk-second-uvwxyz' })
-    const backup = diskProfile(await readJson(`${file()}.bak`), 'asr').apiKey
+    await service.saveSettings({ aiApiKey: 'sk-second-uvwxyz' })
+    const backup = diskProfile(await readJson(`${file()}.bak`), 'ai').apiKey
     expect(backup).toBe(first)
-    expect(diskProfile(await readJson(file()), 'asr').apiKey).not.toBe(first)
+    expect(diskProfile(await readJson(file()), 'ai').apiKey).not.toBe(first)
   })
 
   it('留空＝不改、null＝清除：只改模型名不会把磁盘上那把 Key 弄丢', async () => {
@@ -350,7 +364,6 @@ describe('多方案（v2）的两道闸门', () => {
     const other = {
       id: 'asr-work',
       name: '工作',
-      provider: 'openai',
       apiBase: 'https://work.example',
       model: 'whisper-1',
       apiKey: sealed('sk-other-abcdef')
@@ -400,7 +413,7 @@ describe('多方案（v2）的两道闸门', () => {
 
   it('默认方案不是列表第一条时，取值与状态都跟着默认那条走', async () => {
     // 取成「列表第一条」的话，界面显示的和实际用的会分叉成两套配置，
-    // 而第①步还没有任何界面能看出来——只能靠这条测试拦住
+    // 而这在只有测试能看出来的时候根本没有界面能看出来
     await writeFile(
       file(),
       v2Document(
@@ -421,14 +434,34 @@ describe('多方案（v2）的两道闸门', () => {
     expect((await service.getSettingsView()).asrKeyStatus).toBe('encrypted')
 
     // 保存的落点也必须是默认那条：写进列表第一条就是当着用户的面改错一套配置
-    await service.saveSettings({ asrLanguage: 'en' })
+    await service.saveSettings({ asrApiBase: 'https://selected.example' })
     const onDisk = await readJson(file())
-    expect(diskProfile(onDisk, 'asr', 'asr-selected').language).toBe('en')
+    expect(diskProfile(onDisk, 'asr', 'asr-selected').apiBase).toBe('https://selected.example')
     expect(diskProfile(onDisk, 'asr', 'asr-first').model).toBe('not-this-one')
+    expect(diskProfile(onDisk, 'asr', 'asr-first').apiBase).toBe('')
   })
 
-  it('手写文件里 defaultProfileId 指不到任何方案：落回第一条，不崩、不凭空造方案', async () => {
-    // 磁盘是系统边界：这一条不许假设「我们写出去的 id 一定指得到人」
+  it('非凭据那三项落在文档根上，一条方案里都不许出现', async () => {
+    // 这条钉的是磁盘契约的另外一半：「换一家网关」换的是凭据三项，模式/档位/语言是全局段。
+    // 它们要是又跑回方案里，界面上选了 A 网关、下次切 B 网关就会连语言一起被换掉
+    await writeFile(file(), v2Document({}, {}, { asrProvider: 'local', asrLocalModel: 'base', asrLanguage: 'zh' }))
+    await loadInto(dir)
+    await service.saveSettings({ asrProvider: 'cloud', asrLocalModel: 'small', asrLanguage: 'en' })
+
+    const onDisk = await readJson(file())
+    expect(onDisk).toMatchObject({ asrProvider: 'cloud', asrLocalModel: 'small', asrLanguage: 'en' })
+    for (const profile of diskProfiles(onDisk).asr) {
+      expect(Object.keys(profile).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name'])
+    }
+    // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住
+    await loadInto(dir)
+    expect((await service.getASRConfig()).localModel).toBe('small')
+  })
+
+  it('手写文件里 defaultProfileId 指不到任何方案：转写落空串、校对落第一条、空列表不补方案', async () => {
+    // 磁盘是系统边界：这一条不许假设「我们写出去的 id 一定指得到人」。
+    // 三个分支各按各的口径：转写不替用户挑（新口径），校对/配音这一轮还兜着（那两档界面还没改），
+    // 而「列表本来就空」哪一档都不许凭空补一条——那是造用户没建过的配置
     await writeFile(
       file(),
       JSON.stringify(
@@ -436,7 +469,7 @@ describe('多方案（v2）的两道闸门', () => {
           schemaVersion: 2,
           profiles: {
             asr: [{ id: 'asr-a', name: 'A', model: 'first' }],
-            ai: [],
+            ai: [{ id: 'ai-a', name: 'A', model: 'gpt-a' }, { id: 'ai-b', name: 'B', model: 'gpt-b' }],
             tts: []
           },
           defaultProfileId: { asr: 'asr-ghost', ai: 'ai-ghost', tts: 'tts-ghost' }
@@ -448,13 +481,16 @@ describe('多方案（v2）的两道闸门', () => {
     await loadInto(dir)
 
     const settings = await service.loadSettings()
-    expect(settings.asrModel).toBe('first')
+    expect(settings.asrModel).toBe('')
+    expect(await service.resolveProfileId('asr')).toBe('')
+    expect(settings.aiModel).toBe('gpt-a')
     expect((await service.getSettingsView()).storageProblem).toBeNull()
 
-    await service.saveSettings({ asrProvider: 'openai' })
+    await service.saveSettings({ aiModel: 'renamed' })
     const onDisk = await readJson(file())
-    // 空列表那两档补一条默认方案，指不到的 id 落成真正存在的 id
-    expect(diskProfiles(onDisk).ai).toHaveLength(1)
-    expect(onDisk.defaultProfileId).toEqual({ asr: 'asr-a', ai: 'ai-default', tts: 'tts-default' })
+    expect(onDisk.defaultProfileId).toEqual({ asr: '', ai: 'ai-a', tts: '' })
+    // 空着的那一档还是空着：落盘不补方案
+    expect(diskProfiles(onDisk).tts).toEqual([])
+    expect(diskProfiles(onDisk).asr).toHaveLength(1)
   })
 })

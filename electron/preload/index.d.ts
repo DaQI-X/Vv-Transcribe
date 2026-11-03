@@ -280,9 +280,11 @@ export type ProfileCapability = 'asr' | 'ai' | 'tts'
 export type SecretStatus = 'none' | 'encrypted' | 'plaintext' | 'unreadable'
 
 /**
- * 一条方案的脱敏形状。`values` 的键名用的是**界面上那 17 个扁平名**（asrProvider /
- * ttsLocalEngine / …），和 getSettings 的脱敏视图同一套名字，所以表单可以直接把这一份
+ * 一条方案的脱敏形状。`values` 的键名用的是**界面上那套扁平名**（asrApiBase / ttsLocalEngine / …），
+ * 和 getSettings 的脱敏视图同一套名字，所以表单可以直接把这一份
  * 覆盖到自己正在编辑的那一组上，渲染层不留第二份字段对照表。
+ * 每一项都属于 `CAPABILITY_FIELDS` 里那一档：转写此刻只有凭据三项（地址 / Key / 模型），
+ * 模式、本地档位、转写语言是全局段，跟着 `settings:get` 那份视图走，不在任何一条方案里。
  * apiKey 照旧不在这里——跨 IPC 只带状态位。
  */
 export interface ProfileView {
@@ -290,6 +292,19 @@ export interface ProfileView {
   name: string
   values: Record<string, string>
   keyStatus: SecretStatus
+}
+
+/**
+ * 新建一条方案的入参（与 electron/preload/index.ts 的同名接口对齐）。
+ * 键名用界面上那套扁平名，值以界面此刻的输入为准；`fromProfileId` 只决定「没给的字段照谁复制」。
+ */
+export interface ProfileCreatePayload {
+  name?: string
+  /** 省略＝照该档当前那条复制；给 id＝照那条；空串＝一条全空白（连 Key 都不带） */
+  fromProfileId?: string
+  values?: Record<string, string>
+  /** 建完设为当前使用；该档原本一条都没有时不用给，第一条自动是它 */
+  setDefault?: boolean
 }
 
 /** 三档的方案列表 + 每档当前选哪条 + 上限；上限只在「新建」时拦，读到的条数可能比它多 */
@@ -549,20 +564,19 @@ export interface ElectronAPI {
    */
   listProfiles: () => Promise<ProfilesView | null>
   /**
-   * 新建一套方案。`fromProfileId` 传空串要一条全空的（连 Key 都不带），传那条 id 表示照着它复制；
-   * 缺省＝照着该档当前默认那条复制。到了上限或磁盘不能写时 error 是给人看的一句话。
+   * 新建一条方案的入参（#222 重写口径）。以前这条通道是三个位置参数，漏改一处调用不会崩、
+   * 只会把值静默读错位，所以换成一个对象：主进程只认对象形状，其余（字符串、数组）一律当「没给」。
    */
   createProfile: (
     capability: ProfileCapability,
-    name?: string,
-    fromProfileId?: string
+    input?: ProfileCreatePayload
   ) => Promise<ProfilesResult>
   renameProfile: (
     capability: ProfileCapability,
     profileId: string,
     name: string
   ) => Promise<ProfilesResult>
-  /** 删掉最后一条会被拒绝：那一档就没有「当前方案」可指了 */
+  /** 删到一条不剩是合法状态：这一档从此是「0 配置」，界面给的是「新建一套」 */
   deleteProfile: (capability: ProfileCapability, profileId: string) => Promise<ProfilesResult>
   /** 换该档当前用的方案，下一次转写/校对/配音取值就走这条，无需重启应用 */
   setDefaultProfile: (capability: ProfileCapability, profileId: string) => Promise<ProfilesResult>

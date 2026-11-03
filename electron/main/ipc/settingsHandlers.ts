@@ -21,6 +21,7 @@ import {
   SettingsProfileRuleError,
   SettingsWriteBlockedError,
   type LocalModelTier,
+  type ProfileCreateInput,
   type ProfilesView,
   type ProfileSelection,
   type SettingsPatch,
@@ -138,6 +139,16 @@ async function profilesAction(run: () => Promise<ProfilesView>): Promise<Profile
   }
 }
 
+/**
+ * createProfile 那一个对象的入参收口。渲染层递来的东西在我们这边没有类型保证：重写之前
+ * 这条通道传的是三个位置参数，要是有人漏改一处调用，`input?.fromProfileId === ''` 那种判断
+ * 就会把整根字符串当成字段读——只认对象形状，其余（字符串、数组、没给）一律当「没给」，
+ * 走该档当前那条复制。
+ */
+function asCreateInput(raw: unknown): ProfileCreateInput | undefined {
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as ProfileCreateInput) : undefined
+}
+
 export function registerSettingsHandlers() {
   // 脱敏视图：密钥字段在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」
   ipcHandle('settings:get', () => getSettingsView(), () => null)
@@ -145,11 +156,12 @@ export function registerSettingsHandlers() {
   // 三档各自的方案列表（含每条的密钥状态与「当前选哪条」），一次给全
   ipcHandle('settings:listProfiles', () => listProfiles(), () => null)
 
-  // 新建：不传 fromProfileId 或传那条 id 都是照着复制，传空串才要一条全空的（密钥原样搬运，见 settingsService）
+  // 新建：界面把此刻表单上的凭据整份交过来（`values`），要不要设为当前使用也由 `setDefault` 说；
+  // `fromProfileId` 省略＝照当前那条复制，给 id＝照那条，空串＝一条全空白。密钥原样搬运的规则见 settingsService
   ipcHandle(
     'settings:createProfile',
-    (_event, capability: unknown, name?: unknown, fromProfileId?: unknown) =>
-      profilesAction(() => createProfile(capability, name, fromProfileId)),
+    (_event, capability: unknown, rawInput?: unknown) =>
+      profilesAction(() => createProfile(capability, asCreateInput(rawInput))),
     (message) => ({ profiles: null, error: message })
   )
 
