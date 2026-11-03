@@ -62,7 +62,10 @@ import {
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import { CAPABILITY_NOUN, ProfileBar } from '@/components/settings/ProfileBar'
-import { AsrProfileList } from '@/components/settings/AsrProfileList'
+import {
+  AsrProfileList,
+  type AsrProfilePane,
+} from '@/components/settings/AsrProfileList'
 import type {
   ProfileCapability,
   ProfileView,
@@ -273,6 +276,7 @@ function ApiKeyField({
   cleared,
   disabled,
   emptyHint,
+  typedHint,
   onChange,
   onClear,
 }: {
@@ -283,6 +287,8 @@ function ApiKeyField({
   disabled?: boolean
   /** 还没保存过 Key 时的说法，两个 Tab 各自不同 */
   emptyHint: string
+  /** 输入框里有字时的说法；新建草稿那一次磁盘上还没有 Key，「替换已保存的」就成了谎 */
+  typedHint?: string
   onChange: (v: string) => void
   onClear: () => void
 }) {
@@ -299,7 +305,7 @@ function ApiKeyField({
         {cleared
           ? '将在点「保存设置」后清除已保存的 Key'
           : typed
-            ? '点「保存设置」后替换已保存的 Key'
+            ? (typedHint ?? '点「保存设置」后替换已保存的 Key')
             : status === 'none'
               ? emptyHint
               : KEY_STATUS_HINT[status]}
@@ -425,18 +431,39 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     tts: '',
   })
   /**
+   * 转写那一档的凭据表单是摊开的还是收着的（#222 重写第⑤步）。
+   *
+   * 'closed'＝只有方案列表，那三格凭据和「当前使用」勾选都不出现；'edit'＝正在改列表里
+   * `editing.asr` 那一条；'new'＝一份还没落盘的新建草稿。
+   * 用户要的是「点新建一套才把输入框亮出来」，所以这三格的显示条件是这个状态，
+   * 不再只是「转写模式＝云端优先」——模式那一句管的是这一档用不用云端，跟要不要改凭据是两件事。
+   */
+  const [asrPane, setAsrPane] = useState<AsrProfilePane>('closed')
+  /**
+   * 草稿是从哪一条摊开来的，只用来决定「取消」之后表单该回到谁的样子。
+   * 不复用 `editing.asr` 记它：草稿期间那个指针必须是空串——保存时它决定这几格写进哪一条，
+   * 留着摊开前那条 id，用户点「保存设置」想建新的一套，结果是把老那条改了。
+   */
+  const [asrDraftSource, setAsrDraftSource] = useState('')
+  /**
    * 编辑表单里那颗「当前使用」开关（#222 重写第③步，只有转写这一档用）。
    * null＝还没碰过，读磁盘上那个指针；跟着「保存设置」一起落盘，所以它是草稿而不是即时写。
    * 换一条来编辑时必须回到 null，否则上一套的勾选会盖到这一套头上。
    */
   const [asrCurrentDraft, setAsrCurrentDraft] = useState<boolean | null>(null)
-  /** 磁盘上那个指针决定的值：开关显示什么、算不算「还没保存」，都以它为基准 */
+  /** 磁盘上那个指针决定的值：编辑已存在那条时，开关显示什么、算不算「还没保存」都以它为基准 */
   const asrCurrentOnDisk = !!editing.asr && editing.asr === profiles?.defaultProfileId.asr
-  /** 那颗开关此刻显示的值：没碰过就读磁盘上的指针，所以「没改」不会被读成「改成不勾」 */
-  const asrIsCurrent = asrCurrentDraft ?? asrCurrentOnDisk
+  /**
+   * 新建草稿的基准不一样：这一档现在没有「当前使用」那一条时（一条都没建过，或上一条被删掉），
+   * 建出来的这套默认就该勾上，否则用户还得再翻一次开关才能开工。
+   * 列表本来就空时那颗勾选根本不出现——主进程那边第一条自动是它，给一颗能取消的勾就是骗人。
+   */
+  const asrCurrentBaseline = asrPane === 'new' ? !(profiles?.defaultProfileId.asr ?? '') : asrCurrentOnDisk
+  /** 那颗开关此刻显示的值：没碰过就读基准值，所以「没改」不会被读成「改成不勾」 */
+  const asrIsCurrent = asrCurrentDraft ?? asrCurrentBaseline
   useEffect(() => {
     setAsrCurrentDraft(null)
-  }, [editing.asr])
+  }, [editing.asr, asrPane])
   const [restarting, setRestarting] = useState(false)
   const [restartingVoice, setRestartingVoice] = useState(false)
   const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocalSnapshot | null>(null)
@@ -468,7 +495,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         pendingKeyClear.tts ||
         // 那颗「当前使用」的勾选同样是要落盘的改动，只是它不在 `values` 里。
         // 只翻它、不动那三格的人关窗时也得被问一句，否则他的改动是静默丢的
-        asrIsCurrent !== asrCurrentOnDisk
+        asrIsCurrent !== asrCurrentBaseline
 
   /**
    * 这次保存会不会重启本地引擎。档位变了必重启，而重启要等 PyInstaller 起进程 + /health 应答
@@ -541,7 +568,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     if (pendingKeyClear[cap]) return true
     // 那颗「当前使用」的勾选不在字段里，但它同样挂在「正在编辑这一条」上：
     // 翻完它去点另一行的「编辑」，草稿会被清掉，不问一句就是静默丢
-    if (cap === 'asr' && asrIsCurrent !== asrCurrentOnDisk) return true
+    if (cap === 'asr' && asrIsCurrent !== asrCurrentBaseline) return true
     const switchedKeys = new Set<string>([KEY_FIELD[cap]])
     for (const profile of profiles?.profiles[cap] ?? []) {
       for (const key of Object.keys(profile.values)) switchedKeys.add(key)
@@ -653,8 +680,15 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       return
     }
     switchProfile(cap, profile)
+    // 点「编辑」就是「我要改这一条」的意图，那三格跟着亮出来（#222 第⑤步：转写那档平时只看到列表）
+    if (cap === 'asr') setAsrPane('edit')
   }
 
+  /**
+   * 「新建一套」当场建一条并切过去编辑——现在只剩校对、配音那两档走这条。
+   * 转写那一档改成了「点了先把凭据那三格摊开、由保存落盘」（openAsrDraft / createAsrDraft），
+   * 因为这档的表单是列表下方那三格，点一下就写盘等于让用户还没填就多出一条。
+   */
   const handleCreateProfile = async (cap: ProfileCapability): Promise<void> => {
     if (!api) return
     const list = profiles?.profiles[cap] ?? []
@@ -694,6 +728,104 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     )
   }
 
+  /**
+   * 转写模式那个下拉。除了改值，还要负责把摊开的草稿收起来：凭据那三格只在「云端优先」下出现，
+   * 留着一份看不见的新建草稿，下一次点「保存设置」就会当着用户的面建出一条他没见过的方案。
+   */
+  const handleAsrProviderChange = (provider: string) => {
+    updateField('asrProvider', provider)
+    if (provider !== 'cloud' && asrPane === 'new') cancelAsrDraft(true)
+  }
+
+  /**
+   * 「新建一套」＝把凭据那三格摊开来，成一份还没落盘的草稿（#222 重写第⑤步，只转写这一档）。
+   *
+   * 这一步**一个字节都不写磁盘**。以前这颗按钮当场就建一条，用户点完才第一次看见输入框——
+   * 想改就得改一条已经存在的方案，点错了还多出一条没人要的；现在关掉设置窗口，磁盘上什么都没有。
+   * 表单里的字保持原样：它此刻显示的是「当前使用」那一条的地址与模型，所以「同一家网关换个模型」
+   * 这个最常见的第二次配置不用重打一遍地址。Key 那一格本来就是空的（密钥从不过 IPC），
+   * 但那个「密钥已保存」的标记说的是原来那条，草稿得改口——新的一条还没拿到任何密钥。
+   */
+  const openAsrDraft = () => {
+    setAsrDraftSource(editing.asr)
+    // 指针收回空串。留着它，「保存设置」就带着那条老 id 写盘，把用户以为的「新建」变成「改老那条」
+    setEditing((prev) => ({ ...prev, asr: '' }))
+    // 「清除已保存的 Key」是冲着原来那条点的，跟这条还没建出来的新方案无关
+    setPendingKeyClear((prev) => ({ ...prev, asr: false }))
+    setKeyStates((prev) => ({ ...prev, asr: 'none' }))
+    setAsrPane('new')
+    invalidateTest('asr')
+  }
+
+  /**
+   * 收起草稿。表单必须回到摊开前那一条的样子：那三格现在是「要新建的内容」，
+   * 不收回去、下一次点「保存设置」就会把这半成品写进空指针那一档的默认那条——那是别的方案。
+   * 摊开前根本没有方案可回（0 条，或刚删掉的那条）时只收回指针，那三格留着当没归宿的输入；
+   * 那句「先新建一套」的报错会拦住保存，不会静默写错地方。
+   *
+   * 两种收法都把 `asrPane` 落回 'closed'（第⑤步验证时定下来的）：「取消这份新建」说的是「我不建了」，
+   * 这时候把有值的那三格摊在列表下面，界面就在说「正在编辑「X」那一条」，而用户从没点过它的「编辑」。
+   * 值还是要对齐到摊开前那条（`switchProfile`），因为「只改全局段」那一次保存写的是 `editing.asr` 那条。
+   */
+  const cancelAsrDraft = (viaModeSwitch?: boolean) => {
+    const source = profiles?.profiles.asr.find((profile) => profile.id === asrDraftSource)
+    setAsrDraftSource('')
+    if (source) switchProfile('asr', source)
+    else dropEditingProfile('asr')
+    setAsrPane('closed')
+    if (viaModeSwitch) {
+      // 「磁盘上是什么样子」按列表此刻的长度说，不能按「有没有摊开前那一条」说：
+      // 这一档没有「当前使用」那条时（刚删掉那条、或一条都没建过）指针是空串，`source` 找不到人，
+      // 可磁盘上照样躺着剩下的几套——那句「还是零条方案」在这种时候是谎话
+      const remaining = profiles?.profiles.asr.length ?? 0
+      toast.info(
+        source
+          ? `转写模式不是云端了，那份还没保存的新建收起来了：磁盘上没建出新方案，「${source.name}」那一条一个字没动`
+          : remaining === 0
+            ? '转写模式不是云端了，凭据那三格收起来了；刚才那份新建没有落盘，磁盘上还是零条方案'
+            : `转写模式不是云端了，凭据那三格收起来了；刚才那份新建没有落盘，磁盘上那 ${remaining} 套方案一个字没动`,
+        9000
+      )
+    }
+  }
+
+  /**
+   * 把摊开那三格落成一条新方案，只在「保存设置」打开草稿时调它。
+   *
+   * `fromProfileId: ''` 是主进程那侧「一条全空白」的暗号：凭据全部以表单为准，一家网关的
+   * API Key 不会跟着搬过来——密钥属于那一家，悄悄复制到另一套里，下一次转写按谁计价就没人说得清了。
+   * 建完立刻把表单对齐到刚建出的那条（switchProfile + 'edit'），所以这次保存的**后半段**万一失败，
+   * 用户再点一次是在改这一条，而不是又建出一条重复的。
+   */
+  const createAsrDraft = async (): Promise<ProfileView | null> => {
+    if (!api) return null
+    const before = new Set((profiles?.profiles.asr ?? []).map((profile) => profile.id))
+    const view = await runProfileAction(() =>
+      api.createProfile('asr', {
+        fromProfileId: '',
+        values: {
+          asrApiBase: values.asrApiBase,
+          asrModel: values.asrModel,
+          // 创建这里的空串是「真的没有 Key」（与保存里那个「留空＝不改」正相反，见 settingsService
+          // 的 createProfile 注释），所以照表单送过去，新建那条不该有上一家的密钥
+          asrApiKey: values.asrApiKey.trim(),
+        },
+        // 第一条自动是当前使用由主进程管；已经有别的条时，「勾了才顶掉」是这颗勾选唯一的语义
+        setDefault: asrIsCurrent,
+      })
+    )
+    if (!view) return null
+    const created = view.profiles.asr.find((profile) => !before.has(profile.id))
+    if (!created) {
+      toast.error('说好了要新建一条，可列表里没多出来。关掉设置窗口重开一次，再看磁盘上是什么样', 12000)
+      return null
+    }
+    switchProfile('asr', created)
+    setAsrPane('edit')
+    setAsrDraftSource('')
+    return created
+  }
+
   /** 改名只动 name，id 不变，所以表单内容不受影响；返回值给 ProfileBar 决定输入框是否收起 */
   const handleRenameProfile = async (
     cap: ProfileCapability,
@@ -709,8 +841,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     profileId: string
   ): Promise<boolean> => {
     if (!api) return false
-    const deletedName =
-      profiles?.profiles[cap].find((profile) => profile.id === profileId)?.name ?? ''
+    const deleted = profiles?.profiles[cap].find((profile) => profile.id === profileId)
+    const deletedName = deleted?.name ?? ''
+    // 「含它保存的 API Key」要说得有条件：这一套没填过 Key 时（自建网关、或只填了地址的草稿），
+    // 括号里那句就是凭空多出来的恐吓，用户会以为删掉了一把还在别处用的密钥
+    const keyTail = deleted && deleted.keyStatus !== 'none' ? '（含它保存的 API Key）' : ''
     const view = await runProfileAction(() => api.deleteProfile(cap, profileId))
     if (!view) return false
     // 删掉的正是「正在编辑那条」时表单上还挂着它那几个字段：留着就是让用户对着磁盘上
@@ -720,14 +855,31 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       ? (view.profiles[cap].find((profile) => profile.id === view.defaultProfileId[cap]) ??
         view.profiles[cap][0])
       : undefined
-    if (nextProfile) switchProfile(cap, nextProfile)
-    else if (wasEditing) dropEditingProfile(cap)
-    let tail: string
-    if (!wasEditing) tail = '正在编辑的那套没动'
+    if (nextProfile) {
+      // 表单换到接班那条，但摊开/收着的形状不改：从「只有列表」的状态点「删除」是这一栏的常规走法，
+      // 删完把凭据那三格硬亮出来，等于替用户点了他不点的「编辑」
+      switchProfile(cap, nextProfile)
+    } else if (wasEditing) {
+      dropEditingProfile(cap)
+      // 删到一条不剩，那三格跟着收起：留着它们是「有一条正在编辑」的假象，而这时点「保存设置」
+      // 写的是空指针那一档，主进程那边只会回「先新建一套」
+      if (cap === 'asr') setAsrPane('closed')
+    }
+    let tail: string | undefined
+    // 草稿摊开时 editing.asr 是空串，删谁都动不到表单——这句必须和「正在编辑的那套没动」分开说，
+    // 后者会把「那份还没建出来的新建」说成一条已经存在的方案
+    if (cap === 'asr' && asrPane === 'new') tail = '上面那份新建没受影响，它还没落盘'
+    // 删到一条不剩要说在最前：这一档指针为空时（没有「当前使用」那条）走的是「没在编辑」那一句，
+    // 照那个顺序说就成了「列表照旧」——而列表刚刚空了
+    else if (view.profiles[cap].length === 0)
+      tail = '这一档现在一条方案都没有了：要再建一套，点「新建一套」把那三格摊出来填好，再点「保存设置」'
+    // 「正在编辑的那套没动」只有在真有一条摊开来编辑时才成立：这一档没有「当前使用」那条时指针是空串，
+    // 界面只有列表，说「那套没动」等于凭空造出一条正在编辑的方案
+    else if (!wasEditing) tail = editing[cap] ? '正在编辑的那套没动' : '这一档现在没有正在编辑的方案'
     else if (nextProfile) tail = `表单切到「${nextProfile.name}」`
-    else
-      tail = `这一档现在一条方案都没有了，下面那几格还没有归宿：要用它先点「新建一套」，填完再点「保存设置」`
-    toast.success(`已删掉「${deletedName}」（含它保存的 API Key），${tail}`, 10000)
+    // 上面四条分支盖住了所有能走到的形状，tail 只在这些形状之外才是 undefined；
+    // 那时无条件拼「，」就会在 toast 尾巴上留一个孤零零的逗号
+    toast.success(`已删掉「${deletedName}」${keyTail}${tail ? `，${tail}` : ''}`, 10000)
     return true
   }
 
@@ -764,6 +916,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       // 「正在编辑哪一条」，留着旧列表会让保存带着一条已经不存在的 id 去写盘
       setProfiles(null)
       setEditing({ asr: '', ai: '', tts: '' })
+      // 草稿也一起收掉：窗口开着的时候那份没落盘的东西不该跨开关窗活下来，
+      // 否则下一次打开先跳出一句「有未保存的修改」，而用户根本不记得它
+      setAsrPane('closed')
+      setAsrDraftSource('')
       return
     }
     if (hydrated || !api) return
@@ -870,6 +1026,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     if (!api) return
     setSaving(true)
     try {
+      // 摊开的那份新建草稿先落成一条方案，再走下面这次保存。顺序反过来不行：那时保存里没有这条 id，
+      // 那三格会顺着空指针落到「当前使用」那条老方案上——用户点的是「存我刚建的这套」，
+      // 改掉的却是他没碰过的那一条。
+      const drafted = asrPane === 'new' ? await createAsrDraft() : null
+      if (asrPane === 'new' && !drafted) return
       const payload: Record<string, unknown> = { ...values }
       for (const kind of ['asr', 'ai', 'tts'] as const) {
         const field = KEY_FIELD[kind]
@@ -879,6 +1040,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         else if (pendingKeyClear[kind]) payload[field] = null
         else delete payload[field]
       }
+      // 那一档此刻没有正在编辑的方案（删到一条不剩、或列表没读出来），而表单里还挂着上一次读来的
+      // 接口地址与模型——第⑤步把那三格收起来之后，用户根本看不见它们，却照样跟着这次保存发出去。
+      // 主进程把「补丁里带着凭据而这一档一条方案都没有」当成「你要存却没先建」，整次保存被拦下，
+      // 界面只剩一句「请先点『新建一套』」——本机 CDP 实测：删掉最后一条方案后只改「转写语言」点保存，
+      // 盘上 asrLanguage 停在 zh，而用户从头到尾没碰过那三格。没有归宿的字段就不发。
+      // 草稿那一次例外：它正是要把这些字落成一条新方案（createAsrDraft 已经先建好了）。
+      if (!editing.asr && asrPane !== 'new') {
+        delete payload.asrApiBase
+        delete payload.asrModel
+      }
       // 这份表单要写进哪三条方案。不变式「values 里那一档的字段 ≡ editing[那一档] 那条」由
       // switchProfile 维持，所以三档一起发是对的；id 是空串（列表没读出来）的那一档不发，
       // 主进程就按该档当前默认那条落——那是列表看不见时唯一不会写错地方的走法。
@@ -886,11 +1057,18 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       for (const kind of ['asr', 'ai', 'tts'] as const) {
         if (editing[kind]) profileIds[kind] = editing[kind]
       }
+      // 刚建出来那条才是这次保存的目标：`editing` 还是点按钮那一刻闭包里的那份（同一次事件里
+      // 读不到刚 set 的 state，而草稿期间它本来就是空串），不显式指过去就写到老方案上去了
+      if (drafted) profileIds.asr = drafted.id
       if (Object.keys(profileIds).length > 0) payload.profileIds = profileIds
-      // 那颗「当前使用」开关跟着这次保存落盘：只在真的在编辑某一条时发。没碰过开关时它回发的
-      // 就是磁盘上那个指针（主进程按同一条重写一遍，等于没变），不勾则是用户明确说
-      // 「这一档现在不要当前使用的方案」——空串是合法值，不是没填。
-      if (editing.asr) payload.defaultProfileIds = { asr: asrIsCurrent ? editing.asr : '' }
+      // 那颗「当前使用」开关只在用户真翻过它时才发（#222 第⑤步验证时抓到的）：
+      // 没翻过时 asrCurrentDraft 是 null，那时 asrIsCurrent 读的是基准值——编辑**非默认**那条时
+      // 基准值就是 false，照它发等于发一个空串把磁盘上的指针清掉。用户只是进来改个接口地址，
+      // 出去之后云端转写就被拦下说「没有当前使用的方案」，而那颗勾他碰都没碰。
+      // 翻过了才发：勾＝把指针挪到正在编辑这条，不勾＝用户明确说「这一档现在不要当前使用的方案」
+      // （空串是合法值，不是没填）。草稿那一次不在这里发：建这条时 createProfile 的 setDefault 已经定过了。
+      if (asrCurrentDraft !== null && editing.asr)
+        payload.defaultProfileIds = { asr: asrCurrentDraft ? editing.asr : '' }
       const result = await api.saveSettings(payload)
       // 没写进磁盘就到此为止。后面那几步——清空 Key 输入框、更新快照、报「设置已保存」——
       // 全都建立在「存下了」之上；少弹这一句却多报一句成功，就是当着用户的面撒谎。
@@ -935,12 +1113,13 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       // 就地保存不重读就会继续显示刚换掉的那一档，看着像没保存上。这里替用户补读一次。
       if (tab === 'tts') void useVoiceStudioStore.getState().loadConfig()
       // 换档位要重启引擎（离线标志只能在启动时定），没重启成功就等于新档位还没吃到，必须说
+      const draftedNote = drafted ? `已把那三格存成新的一套「${drafted.name}」，` : ''
       if (result?.error) {
-        toast.error(result.error, 9000)
+        toast.error(`${draftedNote}${result.error}`, 9000)
       } else if (result?.tierRestart === 'done') {
-        toast.success('设置已保存，本地引擎已按新档位重启')
+        toast.success(`${draftedNote}设置已保存，本地引擎已按新档位重启`)
       } else {
-        toast.success('设置已保存')
+        toast.success(`${draftedNote}设置已保存`)
       }
     } catch {
       toast.error('保存失败')
@@ -1364,7 +1543,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 <select
                   className="settings-form-select"
                   value={values.asrProvider}
-                  onChange={(e) => updateField('asrProvider', e.target.value)}
+                  onChange={(e) => handleAsrProviderChange(e.target.value)}
                 >
                   <option value="local">本地转写（默认）</option>
                   <option value="cloud">云端优先（需配置 API Key）</option>
@@ -1372,7 +1551,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 <span className="settings-form-hint">
                   这一档决定音频是在本机转还是发去云端，对整个应用生效，不属于任何一套方案。
                   选「本地转写」时只用本机引擎，下面那套云端配置存着也不会动它；切到「云端优先」
-                  才会出现下面的方案列表和那三格凭据
+                  才会出现下面的方案列表——那三格凭据要点了「编辑」或「新建一套」才摊开
                 </span>
               </div>
               {values.asrProvider !== 'cloud' && (
@@ -1420,65 +1599,123 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <AsrProfileList
                     profiles={profiles}
                     editingId={editing.asr}
+                    pane={asrPane}
                     hasUnsavedEdits={isCapDirty('asr')}
                     busy={profileBusy}
                     onEdit={(profileId) => handleSelectProfile('asr', profileId)}
-                    onCreate={() => void handleCreateProfile('asr')}
+                    onCreate={openAsrDraft}
                     onDelete={(profileId) => handleDeleteProfile('asr', profileId)}
                   />
-                  <div className="settings-form-group">
-                    <label className="settings-form-label">API Base URL</label>
-                    <input
-                      className="settings-form-input"
-                      value={values.asrApiBase}
-                      onChange={(e) => updateField('asrApiBase', e.target.value)}
-                      placeholder="https://api.openai.com"
-                    />
-                    <span className="settings-form-hint">
-                      这套方案的接口地址，点「保存设置」只写进上面正在编辑的那一套
-                    </span>
-                  </div>
-                  <div className="settings-form-group">
-                    <label className="settings-form-label">API Key</label>
-                    <ApiKeyField
-                      value={values.asrApiKey}
-                      status={keyStates.asr}
-                      encryptable={keyStates.encryptable}
-                      cleared={pendingKeyClear.asr}
-                      emptyHint="这套方案还没有 Key：填一把，点「保存设置」才存进这一套"
-                      onChange={(v) => updateKeyField('asr', 'asrApiKey', v)}
-                      onClear={() => clearKeyField('asr', 'asrApiKey')}
-                    />
-                  </div>
-                  <div className="settings-form-group">
-                    <label className="settings-form-label">模型</label>
-                    <input
-                      className="settings-form-input"
-                      value={values.asrModel}
-                      onChange={(e) => updateField('asrModel', e.target.value)}
-                      placeholder="whisper-1"
-                    />
-                    <span className="settings-form-hint">
-                      这套方案用的模型名，列表上那行显示的就是它
-                    </span>
-                  </div>
-                  {editing.asr && (
-                    <div className="settings-form-group">
-                      <label className="settings-form-check">
+                  {/* 凭据那三格按「意图」出现（#222 重写第⑤步）：只有点了某一行的「编辑」、
+                      或点了「新建一套」把草稿摊开时才亮出来。以前它们在「云端优先」下一直挂着，
+                      用户想新建一套得先改掉眼前这条正在用的配置。 */}
+                  {asrPane !== 'closed' && (
+                    <>
+                      <div className="settings-form-group">
+                        <label className="settings-form-label">API Base URL</label>
                         <input
-                          type="checkbox"
-                          checked={asrIsCurrent}
-                          disabled={profileBusy}
-                          onChange={(e) => setAsrCurrentDraft(e.target.checked)}
+                          className="settings-form-input"
+                          value={values.asrApiBase}
+                          onChange={(e) => updateField('asrApiBase', e.target.value)}
+                          placeholder="https://api.openai.com"
                         />
-                        当前使用
-                      </label>
-                      <span className="settings-form-hint">
-                        {asrIsCurrent
-                          ? '云端转写就是按这一套走。取消勾选再点「保存设置」，这一档会暂时没有当前使用的方案，点开始转写会被拦下'
-                          : '勾上再点「保存设置」，云端转写才开始按这一套走'}
-                      </span>
-                    </div>
+                        <span className="settings-form-hint">
+                          {asrPane === 'new'
+                            ? '这几格是还没落盘的新方案：点「保存设置」才按它们建出一条新的，上面列表里已有的那几条一个字都不动'
+                            : '这套方案的接口地址，点「保存设置」只写进上面正在编辑的那一套'}
+                        </span>
+                      </div>
+                      <div className="settings-form-group">
+                        <label className="settings-form-label">API Key</label>
+                        <ApiKeyField
+                          value={values.asrApiKey}
+                          status={keyStates.asr}
+                          encryptable={keyStates.encryptable}
+                          cleared={pendingKeyClear.asr}
+                          emptyHint={
+                            asrPane === 'new'
+                              ? '这一套还没建出来，所以现在没有 Key：填一把，点「保存设置」时跟着这条一起存；不填就是这条不带密钥（自建网关本来就可能不要 Key）'
+                              : '这套方案还没有 Key：填一把，点「保存设置」才存进这一套'
+                          }
+                          typedHint={
+                            asrPane === 'new'
+                              ? '点「保存设置」时这把 Key 跟着这条新建一起存——这一套还没建出来，磁盘上没有可替换的 Key'
+                              : undefined
+                          }
+                          onChange={(v) => updateKeyField('asr', 'asrApiKey', v)}
+                          onClear={() => clearKeyField('asr', 'asrApiKey')}
+                        />
+                      </div>
+                      <div className="settings-form-group">
+                        <label className="settings-form-label">模型</label>
+                        <input
+                          className="settings-form-input"
+                          value={values.asrModel}
+                          onChange={(e) => updateField('asrModel', e.target.value)}
+                          placeholder="whisper-1"
+                        />
+                        <span className="settings-form-hint">
+                          {asrPane === 'new'
+                            ? '这套新建要用的模型名：建出来之后，上面列表那一行显示的就是它'
+                            : '这套方案用的模型名，列表上那行显示的就是它'}
+                        </span>
+                      </div>
+                      {asrPane === 'edit' ? (
+                        !!editing.asr && (
+                          <div className="settings-form-group">
+                            <label className="settings-form-check">
+                              <input
+                                type="checkbox"
+                                checked={asrIsCurrent}
+                                disabled={profileBusy}
+                                onChange={(e) => setAsrCurrentDraft(e.target.checked)}
+                              />
+                              当前使用
+                            </label>
+                            <span className="settings-form-hint">
+                              {asrIsCurrent
+                                ? '云端转写就是按这一套走。取消勾选再点「保存设置」，这一档会暂时没有当前使用的方案，点开始转写会被拦下'
+                                : '勾上再点「保存设置」，云端转写才开始按这一套走'}
+                            </span>
+                          </div>
+                        )
+                      ) : (
+                        // 列表空时这颗勾选根本不出现：第一条落盘自动就是当前使用的（主进程那句
+                        // wasEmpty），摆一颗能取消的勾等于给用户一个点了也没用的开关
+                        (profiles?.profiles.asr.length ?? 0) > 0 && (
+                          <div className="settings-form-group">
+                            <label className="settings-form-check">
+                              <input
+                                type="checkbox"
+                                checked={asrIsCurrent}
+                                disabled={profileBusy}
+                                onChange={(e) => setAsrCurrentDraft(e.target.checked)}
+                              />
+                              建好就设为当前使用
+                            </label>
+                            <span className="settings-form-hint">
+                              {asrIsCurrent
+                                ? '这套建出来就接管云端转写，上面原来那条被顶掉——下一次转写按这一套的模型和地址计价'
+                                : '不勾就还是原来那条在跑：这套先建着，什么时候要它了再进去勾上「当前使用」'}
+                            </span>
+                          </div>
+                        )
+                      )}
+                      {asrPane === 'new' && (
+                        // 用表单里那颗小胶囊的规格（列表的「编辑/删除」、「测试连接」都是它）：
+                        // 这格在表单末尾，套页脚那颗 8px/20px 的按钮会显得比整页都重
+                        <div className="settings-form-group">
+                          <button
+                            type="button"
+                            className="settings-modal__dict-update-btn"
+                            disabled={profileBusy}
+                            onClick={() => cancelAsrDraft()}
+                          >
+                            取消这份新建
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
@@ -1512,7 +1749,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 )}
                 <span className="settings-form-hint">
                   {values.asrProvider === 'cloud'
-                    ? '按上面填写的值真实走一次转写接口：上传 1 秒静音音频，花费可忽略，不需要先保存；API Key 留空时用的是正在编辑这一套已保存的那把'
+                    ? asrPane === 'new'
+                      ? '按上面填写的值真实走一次转写接口：上传 1 秒静音音频，花费可忽略，不需要先保存。但这份新建还没落盘、本来就还没有 Key，所以 Key 留空时用的是「当前使用」那一条已保存的那把——那次绿的是那一家，不等于这套新建能用'
+                      : '按上面填写的值真实走一次转写接口：上传 1 秒静音音频，花费可忽略，不需要先保存；API Key 留空时用的是正在编辑这一套已保存的那把'
                     : '只检查本机转写引擎是否在线，不发起任何网络请求；引擎没起来时点「重启本地引擎」，不用退出应用（首次要下载模型，重启可能等上一两分钟）'}
                 </span>
                 {testResults.asr && <TestResultView result={testResults.asr} />}

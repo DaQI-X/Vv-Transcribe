@@ -49,14 +49,15 @@ export async function checkTranscriptionReady(): Promise<ReadinessBlock | null> 
       return {
         message:
           view.profiles.asr.length === 0
-            ? '转写模式是「云端优先」，但一条云端转写方案都还没有。请在「转写配置」里填好接口地址、API Key 和模型，点「新建一套」；或把模式改回「本地转写」'
-            : `转写模式是「云端优先」，但那 ${view.profiles.asr.length} 套方案里现在没有「当前使用」的那一套。请在「转写配置」里编辑要用的那一条，勾上「当前使用」并保存；或把模式改回「本地转写」`,
+            ? '转写模式是「云端优先」，但一条云端转写方案都还没有。请在「转写配置」里点「新建一套」，把接口地址、API Key 和模型摊出来填好，再点「保存设置」；或把模式改回「本地转写」'
+            : `转写模式是「云端优先」，但那 ${view.profiles.asr.length} 套方案里现在没有「当前使用」的那一套。请在「转写配置」里点要用的那一行的「编辑」，勾上「当前使用」并保存；或把模式改回「本地转写」`,
         settingsTab: 'asr',
       }
     }
     if (asrKey === 'none' || !str(settings?.asrApiBase)) {
       return {
-        message: '转写模式是「云端优先」，但这套方案的 API Base 或 API Key 还没填。请补全并保存，或把模式改回「本地转写」',
+        message:
+          '转写模式是「云端优先」，但这套方案的 API Base 或 API Key 还没填。请在「转写配置」里点它的「编辑」把那几格摊出来补全，再点「保存设置」；或把模式改回「本地转写」',
         settingsTab: 'asr',
       }
     }

@@ -22,7 +22,7 @@
  * 「测试连接」那组测回落按哪一条取 Key 与地址：测出来的结论必须与真干活用的是同一套配置，
  * 否则「自检绿了、点开始配音却走了另一家」就是界面亲口撒的谎。
  */
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { app, ipcMain, type IpcMainInvokeEvent } from 'electron'
@@ -1214,6 +1214,36 @@ describe('IPC 通道（渲染层拿到的形状）', () => {
       const got = (await call('settings:save', { asrLocalModel: 'base' })) as SaveResult
       expect(got.tierRestart).toBe('not-needed')
       expect(engine.restart).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('settings:save 那句失败的话按来源分两种形状', () => {
+    it('方案的规矩没守住：送到界面的是那句出路，不是「清出磁盘空间」', async () => {
+      // 这一档一条方案都没有而补丁带着凭据——出路是界面自己那颗「新建一套」，磁盘好得很。
+      // 第⑤步那轮 CDP 实测到的是另一回事：删掉最后一条方案后只改「转写语言」点保存，
+      // 界面回的是「设置没能写入（…）。…清出磁盘空间或修好目录权限后再存一次」，
+      // 让人去查一个没坏的磁盘。`profilesErrorMessage` 早就原样透出这一类，save 这条漏了一层。
+      await writeFile(file(), v2Document({ asr: [], ai: [], tts: [] }, { asr: '', ai: '', tts: '' }))
+      await loadInto(dir)
+      await register()
+      const got = (await call('settings:save', { aiApiBase: 'https://gate.example' })) as SaveResult
+      expect(got.saveError).toBe(PROFILE_CREATE_FIRST_MESSAGE)
+      expect(got.saveError).not.toContain('磁盘')
+    })
+
+    it('真是写不进去：errno 那句和「你填的还在界面上」两句都得留着', async () => {
+      // 上一条不许把这整类一起吞掉——把目录收成只读，rename 必失败，
+      // 那时「不用重填」是唯一能安慰到人、也唯一说对了的话。
+      // 这一条跑完 stderr 会多出两句 `[Logger] Failed to write log`：同一只读目录里 logs/ 也建不出来，
+      // 正是「日志写不进去，但那句 saveError 照样送到界面」的证据，不是测试坏了
+      await chmod(dir, 0o500)
+      try {
+        const got = (await call('settings:save', { asrApiBase: 'https://gate.example' })) as SaveResult
+        expect(got.saveError).toContain('设置没能写入')
+        expect(got.saveError).toContain('不用重填')
+      } finally {
+        await chmod(dir, 0o700)
+      }
     })
   })
 })
