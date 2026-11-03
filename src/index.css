@@ -1697,6 +1697,23 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-muted);
 }
 
+/* 「当前使用」那颗勾选：整行是 label，点字也算点勾 */
+.settings-form-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-form-check input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--brand-blue);
+}
+
 .settings-form-hint {
   display: block;
   font-size: 11px;

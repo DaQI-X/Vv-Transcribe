@@ -531,8 +531,9 @@ export interface ElectronAPI {
    */
   getSettings: () => Promise<Record<string, unknown> | null>
   /**
-   * tierRestart：本次保存改了本地档位时的引擎重启结果。比的是该档**当前默认那条**换前换后
-   * （引擎驻留的就是那条的档位）——补丁用 profileIds 指到别的方案时档位没变，回 not-needed。
+   * tierRestart：本次保存改了本地档位时的引擎重启结果。档位是**全局段**那一份 `asrLocalModel`
+   * （重写第①步起它不在任何一条方案里），所以比的是它换前换后，跟这次编辑的是哪条方案无关；
+   * 只改凭据的保存动不到这个值，回 not-needed。
    * busy / failed 时 error 是必须展示给用户的原因——这两种情况下新档位其实还没生效。
    * saveError 非 null 时这次压根没写进磁盘，界面必须留在原状（不许清空 Key 输入框、不许报已保存）。
    * settings 为 null 是更坏的一档：连脱敏视图都没读出来，界面不许据此把密钥状态标成「全是 none」。

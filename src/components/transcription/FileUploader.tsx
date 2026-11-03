@@ -15,9 +15,6 @@ import { checkTranscriptionReady, raiseReadinessBlock } from '@/utils/readiness'
 import { formatBytes } from '@/utils/formatBytes'
 import { formatTime } from '@/utils/formatTime'
 import { StudioTabs } from './StudioTabs'
-import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
-import { switchableProfiles } from '@/stores/useProfileStore'
-import { useProfiles } from '@/hooks/useProfiles'
 
 /** 链接这条链路的状态机：input（还没解析）→ resolving → ready（二选一）→ downloading */
 type UrlStage = 'input' | 'resolving' | 'ready' | 'downloading'
@@ -65,14 +62,6 @@ function formatDuration(seconds: number | null): string {
   return seconds === null ? '时长未知' : formatTime(seconds)
 }
 
-/**
- * 这一格切的是「当前使用的转写配置」，不是这一次用哪套：一套方案里带着模式（云端还是本地）、
- * 接口地址、Key、模型和语言，换一套等于这五样一起换——所以话术跟配音页那条下拉同一个口径。
- * 同一句既当 title 也当面上的提示，别写两处。
- */
-const ASR_PROFILE_HINT =
-  '切换的是「当前使用的转写配置」：模式（云端还是本地）、接口地址、Key、模型和语言跟着一起换，下一次转写起效'
-
 export function FileUploader() {
   const { setFile, setStatus, setProgress, setStage, setModelInfo, setJobId, setAsrProvider, setAsrLanguage, addSegment, setSegments, setError, setUnsubscribeProgress, reset } = useTranscriptionStore()
   const api = getElectronAPI()
@@ -87,12 +76,6 @@ export function FileUploader() {
   const [mediaProgress, setMediaProgress] = useState<MediaProgress | null>(null)
   const [pickedHeight, setPickedHeight] = useState<number | null>(null)
   const [canceling, setCanceling] = useState(false)
-  /**
-   * 转写这一档的方案列表（进这一页时重读一次，读的动作在 useProfiles 里）。
-   * 只有一套、或这次列表没读出来时长不出那一格——判断和下拉共用 switchableProfiles 一个函数。
-   */
-  const asrProfiles = useProfiles('asr').profiles
-  const showAsrProfileSwitch = !!switchableProfiles(asrProfiles)
   /**
    * 会话目录里是媒体 + 浏览器 cookies，主进程只在「还会话」时才删。
    * ref 而不是 state：卸载清理要读到最新值，用 state 会拿到闭包里的旧值。
@@ -639,20 +622,6 @@ export function FileUploader() {
               </button>
             </>
           )}
-        </div>
-      )}
-
-      {showAsrProfileSwitch && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 14 }}>
-          <ProfileSwitchSelect
-            capability="asr"
-            layout="inline"
-            disabled={urlStage === 'resolving' || urlStage === 'downloading'}
-            title={ASR_PROFILE_HINT}
-          />
-          <span className="settings-form-hint" style={{ maxWidth: 480, textAlign: 'center' }}>
-            {ASR_PROFILE_HINT}
-          </span>
         </div>
       )}
 

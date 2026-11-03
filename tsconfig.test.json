@@ -35,5 +35,12 @@
     而那些源码依赖的环境声明（fluent-ffmpeg 之类）物理上就住在这个目录里，
     不列进来会出现「pnpm build 是绿的、pnpm test 类型检查是红的」两套真相。
   */
-  "include": ["tests", "electron/main/types"]
+  "include": ["tests", "electron/main/types"],
+  /*
+    readinessTranscription 归 tsconfig.test.renderer.json：它按相对路径拉进 utils/readiness，
+    而那条 import 链要 DOM 与 jsx（本程序的 lib 只有 ES2023，主进程源码正是靠这一点才和
+    node 的 fetch 类型对得上）。一份测试只该被一套编译选项检查，所以在这里把它摘出去，
+    而不是给本程序补上它用不上的 lib。
+  */
+  "exclude": ["tests/readinessTranscription.test.ts"]
 }

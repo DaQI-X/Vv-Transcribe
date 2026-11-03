@@ -1,7 +1,8 @@
 /**
  * 设置弹窗组件
  * 提供五个 Tab：
- * - 转写配置（asr）：转写模式（本地/云端）、API Base、API Key、模型
+ * - 转写配置（asr）：转写模式（本地/云端）、本地档位、转写语言这三项是本机的全局值；
+ *   选「云端优先」才露出「云端转写方案」那一列和它的三项凭据（API Base、API Key、模型）
  * - 校对配置（ai）：AI 服务商、API Base、API Key、模型、本地词典版本与更新
  * - 配音配置（tts）：先选「云端接口 / 本地配音」这一档，再按档展开要填的字段——
  *   云端档是接口地址、API Key（两者留空＝沿用校对那套）、配音模型、配音音色；
@@ -15,10 +16,11 @@
  * 三把 API Key 与其他字段不同：主进程只回状态不回值，所以输入框不回显、留空＝不修改、
  * 清除要走「清除已保存的 Key」按钮（点保存才生效）。
  *
- * 每档能力各有最多 3 套方案（#222 第③步）：顶部的「配置方案」条决定表单此刻在编辑哪一套，
- * 「当前使用」与「正在编辑」是两件事——编辑一套没在用的配置不影响正在跑的活，
- * 点「设为当前使用」才切过去。方案的落盘（列表/增删改）走 settings:listProfiles 那五条通道，
- * 字段内容的落盘仍然只有「保存设置」这一个动作。
+ * 每档能力各有最多 3 套方案（#222），但三档的界面不一样：校对与配音顶部是一条「配置方案」条，
+ * 新建 / 改名 / 删除 / 设为当前使用四颗按钮当场落盘；转写换成了只在「云端优先」下出现的
+ * 「云端转写方案」一列（AsrProfileList），只有新建 / 编辑 / 删除，而「当前使用」是编辑表单里
+ * 那颗勾选，跟着「保存设置」一起写。两处的口径相同：「当前使用」与「正在编辑」是两件事——
+ * 编辑一套没在用的配置不影响正在跑的活。字段内容的落盘只有「保存设置」这一个动作。
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
@@ -60,6 +62,7 @@ import {
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import { CAPABILITY_NOUN, ProfileBar } from '@/components/settings/ProfileBar'
+import { AsrProfileList } from '@/components/settings/AsrProfileList'
 import type {
   ProfileCapability,
   ProfileView,
@@ -421,6 +424,19 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     ai: '',
     tts: '',
   })
+  /**
+   * 编辑表单里那颗「当前使用」开关（#222 重写第③步，只有转写这一档用）。
+   * null＝还没碰过，读磁盘上那个指针；跟着「保存设置」一起落盘，所以它是草稿而不是即时写。
+   * 换一条来编辑时必须回到 null，否则上一套的勾选会盖到这一套头上。
+   */
+  const [asrCurrentDraft, setAsrCurrentDraft] = useState<boolean | null>(null)
+  /** 磁盘上那个指针决定的值：开关显示什么、算不算「还没保存」，都以它为基准 */
+  const asrCurrentOnDisk = !!editing.asr && editing.asr === profiles?.defaultProfileId.asr
+  /** 那颗开关此刻显示的值：没碰过就读磁盘上的指针，所以「没改」不会被读成「改成不勾」 */
+  const asrIsCurrent = asrCurrentDraft ?? asrCurrentOnDisk
+  useEffect(() => {
+    setAsrCurrentDraft(null)
+  }, [editing.asr])
   const [restarting, setRestarting] = useState(false)
   const [restartingVoice, setRestartingVoice] = useState(false)
   const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocalSnapshot | null>(null)
@@ -449,7 +465,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       : JSON.stringify(values) !== snapshot ||
         pendingKeyClear.asr ||
         pendingKeyClear.ai ||
-        pendingKeyClear.tts
+        pendingKeyClear.tts ||
+        // 那颗「当前使用」的勾选同样是要落盘的改动，只是它不在 `values` 里。
+        // 只翻它、不动那三格的人关窗时也得被问一句，否则他的改动是静默丢的
+        asrIsCurrent !== asrCurrentOnDisk
 
   /**
    * 这次保存会不会重启本地引擎。档位变了必重启，而重启要等 PyInstaller 起进程 + /health 应答
@@ -511,14 +530,26 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    * 切走转写的方案只会冲掉转写那几格，用户在配音里刚敲的字一个都不会丢；
    * 拿全局判断就会把「配音还没存」说成「切转写方案要丢改动」——那是假警报，
    * 用户会照着它多点一次「先去保存」，甚至存下半成品。
-   * 字段归哪一档沿用 kindOfField 那条前缀规矩，不再抄一份字段表（抄来的表会和主进程那张分叉）。
+   *
+   * 参与比对的键只有「换一条方案会被盖掉的那些」：直接读列表里那些方案的字段名，
+   * 不再抄一份字段表（抄来的表会和主进程那张分叉）。转写的「模式／本地档位／转写语言」
+   * 是全局段、不在方案里，切换碰不到它们——把它们也算成「切了会丢」既是假警报，
+   * 又让「丢掉并切换」那句变成谎（那三格根本盖不掉）。
+   * Key 那一格另外算：切过去会显式清成空串，输入框里的字是真会没的。
    */
   const isCapDirty = (cap: ProfileCapability): boolean => {
     if (pendingKeyClear[cap]) return true
+    // 那颗「当前使用」的勾选不在字段里，但它同样挂在「正在编辑这一条」上：
+    // 翻完它去点另一行的「编辑」，草稿会被清掉，不问一句就是静默丢
+    if (cap === 'asr' && asrIsCurrent !== asrCurrentOnDisk) return true
+    const switchedKeys = new Set<string>([KEY_FIELD[cap]])
+    for (const profile of profiles?.profiles[cap] ?? []) {
+      for (const key of Object.keys(profile.values)) switchedKeys.add(key)
+    }
     try {
       const disk = JSON.parse(snapshot) as SettingsValues
       return (Object.keys(values) as (keyof SettingsValues)[]).some(
-        (field) => kindOfField(field) === cap && values[field] !== disk[field]
+        (field) => switchedKeys.has(field) && values[field] !== disk[field]
       )
     } catch {
       return false
@@ -633,27 +664,32 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     // 只带列表里真的存在的那条：删到一条不剩之后，编辑指针可能还留着刚删掉的鬼 id，
     // 而主进程对「按 id 找不到人」是报错而不是落回默认。
     const source = list.find((profile) => profile.id === editing[cap])
+    // 「新建一套」要的是「把表单上这几格存成一条方案」，所以把此刻的输入整份带过去：
+    // 主进程按 CAPABILITY_FIELDS 只挑这一档的键，多带的（模式/档位/语言那三个全局段、别档的字段）
+    // 一律被忽略——渲染层因此不用自己再存一张字段表，两处各存迟早分叉。
+    // Key 那一格反着来：输入框空着说的是「没填新 Key」，不是「把抄来的那把抹掉」，
+    // 所以只有真填了、或真点了「清除已保存的 Key」时才带上它，其余交给复制原样搬运密文。
+    const createValues: Record<string, string> = {}
+    for (const [key, value] of Object.entries(values)) {
+      if (typeof value === 'string') createValues[key] = value
+    }
+    const keyField = KEY_FIELD[cap]
+    if (values[keyField].trim() || pendingKeyClear[cap]) createValues[keyField] = values[keyField].trim()
+    else delete createValues[keyField]
     const view = await runProfileAction(() =>
-      api.createProfile(cap, { fromProfileId: source?.id || undefined })
+      api.createProfile(cap, { fromProfileId: source?.id || undefined, values: createValues })
     )
     if (!view) return
     const created = view.profiles[cap].find((profile) => !before.has(profile.id))
     if (!created) return
     switchProfile(cap, created)
-    // 原来一条都没有时，主进程手里没有可复制的对象，建出来的是这一档的初值；
-    // 这时说「照原来那套填好了」就是在编。第一条落盘即当前使用，这句倒是真的。
-    if (list.length === 0) {
-      toast.success(
-        `已新建「${created.name}」并设为当前使用的这套${CAPABILITY_NOUN[cap]}配置：这一档之前一条方案都没有，下面这几格是它的初值，填完点「保存设置」才算存下`,
-        10000
-      )
-      return
-    }
-    const copiedName = source?.name ?? list.find((profile) => profile.id === view.defaultProfileId[cap])?.name
+    // 这句话不能说「照原来那套填好了」：内容来自表单此刻的那几格，不是来自被复制的那条。
+    // 表单与来源一致时它才碰巧为真，而用户点「新建一套」要的正是在这里改完再存成另一套。
+    const keyTail = created.keyStatus === 'none' ? '' : '（连 API Key 一起带过来了）'
     toast.success(
-      `已新建「${created.name}」并切过来编辑：接口地址、模型${
-        created.keyStatus === 'none' ? '' : '和已保存的 API Key'
-      }都照${copiedName ? `「${copiedName}」` : '原来那套'}填好了，改完点「保存设置」才算存下`,
+      list.length === 0
+        ? `这一档之前一条方案都没有：已按表单上这几格建好「${created.name}」${keyTail}，它就是当前使用的那套；之后的改动照旧要点「保存设置」`
+        : `已按表单上这几格新建「${created.name}」${keyTail}并切过来编辑，改完点「保存设置」才算存下`,
       10000
     )
   }
@@ -788,7 +824,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         setEditing({ ...view.defaultProfileId })
       } else if (settingsRead) {
         toast.error(
-          '配置方案列表这次没读出来。下面填的是磁盘上的真值，方案没丢；新建 / 改名 / 删除先不要用，关掉设置窗口重开一次再看',
+          '配置方案列表这次没读出来。下面填的是磁盘上「当前使用」那一条的真值，方案没丢；新建 / 编辑 / 删除（校对和配音还有改名）先不要用，关掉设置窗口重开一次再看',
           15000
         )
       }
@@ -851,6 +887,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         if (editing[kind]) profileIds[kind] = editing[kind]
       }
       if (Object.keys(profileIds).length > 0) payload.profileIds = profileIds
+      // 那颗「当前使用」开关跟着这次保存落盘：只在真的在编辑某一条时发。没碰过开关时它回发的
+      // 就是磁盘上那个指针（主进程按同一条重写一遍，等于没变），不勾则是用户明确说
+      // 「这一档现在不要当前使用的方案」——空串是合法值，不是没填。
+      if (editing.asr) payload.defaultProfileIds = { asr: asrIsCurrent ? editing.asr : '' }
       const result = await api.saveSettings(payload)
       // 没写进磁盘就到此为止。后面那几步——清空 Key 输入框、更新快照、报「设置已保存」——
       // 全都建立在「存下了」之上；少弹这一句却多报一句成功，就是当着用户的面撒谎。
@@ -1319,7 +1359,6 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         <div className="settings-modal__body">
           {tab === 'asr' && (
             <>
-              {renderProfileBar('asr')}
               <div className="settings-form-group">
                 <label className="settings-form-label">转写模式</label>
                 <select
@@ -1330,6 +1369,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <option value="local">本地转写（默认）</option>
                   <option value="cloud">云端优先（需配置 API Key）</option>
                 </select>
+                <span className="settings-form-hint">
+                  这一档决定音频是在本机转还是发去云端，对整个应用生效，不属于任何一套方案。
+                  选「本地转写」时只用本机引擎，下面那套云端配置存着也不会动它；切到「云端优先」
+                  才会出现下面的方案列表和那三格凭据
+                </span>
               </div>
               {values.asrProvider !== 'cloud' && (
                 <div className="settings-form-group">
@@ -1371,40 +1415,73 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   API Key 走 AI 校对
                 </span>
               </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">API Base URL</label>
-                <input
-                  className="settings-form-input"
-                  value={values.asrApiBase}
-                  onChange={(e) => updateField('asrApiBase', e.target.value)}
-                  placeholder="https://api.openai.com"
-                  disabled={values.asrProvider !== 'cloud'}
-                />
-                <span className="settings-form-hint">云端转写接口地址</span>
-              </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">API Key</label>
-                <ApiKeyField
-                  value={values.asrApiKey}
-                  status={keyStates.asr}
-                  encryptable={keyStates.encryptable}
-                  cleared={pendingKeyClear.asr}
-                  disabled={values.asrProvider !== 'cloud'}
-                  emptyHint="云端转写的 API 密钥，留空则使用本地转写"
-                  onChange={(v) => updateKeyField('asr', 'asrApiKey', v)}
-                  onClear={() => clearKeyField('asr', 'asrApiKey')}
-                />
-              </div>
-              <div className="settings-form-group">
-                <label className="settings-form-label">模型</label>
-                <input
-                  className="settings-form-input"
-                  value={values.asrModel}
-                  onChange={(e) => updateField('asrModel', e.target.value)}
-                  placeholder="whisper-1"
-                  disabled={values.asrProvider !== 'cloud'}
-                />
-              </div>
+              {values.asrProvider === 'cloud' && (
+                <>
+                  <AsrProfileList
+                    profiles={profiles}
+                    editingId={editing.asr}
+                    hasUnsavedEdits={isCapDirty('asr')}
+                    busy={profileBusy}
+                    onEdit={(profileId) => handleSelectProfile('asr', profileId)}
+                    onCreate={() => void handleCreateProfile('asr')}
+                    onDelete={(profileId) => handleDeleteProfile('asr', profileId)}
+                  />
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">API Base URL</label>
+                    <input
+                      className="settings-form-input"
+                      value={values.asrApiBase}
+                      onChange={(e) => updateField('asrApiBase', e.target.value)}
+                      placeholder="https://api.openai.com"
+                    />
+                    <span className="settings-form-hint">
+                      这套方案的接口地址，点「保存设置」只写进上面正在编辑的那一套
+                    </span>
+                  </div>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">API Key</label>
+                    <ApiKeyField
+                      value={values.asrApiKey}
+                      status={keyStates.asr}
+                      encryptable={keyStates.encryptable}
+                      cleared={pendingKeyClear.asr}
+                      emptyHint="这套方案还没有 Key：填一把，点「保存设置」才存进这一套"
+                      onChange={(v) => updateKeyField('asr', 'asrApiKey', v)}
+                      onClear={() => clearKeyField('asr', 'asrApiKey')}
+                    />
+                  </div>
+                  <div className="settings-form-group">
+                    <label className="settings-form-label">模型</label>
+                    <input
+                      className="settings-form-input"
+                      value={values.asrModel}
+                      onChange={(e) => updateField('asrModel', e.target.value)}
+                      placeholder="whisper-1"
+                    />
+                    <span className="settings-form-hint">
+                      这套方案用的模型名，列表上那行显示的就是它
+                    </span>
+                  </div>
+                  {editing.asr && (
+                    <div className="settings-form-group">
+                      <label className="settings-form-check">
+                        <input
+                          type="checkbox"
+                          checked={asrIsCurrent}
+                          disabled={profileBusy}
+                          onChange={(e) => setAsrCurrentDraft(e.target.checked)}
+                        />
+                        当前使用
+                      </label>
+                      <span className="settings-form-hint">
+                        {asrIsCurrent
+                          ? '云端转写就是按这一套走。取消勾选再点「保存设置」，这一档会暂时没有当前使用的方案，点开始转写会被拦下'
+                          : '勾上再点「保存设置」，云端转写才开始按这一套走'}
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
               <div className="settings-form-group">
                 <label className="settings-form-label">配置自检</label>
                 <button
@@ -1435,7 +1512,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 )}
                 <span className="settings-form-hint">
                   {values.asrProvider === 'cloud'
-                    ? '按上面填写的值真实走一次转写接口：上传 1 秒静音音频，花费可忽略，不需要先保存；API Key 留空时用的是已保存的那把'
+                    ? '按上面填写的值真实走一次转写接口：上传 1 秒静音音频，花费可忽略，不需要先保存；API Key 留空时用的是正在编辑这一套已保存的那把'
                     : '只检查本机转写引擎是否在线，不发起任何网络请求；引擎没起来时点「重启本地引擎」，不用退出应用（首次要下载模型，重启可能等上一两分钟）'}
                 </span>
                 {testResults.asr && <TestResultView result={testResults.asr} />}

@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.renderer.tsbuildinfo",
+    "target": "es2023",
+    /*
+      这一份是 tests 的第二套编译选项，只为「要吃渲染层代码」的那几份测试存在。
+      DOM 与 jsx 是被 utils/readiness 拖进来的：它 import 了 hooks/useElectronAPI（读 window）
+      和 components/ui/Toast.tsx（JSX）。
+      为什么不并进 tsconfig.test.json：那边同时按相对路径拉着主进程源码，而 lib 里加上 DOM 之后
+      `fetch` 的类型从 node 的 undici 版换成 lib.dom 版，connectionTestService 里那句
+      `{ body: buffer }` 当场报「Buffer 不能赋给 BlobPart」——同一份生产代码在两套 lib 下给出两种结论，
+      正是这个仓库一直避免的「第二套真相」。分开两份程序，各自的 lib 才是自洽的。
+      preload/index.d.ts 也要列进来：`Window['electronAPI']` 那个全局声明就住在那儿，
+      不列就是「Cannot find name」那一类假错（tsconfig.app.json 同样列了它）。
+    */
+    "lib": ["ES2023", "DOM"],
+    "jsx": "react-jsx",
+    "module": "esnext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "ignoreDeprecations": "6.0",
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@electron/*": ["electron/*"]
+    }
+  },
+  "include": ["tests/readinessTranscription.test.ts", "electron/preload/index.d.ts"]
+}

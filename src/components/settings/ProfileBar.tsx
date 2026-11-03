@@ -1,6 +1,10 @@
 /**
  * 一挡能力的「配置方案」条（#222 第③步）
  *
+ * 现在只有校对与配音用它：转写那一档在 #222 重写第③步换成了 AsrProfileList——
+ * 一条转写方案只剩凭据三项，「当前使用」改由编辑表单里那颗勾选随保存落盘，
+ * 这一条上的四颗按钮也就没有一颗是给转写用的。
+ *
  * 它只管两件事：选哪一套来编辑，以及新建 / 改名 / 删除 / 设为当前使用这四个动作的
  * 界面状态（输入框开合、两个二次确认）。磁盘上的读写全在 SettingsModal 那边，
  * 因为「切方案要丢掉未保存的修改」这件事只有它知道。
@@ -27,7 +31,7 @@ export const CAPABILITY_NOUN: Record<ProfileCapability, string> = {
 const ROW_STYLE = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }
 
 /** 未保存修改时挡住「换一套来编辑」，等用户确认 */
-type PendingAction = { kind: 'switch'; profileId: string } | { kind: 'create' } | null
+type PendingAction = { kind: 'switch'; profileId: string } | null
 
 export interface ProfileBarProps {
   capability: ProfileCapability
@@ -81,20 +85,15 @@ export function ProfileBar({
     onSelect(profileId)
   }
 
-  const requestCreate = async () => {
-    if (hasUnsavedEdits) {
-      setPending({ kind: 'create' })
-      return
-    }
-    await onCreate()
-  }
-
+  /**
+   * 新建不再问「未保存的修改要不要丢」：它带的正是表单此刻这几格（SettingsModal 把输入
+   * 整份交给主进程，主进程只挑这一档的键），点下去是「把我现在填的存成另一套」，没有东西要丢。
+   */
   const runPending = async () => {
     const action = pending
     setPending(null)
     if (!action) return
-    if (action.kind === 'switch') onSelect(action.profileId)
-    else await onCreate()
+    onSelect(action.profileId)
   }
 
   /** 改名没成功时输入框得留着，用户改两个字就能再点一次；所以这里要等回话 */
@@ -156,7 +155,7 @@ export function ProfileBar({
           className="settings-modal__dict-update-btn"
           style={ROW_STYLE}
           disabled={busy || atLimit}
-          onClick={() => void requestCreate()}
+          onClick={() => void onCreate()}
         >
           <Plus size={12} />
           新建一套
@@ -303,9 +302,7 @@ export function ProfileBar({
       {pending && (
         <div style={{ ...ROW_STYLE, marginTop: 6 }}>
           <span className="settings-form-hint">
-            {pending.kind === 'switch'
-              ? `切到「${pendingTargetName}」会丢掉这套里还没保存的修改。`
-              : '新建一套会切到新那套上去，这套里还没保存的修改会丢掉。'}
+            切到「{pendingTargetName}」会丢掉这套里还没保存的修改。
           </span>
           <button
             type="button"
@@ -313,7 +310,7 @@ export function ProfileBar({
             style={{ ...ROW_STYLE, padding: '4px 12px', fontSize: 11 }}
             onClick={() => void runPending()}
           >
-            {pending.kind === 'switch' ? '丢掉并切换' : '丢掉并新建'}
+            丢掉并切换
           </button>
           <button
             type="button"

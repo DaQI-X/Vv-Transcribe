@@ -198,8 +198,8 @@ export function registerSettingsHandlers() {
       try {
         const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
         const saved = await saveSettings(patch)
-        // after 也必须按「下一次转写真的会用哪一条」读，不能读这次写进去的那一条：
-        // saved 说的是被编辑的那条方案，编辑的不是当前默认那条时，引擎用的还是原来那条，
+        // 档位是全局段那一份 `asrLocalModel`，不待在任何一条方案里，所以 before/after 都重新
+        // load 一次磁盘值来比，不能拿「这次写进去的是哪条方案」来推：只改凭据的保存动不到这个值，
         // 档位没变却重启一次、还说「新档位才会生效」，就是把用户的好几次转写白白打断了
         const after = normalizeLocalModel((await loadSettings()).asrLocalModel)
         const tierRestart = await applyTierChange(before, after)

@@ -291,9 +291,9 @@ async function waitForReady(): Promise<'ready' | 'foreign' | 'died' | 'timeout'>
 
 /**
  * 启动 Python ASR 服务。
- * `tierOverride` 只有 ensureLocalTier 会传：转写按界面上选中的那套方案取档位，
- * 而那次 spawn 的联网许可要按**这一档**的缓存情况定；不传就是应用启动那条路，
- * 按该档当前默认方案定（与设置页那个「重启本地引擎」按钮同一个口径）。
+ * `tierOverride` 只有 ensureLocalTier 会传：那一次转写要用的档位取自全局段的 `asrLocalModel`
+ * （#222 重写后它不属于任何一套方案），而那次 spawn 的联网许可要按**这一档**的缓存情况定；
+ * 不传就是应用启动那条路，按磁盘上已保存的那个档位起（与设置页那颗「重启本地引擎」同一个口径）。
  */
 export async function startASRService(tierOverride?: LocalModelTier): Promise<boolean> {
   const binaryPath = getBinaryPath()
@@ -540,11 +540,11 @@ export function restartLocalEngine(tier?: LocalModelTier): Promise<EngineActionR
 }
 
 /**
- * 让「这次转写要用的档位」和「引擎是以哪个档位起的」对上（#222 第②步带来的新问题）：
- * 多套配置之后，第二套转写方案可以选 small 而当前默认那套是 base，可引擎的联网许可
- * （HF_HUB_OFFLINE）是 spawn 时按 base 的缓存情况钉死的。照原样把请求发下去，small 会
- * 报「模型没下载完」却又下不下来——正是设置页换档必须重启引擎的那个死结，只是这次
- * 换档的不是用户，是两套方案。
+ * 让「这次转写要用的档位」和「引擎是以哪个档位起的」对上：档位是全局段那个 `asrLocalModel`
+ * （#222 重写后它不在任何一套方案里），而引擎的联网许可（`HF_HUB_OFFLINE`）是 spawn 时
+ * 按当时的档位钉死的。照原样把请求发下去，换过去的那档会报「模型没下载完」却又下不下来
+ * ——正是设置页换档必须重启引擎的那个死结。设置里点「保存」时已经自动对过一次，这里兜的是
+ * 那一次没做成的场合：有转写正在跑时保存刻意不重启（截断正在推的流），或者自动重启失败。
  *
  * 引擎没在跑时这里什么都不做：那是「引擎根本没运行」，归 getASRServiceStatus 那句报给用户，
  * 重启一次也解决不了缺失的二进制。

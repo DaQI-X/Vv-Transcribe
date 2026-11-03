@@ -41,9 +41,22 @@ export async function checkTranscriptionReady(): Promise<ReadinessBlock | null> 
   if (provider === 'cloud') {
     const asrKey = keyStatus(settings, 'asrKeyStatus')
     if (asrKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'asr' }
+    // 那一档现在到底有没有「当前使用」的方案，得单独问一次：getSettings 视图里空 Key
+    // 既可能是「一条方案都没建过」，也可能是「建了几套但没选定用哪套」，而这两句的出路完全不同。
+    // 列表没读出来时不做这个判断（拿不到证据就别编原因），落回下面那句已有的说法。
+    const view = await api.listProfiles().catch(() => null)
+    if (view && !view.defaultProfileId.asr) {
+      return {
+        message:
+          view.profiles.asr.length === 0
+            ? '转写模式是「云端优先」，但一条云端转写方案都还没有。请在「转写配置」里填好接口地址、API Key 和模型，点「新建一套」；或把模式改回「本地转写」'
+            : `转写模式是「云端优先」，但那 ${view.profiles.asr.length} 套方案里现在没有「当前使用」的那一套。请在「转写配置」里编辑要用的那一条，勾上「当前使用」并保存；或把模式改回「本地转写」`,
+        settingsTab: 'asr',
+      }
+    }
     if (asrKey === 'none' || !str(settings?.asrApiBase)) {
       return {
-        message: '转写模式是「云端优先」，但 API Base 或 API Key 还没填。请补全并保存，或把模式改回「本地转写」',
+        message: '转写模式是「云端优先」，但这套方案的 API Base 或 API Key 还没填。请补全并保存，或把模式改回「本地转写」',
         settingsTab: 'asr',
       }
     }

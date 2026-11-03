@@ -80,9 +80,10 @@ export async function runTranscription(
   }
 
   logger.info(TAG, 'Using local Whisper model', { tier: config.localModel || 'base' })
-  // 档位对不上就先换一次引擎：多套配置之后「这次用哪套」是逐请求定的，而引擎能不能联网
-  // 下载权重是 spawn 时按当时的档位钉死的。停在这儿继续发请求，拿回来的是「模型没下载完」
-  // 却又下不下来的死结（设置页换档要重启引擎，正是同一个理由）。
+  // 档位对不上就先换一次引擎：这个档位是全局段的 `asrLocalModel`，而引擎能不能联网下载权重
+  // 是 spawn 时按当时的档位钉死的。停在这儿继续发请求，拿回来的是「模型没下载完」
+  // 却又下不下来的死结（设置页换档要重启引擎，正是同一个理由；这里兜的是那次自动重启
+  // 被跳过或失败的场合——转写任务在跑时保存不重启，下一次请求就得在这儿对齐）。
   const tier = normalizeLocalModel(config.localModel)
   const aligned = await ensureLocalTier(tier)
   if (!aligned.ok) {
