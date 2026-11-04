@@ -84,7 +84,7 @@ export const useProfileStore = create<ProfileStoreState>((set, get) => ({
     // 列表是进这一页时缓存的那份，别处（设置窗口）刚删掉这条时它还在：
     // 拿一个已经不存在的 id 去发「设为当前使用」，主进程会照实报错，界面就不自己编一句
     if (!target) {
-      toast.error('这条方案已经不在列表里了，重开这一页再看一次', 12000)
+      toast.error('这条方案已经不在列表里了，重开这一页再看一次', 9000)
       return false
     }
     const api = getElectronAPI()
@@ -93,11 +93,11 @@ export const useProfileStore = create<ProfileStoreState>((set, get) => ({
     try {
       const result = await api.setDefaultProfile(capability, profileId)
       if (result?.error) {
-        toast.error(result.error, 12000)
+        toast.error(result.error, 9000)
         return false
       }
       if (!result?.profiles) {
-        toast.error(UNCERTAIN, 12000)
+        toast.error(UNCERTAIN, 9000)
         return false
       }
       get().applyView(result.profiles)
@@ -105,12 +105,12 @@ export const useProfileStore = create<ProfileStoreState>((set, get) => ({
       // 这一句和设置页那颗「设为当前使用」是同一套话：说的都是长期选择换了哪条
       toast.success(
         `已把「${target.name}」设为当前使用的${noun}配置，下一次${noun}就按这套干活`,
-        8000
+        6000
       )
       return true
     } catch {
       // 正常走不到（IPC 都收在 guard 里）；真走到就是通道本身炸了，也要说得出「没改成」
-      toast.error(UNCERTAIN, 12000)
+      toast.error(UNCERTAIN, 9000)
       return false
     } finally {
       set({ switching: { ...get().switching, [capability]: false } })

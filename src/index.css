@@ -31,6 +31,8 @@
   --brand-blue-hover: #1440e1;
   --brand-teal: #1b55f5;
   --brand-teal-light: rgba(27, 85, 245, 0.08);
+  --brand-blue-ring: rgba(27, 85, 245, 0.22);
+  --brand-blue-glow: rgba(27, 85, 245, 0.16);
 
   --bg-page: #F5F7FA;
   --bg-card: #FFFFFF;
@@ -56,6 +58,8 @@
   --brand-blue-hover: #599dff;
   --brand-teal: #3378ff;
   --brand-teal-light: rgba(51, 120, 255, 0.15);
+  --brand-blue-ring: rgba(51, 120, 255, 0.34);
+  --brand-blue-glow: rgba(51, 120, 255, 0.26);
 
   --bg-page: #0A0A0A;
   --bg-card: #1A1A1A;
@@ -1612,6 +1616,12 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   overflow: hidden;
 }
 
+/* 「新建API接入／编辑API接入」：盖在设置面板之上，只装三格加一颗勾选。
+   比外面那层窄一档，两层叠着时用户才分得清自己在跟哪个窗口说话 */
+.asr-profile-dialog {
+  width: 420px;
+}
+
 @keyframes settings-modal-in {
   from { opacity: 0; transform: scale(0.95) translateY(10px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
@@ -1859,6 +1869,136 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .settings-modal__dict-update-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 「云端转写方案」的一行：模型名 · 域名 靠左，徽标和两颗动作靠右，整行不换行。
+   名字再长也只截断名称区——上一版让它换行，结果「编辑 / 删除」被顶到第二行，
+   三行列表看起来像六行 */
+.asr-profile-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+/* 「当前使用」那条：一圈发光边框。原来它是夹在模型名和域名中间加粗的四个字，
+   长名字一来就被挤得忽左忽右，用户说「太靠左很突兀」 */
+.asr-profile-row--current {
+  border-color: var(--brand-blue);
+  background: var(--brand-teal-light);
+  box-shadow: 0 0 0 1px var(--brand-blue-ring), 0 0 14px var(--brand-blue-glow);
+}
+
+/* 名称区：模型名和域名各让一半——两边都是「只缩不涨」，短的时候贴着排，长的时候一起截断。
+   上一版两样塞在同一个 span 里，长模型名一来连域名都被省略号吃了；再早一版让整行换行，
+   「编辑 / 删除」被顶到第二行。用户分辨两套云端配置靠的就是这两样，谁也不能整个不见 */
+.asr-profile-row__label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.asr-profile-row__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.asr-profile-row__host {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.asr-profile-row__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.asr-profile-row__chip {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--brand-blue);
+  background: var(--bg-card);
+}
+
+/* 删除的二次确认：挂在被点那一行下面，而不是长在整栏末尾——
+   上一版点「删除」后那句确认在「新建API接入」和两段提示底下，得往下滑才看到「确定删除」 */
+.asr-confirm-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 8px;
+  z-index: 30;
+  width: 268px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-card);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.asr-confirm-pop::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  right: 16px;
+  width: 8px;
+  height: 8px;
+  transform: rotate(45deg);
+  border-top: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-card);
+}
+
+.asr-confirm-pop__text {
+  display: block;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.asr-confirm-pop__actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.asr-confirm-pop__danger {
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--error-color);
+  background: transparent;
+  font-size: 11px;
+  color: var(--error-color);
+  cursor: pointer;
+  transition: var(--app-transition);
+  font-family: var(--font-sans);
+}
+
+.asr-confirm-pop__danger:hover {
+  background: var(--error-color);
+  color: #fff;
+}
+
+.asr-confirm-pop__danger:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }

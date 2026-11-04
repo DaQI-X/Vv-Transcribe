@@ -7,12 +7,13 @@
  * 给它一份假 electronAPI 就能把三种结局分开钉住。
  *
  * 钉的是「三件事不能互换」：
- * ① 一条方案都没建过 → 说「点新建一套，把那三格摊出来填好，再点保存设置」；
- * ② 建了几套但没有「当前使用」那一条 → 说「点那一行的编辑、勾上当前使用再保存」，并把条数说出口；
+ * ① 一条方案都没建过 → 说「点新建API接入，在弹窗里把那三格填好，点弹窗底部的保存」；
+ * ② 建了几套但没有「当前使用」那一条 → 说「点那一行的编辑、在弹窗里勾上当前使用再点保存」，并把条数说出口；
  * ③ 列表都没读回来 → 不编原因，落回那句已有的「API Base 或 Key 还没填」。
  * ②和③最容易写反：读不到证据时照样报「没选方案」，等于界面替用户编一个他没做过的操作。
- * 三句都还要钉住「动作顺序和第⑤步的界面一致」：那三格从第⑤步起只在草稿/编辑里出现，
- * 所以出路得先点「新建一套」或「编辑」把格子摊出来——只说「去填 API Base」是把用户支到一个看不见的输入框前。
+ * 三句都还要钉住「动作顺序和第⑥步的界面一致」：那三格从第⑥步起只活在小弹窗里，落盘的是弹窗
+ * 自己那颗「保存」而不是右下角的「保存设置」——说错一颗，用户就会在面板上找一个不存在的输入框，
+ * 或者填完弹窗又去点外面那颗、等一个永远不出现的「已保存」。
  * 后三条钉的是这段判据只管云端——本地转写不读方案列表，删空方案不影响它。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -66,7 +67,7 @@ afterEach(() => {
 })
 
 describe('checkTranscriptionReady 的云端方案分支', () => {
-  it('一条方案都没建过：说「新建一套」，并把落点指到转写配置', async () => {
+  it('一条方案都没建过：说「新建API接入」，并把落点指到转写配置', async () => {
     api.getSettings.mockResolvedValue(cloudSettings())
     api.listProfiles.mockResolvedValue(profilesView([], ''))
 
@@ -74,16 +75,18 @@ describe('checkTranscriptionReady 的云端方案分支', () => {
 
     expect(blocked?.settingsTab).toBe('asr')
     expect(blocked?.message).toContain('一条云端转写方案都还没有')
-    expect(blocked?.message).toContain('新建一套')
-    // 第⑤步起那三格只在草稿里出现，所以出路必须先把「点新建一套摊开格子」说出口，
-    // 而不是让用户去填一个他在界面上根本看不到的输入框
-    expect(blocked?.message).toContain('把接口地址、API Key 和模型摊出来填好')
-    expect(blocked?.message).toContain('再点「保存设置」')
+    expect(blocked?.message).toContain('新建API接入')
+    // 第⑥步起那三格只活在小弹窗里，所以出路必须先把「点新建API接入、在弹窗里填」说出口，
+    // 而不是让用户去填一个他在面板上根本看不到的输入框
+    expect(blocked?.message).toContain('在弹窗里把接口地址、API Key 和模型填好')
+    // 落盘的是弹窗自己那颗「保存」：指到右下角「保存设置」就等于让用户白点一颗碰不到凭据的按钮
+    expect(blocked?.message).toContain('点弹窗底部的「保存」')
+    expect(blocked?.message).not.toContain('保存设置')
     // 这句不许顺手把②那句带出来：用户没建过方案，谈不上「勾上当前使用」
     expect(blocked?.message).not.toContain('没有「当前使用」的那一套')
   })
 
-  it('建了三套但没有「当前使用」那一条：改成「勾上当前使用」，并把条数说出口', async () => {
+  it('建了三套但没有「当前使用」那一条：改成「在弹窗里勾上当前使用再保存」，并把条数说出口', async () => {
     api.getSettings.mockResolvedValue(cloudSettings())
     api.listProfiles.mockResolvedValue(profilesView(['a', 'b', 'c'], ''))
 
@@ -91,7 +94,7 @@ describe('checkTranscriptionReady 的云端方案分支', () => {
 
     expect(blocked?.message).toContain('那 3 套方案里现在没有「当前使用」的那一套')
     expect(blocked?.message).toContain('点要用的那一行的「编辑」')
-    expect(blocked?.message).toContain('勾上「当前使用」')
+    expect(blocked?.message).toContain('在弹窗里勾上「当前使用」并点「保存」')
     expect(blocked?.message).not.toContain('一条云端转写方案都还没有')
   })
 
@@ -104,7 +107,7 @@ describe('checkTranscriptionReady 的云端方案分支', () => {
 
     expect(api.listProfiles).toHaveBeenCalledTimes(1)
     expect(blocked?.message).toContain('API Base 或 API Key 还没填')
-    expect(blocked?.message).toContain('点它的「编辑」把那几格摊出来补全')
+    expect(blocked?.message).toContain('点它的「编辑」，在弹窗里把那几格补全并点「保存」')
     expect(blocked?.message).not.toMatch(/方案都还没有|没有「当前使用」/)
   })
 
