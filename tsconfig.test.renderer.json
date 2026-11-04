@@ -37,5 +37,9 @@
       "@electron/*": ["electron/*"]
     }
   },
-  "include": ["tests/readinessTranscription.test.ts", "electron/preload/index.d.ts"]
+  "include": [
+    "tests/readinessTranscription.test.ts",
+    "tests/readinessProfiles.test.ts",
+    "electron/preload/index.d.ts"
+  ]
 }

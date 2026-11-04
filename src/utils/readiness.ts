@@ -7,6 +7,8 @@ import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { hasInAppDownload, missingBinaryHint, missingModelHint } from '@/utils/localTtsEngines'
+import { PROFILE_CAP_SPEC } from '@/utils/profileSpec'
+import type { ProfileCapability } from '@/types/settingsProfile'
 
 export interface ReadinessBlock {
   message: string
@@ -30,6 +32,40 @@ function keyStatus(settings: Record<string, unknown> | null, field: string): Key
   return raw === 'encrypted' || raw === 'plaintext' || raw === 'unreadable' ? raw : 'none'
 }
 
+/** 拦下之后打开的那个设置 Tab 对用户的叫法（与 SettingsModal 的 TAB_TITLES 同一份说法） */
+const READY_TAB_LABEL: Record<ProfileCapability, string> = {
+  asr: '转写配置',
+  ai: '校对配置',
+  tts: '配音配置',
+}
+
+/**
+ * 「这一档开不了工」其实有两种，出路不一样，必须分开说：
+ * 一条方案都没建过（去点「新建API接入」），和建了几套却没选定哪套（进那一行勾上「当前使用」）。
+ * 判据只能问方案列表——脱敏视图里那把空 Key 两种都可能是原因，说错的那句会把用户领到一条走不通的出路上。
+ * 列表没读出来时返回 null：拿不到证据就不编原因，由调用方落回那句本来就说得出结果的话。
+ *
+ * 三档共用这一处（#222 重写第⑧步：列表与弹窗三档同一套 UI，拦人的话也必须是同一套），
+ * 所以出路里只提「弹窗里那颗保存」，不再提右下角的「保存设置」——凭据落不落盘跟它无关了。
+ */
+async function noCurrentProfileMessage(
+  api: Window['electronAPI'],
+  cap: ProfileCapability,
+  lead: string,
+  fields: string,
+  tail: string
+): Promise<string | null> {
+  const view = await api.listProfiles().catch(() => null)
+  if (!view || view.defaultProfileId[cap]) return null
+  const activity = PROFILE_CAP_SPEC[cap].activity
+  const tab = READY_TAB_LABEL[cap]
+  const body =
+    view.profiles[cap].length === 0
+      ? `${lead}一条${activity}方案都还没有：在「${tab}」里点「新建API接入」，在弹窗里把${fields}填好，点弹窗底部的「保存」`
+      : `${lead}那 ${view.profiles[cap].length} 套方案里现在没有「当前使用」的那一套：在「${tab}」里点要用的那一行的「编辑」，在弹窗里勾上「当前使用」再点「保存」`
+  return `${body}${tail}`
+}
+
 export async function checkTranscriptionReady(): Promise<ReadinessBlock | null> {
   const api = getElectronAPI()
   if (!api) return null
@@ -41,19 +77,14 @@ export async function checkTranscriptionReady(): Promise<ReadinessBlock | null> 
   if (provider === 'cloud') {
     const asrKey = keyStatus(settings, 'asrKeyStatus')
     if (asrKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'asr' }
-    // 那一档现在到底有没有「当前使用」的方案，得单独问一次：getSettings 视图里空 Key
-    // 既可能是「一条方案都没建过」，也可能是「建了几套但没选定用哪套」，而这两句的出路完全不同。
-    // 列表没读出来时不做这个判断（拿不到证据就别编原因），落回下面那句已有的说法。
-    const view = await api.listProfiles().catch(() => null)
-    if (view && !view.defaultProfileId.asr) {
-      return {
-        message:
-          view.profiles.asr.length === 0
-            ? '转写模式是「云端优先」，但一条云端转写方案都还没有。请在「转写配置」里点「新建API接入」，在弹窗里把接口地址、API Key 和模型填好，点弹窗底部的「保存」；或把模式改回「本地转写」'
-            : `转写模式是「云端优先」，但那 ${view.profiles.asr.length} 套方案里现在没有「当前使用」的那一套。请在「转写配置」里点要用的那一行的「编辑」，在弹窗里勾上「当前使用」并点「保存」；或把模式改回「本地转写」`,
-        settingsTab: 'asr',
-      }
-    }
+    const blocked = await noCurrentProfileMessage(
+      api,
+      'asr',
+      '转写模式是「云端优先」，但',
+      '接口地址、API Key 和模型',
+      '；或把模式改回「本地转写」'
+    )
+    if (blocked) return { message: blocked, settingsTab: 'asr' }
     if (asrKey === 'none' || !str(settings?.asrApiBase)) {
       return {
         message:
@@ -80,8 +111,16 @@ export async function checkCorrectionReady(): Promise<ReadinessBlock | null> {
   const aiKey = keyStatus(settings, 'aiKeyStatus')
   if (aiKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'ai' }
   if (aiKey === 'none') {
+    const blocked = await noCurrentProfileMessage(
+      api,
+      'ai',
+      'AI 校对靠的是云端方案，',
+      '服务商、接口地址、API Key 和模型',
+      '；也可以关掉这一页改走不依赖 Key 的本地校对'
+    )
     return {
-      message: 'AI 校对需要先配置 API Key，请在「校对配置」里填写',
+      message:
+        blocked ?? 'AI 校对需要先配置 API Key：请在「校对配置」里点那一行的「编辑」，在弹窗里填一把 Key 并点「保存」',
       settingsTab: 'ai',
     }
   }
@@ -168,8 +207,17 @@ export async function checkVoiceReady(overrides: VoiceOverrides = {}): Promise<R
   if (!usable(ttsKey) && !usable(aiKey)) {
     if (ttsKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'tts' }
     if (aiKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'ai' }
+    const blocked = await noCurrentProfileMessage(
+      api,
+      'tts',
+      '配音引擎是「云端接口」，',
+      '接口地址、API Key、配音模型和音色',
+      '；也可以在「校对配置」里填一把 Key 供两边共用，或把「配音引擎」换成「本地配音」'
+    )
     return {
-      message: '字幕配音需要 API Key：可以在「配音配置」里单独填一把，也可以在「校对配置」里填一把供两边共用',
+      message:
+        blocked ??
+        '字幕配音需要 API Key：请在「配音配置」里点那一行的「编辑」，在弹窗里填一把 Key 并点「保存」；也可以在「校对配置」里填一把供两边共用',
       settingsTab: 'tts',
     }
   }
@@ -182,7 +230,7 @@ export async function checkVoiceReady(overrides: VoiceOverrides = {}): Promise<R
       : null
   if (missing) {
     return {
-      message: `字幕配音还缺「${missing}」——可以在配音页那一栏直接填，也可以在「设置 → 配音配置」里填好并保存`,
+      message: `字幕配音还缺「${missing}」——可以在配音页那一栏直接填，也可以在「设置 → 配音配置」的方案列表里点那一行的「编辑」，在弹窗里补上并点「保存」`,
       settingsTab: 'tts',
     }
   }

@@ -1616,9 +1616,9 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   overflow: hidden;
 }
 
-/* 「新建API接入／编辑API接入」：盖在设置面板之上，只装三格加一颗勾选。
+/* 「新建API接入／编辑API接入」：盖在设置面板之上，只装这一档的那几格凭据加一颗勾选。
    比外面那层窄一档，两层叠着时用户才分得清自己在跟哪个窗口说话 */
-.asr-profile-dialog {
+.profile-dialog {
   width: 420px;
 }
 
@@ -1873,10 +1873,10 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   cursor: not-allowed;
 }
 
-/* 「云端转写方案」的一行：模型名 · 域名 靠左，徽标和两颗动作靠右，整行不换行。
+/* 方案列表的一行（三档共用这一套样式）：模型名 · 域名 靠左，徽标和两颗动作靠右，整行不换行。
    名字再长也只截断名称区——上一版让它换行，结果「编辑 / 删除」被顶到第二行，
    三行列表看起来像六行 */
-.asr-profile-row {
+.profile-row {
   position: relative;
   display: flex;
   align-items: center;
@@ -1888,7 +1888,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 /* 「当前使用」那条：一圈发光边框。原来它是夹在模型名和域名中间加粗的四个字，
    长名字一来就被挤得忽左忽右，用户说「太靠左很突兀」 */
-.asr-profile-row--current {
+.profile-row--current {
   border-color: var(--brand-blue);
   background: var(--brand-teal-light);
   box-shadow: 0 0 0 1px var(--brand-blue-ring), 0 0 14px var(--brand-blue-glow);
@@ -1897,7 +1897,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 /* 名称区：模型名和域名各让一半——两边都是「只缩不涨」，短的时候贴着排，长的时候一起截断。
    上一版两样塞在同一个 span 里，长模型名一来连域名都被省略号吃了；再早一版让整行换行，
    「编辑 / 删除」被顶到第二行。用户分辨两套云端配置靠的就是这两样，谁也不能整个不见 */
-.asr-profile-row__label {
+.profile-row__label {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
@@ -1908,14 +1908,14 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   white-space: nowrap;
 }
 
-.asr-profile-row__name {
+.profile-row__name {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.asr-profile-row__host {
+.profile-row__host {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1923,14 +1923,14 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-muted);
 }
 
-.asr-profile-row__actions {
+.profile-row__actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
 }
 
-.asr-profile-row__chip {
+.profile-row__chip {
   padding: 2px 8px;
   border-radius: 6px;
   font-size: 11px;
@@ -1940,7 +1940,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 /* 删除的二次确认：挂在被点那一行下面，而不是长在整栏末尾——
    上一版点「删除」后那句确认在「新建API接入」和两段提示底下，得往下滑才看到「确定删除」 */
-.asr-confirm-pop {
+.profile-confirm-pop {
   position: absolute;
   top: calc(100% + 8px);
   right: 8px;
@@ -1953,7 +1953,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
 }
 
-.asr-confirm-pop::before {
+.profile-confirm-pop::before {
   content: '';
   position: absolute;
   top: -5px;
@@ -1966,14 +1966,14 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   background: var(--bg-card);
 }
 
-.asr-confirm-pop__text {
+.profile-confirm-pop__text {
   display: block;
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-secondary);
 }
 
-.asr-confirm-pop__actions {
+.profile-confirm-pop__actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
@@ -1981,7 +1981,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   margin-top: 10px;
 }
 
-.asr-confirm-pop__danger {
+.profile-confirm-pop__danger {
   padding: 4px 12px;
   border-radius: 8px;
   border: 1px solid var(--error-color);
@@ -1993,12 +1993,12 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   font-family: var(--font-sans);
 }
 
-.asr-confirm-pop__danger:hover {
+.profile-confirm-pop__danger:hover {
   background: var(--error-color);
   color: #fff;
 }
 
-.asr-confirm-pop__danger:disabled {
+.profile-confirm-pop__danger:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }

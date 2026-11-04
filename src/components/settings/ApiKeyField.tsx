@@ -1,12 +1,12 @@
 /**
  * API Key 那一格（三档共用，#222 重写第⑥步从 SettingsModal 里搬出来）。
  *
- * 搬的原因只有一个：转写的「新建API接入／编辑」弹窗也要摆这一格，而 SettingsModal 不能
- * 反过来 import 自己的子组件。搬过来之后它同时给两个落点用——面板里（校对、配音）和弹窗里（转写）。
+ * 第⑥步从 SettingsModal 里搬出来时，转写的弹窗要先用这一格；第⑧步三档的凭据都进了同一个弹窗，
+ * 面板上再没有这一格，于是它只剩 `ProfileDialog` 一个调用点。仍然独立成组件是因为它那段三态提示
+ * （有字／点了「清除」／两者都没）容易写错，而写错就是拿用户的密钥开玩笑。
  *
  * 三态不变：有字＝保存时替换、点「清除」＝保存时清空、两者都没＝整个键不发送，磁盘上那把不动。
- * 「保存」那两个字是参数（`saveLabel`）：面板里点的是右下角「保存设置」，弹窗里点的是它自己的
- * 「保存」，而这两句落盘的是不同的东西——把话术写死成一处，另一处就成谎。
+ * 「保存」那两个字是参数（`saveLabel`）：这一格跟着哪颗按钮落盘，只有那颗按钮自己说得清。
  */
 import { useState } from 'react'
 import { Eye, EyeOff, Trash2, TriangleAlert } from 'lucide-react'
@@ -69,8 +69,8 @@ export interface ApiKeyFieldProps {
   emptyHint: string
   /** 输入框里有字时的说法；新建那一次磁盘上还没有 Key，「替换已保存的」就成了谎 */
   typedHint?: string
-  /** 这一格跟着哪颗按钮落盘：面板里是「保存设置」，转写弹窗里是它自己的「保存」 */
-  saveLabel?: string
+  /** 这一格跟着哪颗按钮落盘：话术里那颗按钮的名字必须和真的那颗一致 */
+  saveLabel: string
   onChange: (v: string) => void
   onClear: () => void
 }
@@ -83,7 +83,7 @@ export function ApiKeyField({
   disabled,
   emptyHint,
   typedHint,
-  saveLabel = '保存设置',
+  saveLabel,
   onChange,
   onClear,
 }: ApiKeyFieldProps) {

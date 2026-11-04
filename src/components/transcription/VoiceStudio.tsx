@@ -28,6 +28,7 @@ import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
 import { switchableProfiles, useProfileStore } from '@/stores/useProfileStore'
 import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
+import { profileRowTitle } from '@/utils/profileSpec'
 import { formatBytes } from '@/utils/formatBytes'
 import { formatTime } from '@/utils/formatTime'
 import {
@@ -400,8 +401,8 @@ export function VoiceStudio() {
               </div>
               <p className="voice-studio__hint">
                 {/* 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 下一次」 */}
-                {'这一格切的是「当前使用的配音配置」：那套的接口地址、Key、模型和引擎（云端还是本地）都跟着换。' +
-                  '下一次配音起效，正在跑的这一批还是原来那套。'}
+                {'这一格切的是「当前使用的配音配置」：那套的接口地址、Key、配音模型和音色都跟着换。' +
+                  '下一次配音起效，正在跑的这一批还是原来那套。走不走云端由「设置 → 配音配置」里那一格决定，切方案不会改它。'}
               </p>
             </>
           )}
@@ -492,7 +493,7 @@ export function VoiceStudio() {
           <div className="voice-studio__config">
             {!showProfileSelect && currentProfile && (
               <>
-                配音方案 <code>{currentProfile.name}</code>
+                配音方案 <code>{profileRowTitle('tts', currentProfile)}</code>
                 {' · '}
               </>
             )}

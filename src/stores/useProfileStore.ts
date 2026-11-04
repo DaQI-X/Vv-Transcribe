@@ -3,9 +3,10 @@
  *
  * 为什么不各页面各存一份：这一格做的事只有一个口径——同一条 `settings:setDefaultProfile`、
  * 同一句成功提示、同一套失败话术。写进页面就是几份，改一句话要记得改几处，那种东西一定漂移。
- * 现在真按它切换的只有校对弹窗和配音页两处（转写首页那条下拉在 #222 重写第③步撤了，
- * 那一档的「当前使用」改到设置表单里那颗勾选，走 `settings:save`）；asr 那一份 slice
- * 仍然跟着 `listProfiles` 一起刷，因为一次读回来的就是三档，拆开存反而是两份真相。
+ * 现在真按它切换的只有校对方式弹窗和配音页两处（转写首页那条下拉在 #222 重写第③步撤了，
+ * 三档的「当前使用」如今都在设置那个弹窗里勾、由弹窗自己那颗「保存」落盘，
+ * 走 `settings:save` / `createProfile`）；asr 那一份 slice 仍然跟着 `listProfiles` 一起刷，
+ * 因为一次读回来的就是三档，拆开存反而是两份真相。
  *
  * 三条口径：
  * - 切的是「当前使用」这条**长期**选择，不是单次覆盖：改的是磁盘上的 `defaultProfileId`，
@@ -18,7 +19,7 @@
 import { create } from 'zustand'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
-import { CAPABILITY_NOUN } from '@/components/settings/ProfileBar'
+import { CAPABILITY_NOUN, profileRowTitle } from '@/utils/profileSpec'
 import type { ProfileCapability, ProfileView, ProfilesView } from '@/types/settingsProfile'
 
 const CAPABILITIES: readonly ProfileCapability[] = ['asr', 'ai', 'tts']
@@ -102,9 +103,11 @@ export const useProfileStore = create<ProfileStoreState>((set, get) => ({
       }
       get().applyView(result.profiles)
       const noun = CAPABILITY_NOUN[capability]
-      // 这一句和设置页那颗「设为当前使用」是同一套话：说的都是长期选择换了哪条
+      // 名字念的是设置页列表那一行显示的（模型名优先，没模型才退方案名）：
+      // 方案名建那条时按当时的模型落定、之后不跟着改，照 `name` 说就成了「已切到 whisper-large-v3」
+      // 而设置那一行写着刚改的模型名——同一个动作在两个地方报两个名字
       toast.success(
-        `已把「${target.name}」设为当前使用的${noun}配置，下一次${noun}就按这套干活`,
+        `已把「${profileRowTitle(capability, target)}」设为当前使用的${noun}配置，下一次${noun}就按这套干活`,
         6000
       )
       return true

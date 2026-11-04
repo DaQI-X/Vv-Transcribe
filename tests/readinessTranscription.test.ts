@@ -94,7 +94,7 @@ describe('checkTranscriptionReady 的云端方案分支', () => {
 
     expect(blocked?.message).toContain('那 3 套方案里现在没有「当前使用」的那一套')
     expect(blocked?.message).toContain('点要用的那一行的「编辑」')
-    expect(blocked?.message).toContain('在弹窗里勾上「当前使用」并点「保存」')
+    expect(blocked?.message).toContain('在弹窗里勾上「当前使用」再点「保存」')
     expect(blocked?.message).not.toContain('一条云端转写方案都还没有')
   })
 

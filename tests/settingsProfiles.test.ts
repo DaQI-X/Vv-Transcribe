@@ -497,7 +497,7 @@ describe('保存：全局段、落到哪一条、以及「先新建一套」', (
     expect(await keptNames()).toEqual(['settings.json'])
   })
 
-  it('这一档 0 条方案却带着凭据来保存：报「先新建一套」，磁盘一个字不动', async () => {
+  it('这一档 0 条方案却带着凭据来保存：报「先新建API接入」，磁盘一个字不动', async () => {
     await service.deleteProfile('asr', 'asr-work')
     await service.deleteProfile('asr', 'asr-default')
     const before = await readFile(file(), 'utf-8')
@@ -1239,7 +1239,9 @@ describe('IPC 通道（渲染层拿到的形状）', () => {
 
   describe('settings:save 那句失败的话按来源分两种形状', () => {
     it('方案的规矩没守住：送到界面的是那句出路，不是「清出磁盘空间」', async () => {
-      // 这一档一条方案都没有而补丁带着凭据——出路是界面自己那颗「新建一套」，磁盘好得很。
+      // 这一档一条方案都没有而补丁带着凭据——出路是那一栏那颗「新建API接入」，磁盘好得很。
+      // 第⑧步起三档的凭据都只从弹窗进来、由弹窗自己落盘，界面正常操作走不到这条闸门；
+      // 这里直连 IPC 钉的是主进程侧的不变量：绕过弹窗往 settings:save 塞凭据也得先建一条。
       // 第⑤步那轮 CDP 实测到的是另一回事：删掉最后一条方案后只改「转写语言」点保存，
       // 界面回的是「设置没能写入（…）。…清出磁盘空间或修好目录权限后再存一次」，
       // 让人去查一个没坏的磁盘。`profilesErrorMessage` 早就原样透出这一类，save 这条漏了一层。
