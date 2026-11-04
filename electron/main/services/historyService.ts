@@ -164,6 +164,15 @@ export interface HistoryResult {
   error?: string
 }
 
+export interface HistoryListResult {
+  /**
+   * null＝这本账此刻拿不到（读不动、或它比这一版新）；[] 是「读过了，确实一条都没有」。
+   * 把前者写成后者就是 #277 那个坑：界面显示「还没有过记录」，用户以为自己没跑过作业。
+   */
+  items: HistoryItem[] | null
+  error: string | null
+}
+
 /**
  * 内存里那本账。null＝还没读过盘；[]＝读过，确实一条都没有。
  * 后面所有写盘都从这份改，所以每个入口都得先进 runExclusive。
@@ -380,11 +389,19 @@ export async function addHistoryRecord(input: NewHistoryRecord): Promise<boolean
   }
 }
 
+/**
+ * 「拿不到这本账」要说得出的一句话。三种原因（读不动、内容解不开又改不动名、它比这一版新）
+ * 在界面上是同一件事：别改它。具体是哪一种在 app.log 里那三条各有的话里说得更准，
+ * 这一句只负责不再把「读不出来」演成「你还没跑过作业」。
+ */
+const UNREADABLE = '历史记录现在读不出来，先别改它（详情看应用日志）'
+
 /** 列出来给界面。看不懂的行不显示，但也不会被改写掉 */
-export async function listHistory(): Promise<HistoryItem[]> {
+export async function listHistory(): Promise<HistoryListResult> {
   try {
     const rows = await loadRows()
-    if (!rows) return []
+    // null 是「拿不到」，不是「没有」——这一格一旦被折成 []，界面就开始替用户记不起他跑过什么
+    if (!rows) return { items: null, error: UNREADABLE }
     const records = rows.map(toRecord).filter((row): row is HistoryRecord => row !== null)
     records.sort(byNewest)
     const items: HistoryItem[] = []
@@ -403,19 +420,23 @@ export async function listHistory(): Promise<HistoryItem[]> {
         productAvailable: productPath === null ? false : await exists(productPath),
       })
     }
-    return items
+    return { items, error: null }
   } catch (err) {
     logger.warn(TAG, 'List failed', { detail: errnoDetail(err) })
-    return []
+    return { items: null, error: UNREADABLE }
   }
 }
 
 /**
- * 留住这份的产物：把主进程记着的那个原件搬进 records/keep/。
- * 已经另存过也照样搬——另存到哪是用户自己挑的，我们既不掌握它会不会被删，
+ * 界面上那一颗「留住」：这一条能留的两样一起留——产物按主进程记着的那个原件搬进
+ * records/keep/，稿子正文用这一刻调用方交进来的那一份。整段在一个排他块里、一次写盘：
+ * 两份引用要么一起进账，要么都别进，免得界面那一勾亮成「留住了」而盘上只有一半。
+ *
+ * 已经另存过也照样搬产物——另存到哪是用户自己挑的，我们既不掌握它会不会被删，
  * 也不该把自己的账本押在那个路径上。代价是一份副本，界面上要说清「这是又存了一份」。
  */
-export async function keepHistoryProduct(id: string): Promise<HistoryResult> {
+export async function keepHistory(id: string, draftText?: string): Promise<HistoryResult> {
+  const body = typeof draftText === 'string' ? draftText : ''
   try {
     return await runExclusive(async () => {
       const rows = await loadRows()
@@ -423,48 +444,41 @@ export async function keepHistoryProduct(id: string): Promise<HistoryResult> {
       const index = rows.findIndex((row) => toRecord(row)?.id === id)
       if (index < 0) return { ok: false, error: '这条记录已经不在了' }
       const record = toRecord(rows[index]) as HistoryRecord
-      if (!record.source) return { ok: false, error: '这一类没有产物可以留' }
-      if (!(await exists(record.source))) {
-        return { ok: false, error: '原件已经被清掉了（临时目录只保 24 小时），只能重跑一次' }
-      }
-      const name = safeName(record.source)
-      await atomicCopy(record.source, keepFile(record.id, name))
-      const next = [...rows]
-      next[index] = { ...record, kept: { ...record.kept, product: name } }
-      await writeRows(next)
-      logger.info(TAG, 'Product kept', { id, name })
-      return { ok: true }
-    })
-  } catch (err) {
-    logger.warn(TAG, 'Keep product failed', { detail: errnoDetail(err) })
-    return { ok: false, error: '这份产物没能留住' }
-  }
-}
+      const kept = { ...record.kept }
+      let wrote = false
+      /** 没能留住的那件事要说得出：原件被清扫收走时用户需要知道的是「只能重跑」，不是「没勾上」 */
+      let missed: string | null = null
 
-/**
- * 留住这份的稿子正文。文本由调用方在这一刻交进来（渲染层手上那份就是当前会话的稿子），
- * 记账的时候绝不落它——那是「全文按需」这条口径的全部内容。
- */
-export async function keepHistoryDraft(id: string, text: string): Promise<HistoryResult> {
-  const body = typeof text === 'string' ? text : ''
-  if (body.trim() === '') return { ok: false, error: '这一条没有可以留的稿子' }
-  try {
-    return await runExclusive(async () => {
-      const rows = await loadRows()
-      if (!rows) return { ok: false, error: '历史记录读不出来，先别改它' }
-      const index = rows.findIndex((row) => toRecord(row)?.id === id)
-      if (index < 0) return { ok: false, error: '这条记录已经不在了' }
-      const record = toRecord(rows[index]) as HistoryRecord
-      await atomicWriteBytes(keepFile(record.id, DRAFT_NAME), body)
+      // 已经留过的产物不再搬第二次：那份副本已经在 keep/ 下面了，再读原件只会撞上「原件早被清了」
+      if (record.source !== null && record.kept.product === null) {
+        if (await exists(record.source)) {
+          const name = safeName(record.source)
+          await atomicCopy(record.source, keepFile(record.id, name))
+          kept.product = name
+          wrote = true
+        } else {
+          missed = '原件已经被清掉了（临时目录只保 24 小时），只能重跑一次'
+        }
+      }
+      // 正文只在这一刻从渲染层手里过桥：记账的时候它从没在盘上待过——那是「全文按需」这句的全部含义。
+      // 已经留过稿子也照写一遍：用户可能是改过稿子之后再点这一勾的，留的该是他手上这一份。
+      if (body.trim() !== '') {
+        await atomicWriteBytes(keepFile(record.id, DRAFT_NAME), body)
+        kept.draft = DRAFT_NAME
+        wrote = true
+      }
+
+      if (!wrote) return { ok: false, error: missed ?? '这一条没有可以留住的东西' }
       const next = [...rows]
-      next[index] = { ...record, kept: { ...record.kept, draft: DRAFT_NAME } }
+      next[index] = { ...record, kept }
       await writeRows(next)
-      logger.info(TAG, 'Draft kept', { id, chars: body.length })
-      return { ok: true }
+      logger.info(TAG, 'Copies kept', { id, product: kept.product !== null, chars: body.length })
+      // 留住了一半也照实说：稿子进了盘、产物没跟上，那句原因比一句「已留住」有用
+      return missed ? { ok: false, error: missed } : { ok: true }
     })
   } catch (err) {
-    logger.warn(TAG, 'Keep draft failed', { detail: errnoDetail(err) })
-    return { ok: false, error: '稿子没能留住' }
+    logger.warn(TAG, 'Keep failed', { detail: errnoDetail(err) })
+    return { ok: false, error: '这份东西没能留住' }
   }
 }
 
@@ -515,14 +529,25 @@ export async function deleteHistoryRecord(id: string): Promise<HistoryResult> {
   }
 }
 
-/** 留住的文件在主进程这边的绝对位置（给「在文件夹里显示」用；路径不出这个进程） */
-export async function resolveHistoryKeptFile(id: string): Promise<string | null> {
+/**
+ * 「在文件夹里显示」要用的那一份：返回这一条留住的第一个副本在主进程这边的绝对位置。
+ * 三种显示不了的情况各给各的一句话——它们在界面上长得一样（那颗按钮点了没反应），
+ * 用户能做的事却完全不同：记录没了只能重跑，没勾过那一勾是还没留，
+ * 副本不在盘上说明有人在我们之外动过 records/keep/。
+ * **路径只交给 handler**，绝不跨 IPC 回给渲染层（与 HistoryRecord.source 同一条边界）。
+ */
+export async function resolveHistoryKeptFile(
+  id: string
+): Promise<{ path: string | null; error: string | null }> {
   const rows = await loadRows()
-  if (!rows) return null
+  if (!rows) return { path: null, error: UNREADABLE }
   const record = toRecord(rows.find((row) => toRecord(row)?.id === id))
-  if (!record) return null
+  if (!record) return { path: null, error: '这条记录已经不在了' }
   const name = record.kept.product ?? record.kept.draft
-  return name ? keepFile(record.id, name) : null
+  if (!name) return { path: null, error: '这一条还没有留住的副本' }
+  const path = keepFile(record.id, name)
+  if (!(await exists(path))) return { path: null, error: '留住的副本已经不在盘上了' }
+  return { path, error: null }
 }
 
 /** 模块级状态清干净，只给测试用（与 settingsService 那个测试的换目录需求同源） */

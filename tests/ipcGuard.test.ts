@@ -5,7 +5,8 @@
  * ① 任何抛出（同步的、reject 的、连失败值都造不出来的）最后都必须落成一个**值**，绝不留下 reject；
  * ② 那个值必须是这条通道自己声明的形状，不是通用形状；
  * ③ 落进 app.log 的载荷只有通道名和原因，机制自己不往里面加入参（入参是用户的整份文稿和文件路径）。
- * 外加一条结构判据：electron/ 下 `ipcMain.handle(` 只许出现在 guard.ts 里。
+ * 外加三条结构判据：electron/ 下 `ipcMain.handle(` 只许出现在 guard.ts 里；preload 里 invoke 的
+ * 每一条通道主进程都得注册（名字打错 tsc 不响）；每个 register*Handlers 都得真的被叫到。
  */
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -195,6 +196,17 @@ describe('判据：注册只能走 ipcHandle', () => {
     return out
   }
 
+  /** 整棵 electron/main 里的通道名 → 注册它的那个文件（有几条通道注册在 index.ts 里，不能只扫 ipc/） */
+  async function registeredChannels(): Promise<Set<string>> {
+    const out = new Set<string>()
+    for (const file of await collectTs(join(process.cwd(), 'electron/main'))) {
+      for (const match of (await readFile(file, 'utf-8')).matchAll(/ipcHandle\(\s*'([^']+)'/g)) {
+        out.add(match[1])
+      }
+    }
+    return out
+  }
+
   it('ipcMain.handle 只存在于 guard.ts 这一处', async () => {
     const files = await collectTs(join(process.cwd(), 'electron'))
     const holders: string[] = []
@@ -203,5 +215,30 @@ describe('判据：注册只能走 ipcHandle', () => {
       if (source.includes('ipcMain.handle(')) holders.push(file.replace(`${process.cwd()}/`, ''))
     }
     expect(holders).toEqual(['electron/main/ipc/guard.ts'])
+  })
+
+  it('preload 里 invoke 的每一条通道，主进程都注册了', async () => {
+    const registered = await registeredChannels()
+    const preload = await readFile(join(process.cwd(), 'electron/preload/index.ts'), 'utf-8')
+    const invoked = [...preload.matchAll(/ipcRenderer\.invoke\(\s*'([^']+)'/g)].map((m) => m[1])
+    // 这一条测的是「名字对不对」：invoke 回 Promise<any>，打错一个字母 tsc 不响，
+    // 界面表现是那颗按钮点了没反应——扩通道时最容易复发、也最难查的一类错
+    expect(invoked.length).toBeGreaterThan(0)
+    expect(invoked.filter((channel) => !registered.has(channel))).toEqual([])
+  })
+
+  it('每个 register*Handlers 都被 registerAllHandlers 叫到了', async () => {
+    const dir = join(process.cwd(), 'electron/main/ipc')
+    const index = await readFile(join(dir, 'index.ts'), 'utf-8')
+    const defined: string[] = []
+    for (const file of await collectTs(dir)) {
+      if (file.endsWith('index.ts') || file.endsWith('guard.ts')) continue
+      for (const m of (await readFile(file, 'utf-8')).matchAll(/export function (register\w+)\(\)/g)) {
+        defined.push(m[1])
+      }
+    }
+    // 少叫一次不会编译失败，只会让那一整组通道从此没有 handler
+    expect(defined.filter((fn) => !index.includes(`${fn}()`))).toEqual([])
+    expect(defined.length).toBeGreaterThan(0)
   })
 })

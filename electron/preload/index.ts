@@ -185,6 +185,15 @@ const api = {
   setDefaultProfile: (capability: 'asr' | 'ai' | 'tts', profileId: string) =>
     ipcRenderer.invoke('settings:setDefaultProfile', capability, profileId),
 
+  // 历史记录（#247）：界面向记录只拿 id，产物的路径一刻都不出主进程。
+  // keepHistory 的第二个参数是这一刻渲染层手上那份稿子正文——记账时它没在盘上待过，
+  // 只有用户点了「留住」才过桥一次，这也是「全文按需」这句承诺的范围。
+  listHistory: () => ipcRenderer.invoke('history:list'),
+  keepHistory: (id: string, draftText?: string) => ipcRenderer.invoke('history:keep', id, draftText),
+  dropHistoryCopies: (id: string) => ipcRenderer.invoke('history:dropCopies', id),
+  deleteHistoryRecord: (id: string) => ipcRenderer.invoke('history:delete', id),
+  revealHistoryFile: (id: string) => ipcRenderer.invoke('history:reveal', id),
+
   getServiceReady: () => ipcRenderer.invoke('app:getServiceReady'),
 
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),

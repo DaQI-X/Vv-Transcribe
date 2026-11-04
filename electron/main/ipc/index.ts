@@ -8,12 +8,13 @@ import { registerAIHandlers } from './aiHandlers'
 import { registerProofreadHandlers } from './proofreadHandlers'
 import { registerTTSHandlers } from './ttsHandlers'
 import { registerSettingsHandlers } from './settingsHandlers'
+import { registerHistoryHandlers } from './historyHandlers'
 import { registerDictionaryHandlers } from './dictionaryHandlers'
 import { registerWindowHandlers } from './windowHandlers'
 import { registerUpdateHandlers } from './updateHandlers'
 import { registerComponentHandlers } from './componentHandlers'
 
-/** 注册全部 IPC 处理器，包括文件、ASR、AI 校对、本地校对、配音、设置、词典、窗口控制、更新检查、按需组件模块 */
+/** 注册全部 IPC 处理器，包括文件、ASR、AI 校对、本地校对、配音、设置、历史记录、词典、窗口控制、更新检查、按需组件模块 */
 export function registerAllHandlers() {
   registerFileHandlers()
   registerASRHandlers()
@@ -21,6 +22,7 @@ export function registerAllHandlers() {
   registerProofreadHandlers()
   registerTTSHandlers()
   registerSettingsHandlers()
+  registerHistoryHandlers()
   registerDictionaryHandlers()
   registerWindowHandlers()
   registerUpdateHandlers()

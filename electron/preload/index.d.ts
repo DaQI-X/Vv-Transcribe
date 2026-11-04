@@ -221,6 +221,88 @@ export interface ComponentListResult {
 }
 
 /**
+ * 一次作业各自用了哪条方案（#222 的方案档）。三个都可空：空＝那一档当时没有「当前使用」，
+ * 而视频下载那条链路一个设置 getter 都不读，那一整列都是 null——所以它不是必填。
+ */
+export interface HistoryProfiles {
+  asr: string | null
+  ai: string | null
+  tts: string | null
+}
+
+/** 转写：提取的音频在完成点就被 cleanupTemp 删了，这一类没有产物可留，只能留稿子正文 */
+export interface TranscribeDetail {
+  kind: 'transcribe'
+  provider: string
+  /** 本地档记的是真正交给引擎的那一档（不是设置里此刻的值），云端档记模型 id */
+  model: string
+  language: string
+  segments: number
+  /** 素材时长（秒）；ffprobe 没报出来是 null，不猜 */
+  durationSec: number | null
+  elapsedMs: number | null
+}
+
+/** 视频下载 */
+export interface DownloadDetail {
+  kind: 'download'
+  /** yt-dlp 给的媒体种类（video/audio），跟记录自己的 kind 分开的两个名字 */
+  mediaKind: string
+  durationSec: number | null
+  height: number | null
+  sizeBytes: number
+}
+
+/** 配音：这一份记的是这次实际用的，不是设置里现在的 */
+export interface VoiceDetail {
+  kind: 'voice'
+  engine: string
+  model: string
+  voice: string
+  speed: number
+  /** 成了的段数；界面把它跟 queueTotal 一起摆，「12/300 段」一眼看出是没配完 */
+  clips: number
+  /** 这批一共提交了多少段（含失败与被跳过的） */
+  queueTotal: number
+  trackBytes: number
+  trackDuration: number
+  /** 因为比字幕槽位长而被往后推的段数 */
+  pushedCount: number
+}
+
+export type HistoryDetail = TranscribeDetail | DownloadDetail | VoiceDetail
+
+/** 历史记录给界面的那一行。产物的路径不出主进程，这里只有「有没有」和「还在不在」 */
+export interface HistoryItem {
+  id: string
+  at: string
+  /** 给用户看的名：转写/下载是产物的文件名，配音是界面报上来的稿子来源名 */
+  name: string
+  kind: 'transcribe' | 'download' | 'voice'
+  profiles: HistoryProfiles
+  detail: HistoryDetail
+  keptProduct: boolean
+  keptDraft: boolean
+  /** 原件此刻还在不在盘上——24 小时清扫跑过之后是 false，界面据此说「只能重跑」 */
+  productAvailable: boolean
+}
+
+/**
+ * history:list 的返回。`items: null` 是「这本账现在读不出来」，`[]` 是「读过了，确实一条都没有」。
+ * 界面必须分这两句说：把前者演成后者就是替用户记不起他跑过什么（#277 那个坑的门面版）。
+ */
+export interface HistoryListResult {
+  items: HistoryItem[] | null
+  error: string | null
+}
+
+/** keep / dropCopies / delete 三条共用的形状：成没成，加上没成时给用户看的那句话 */
+export interface HistoryResult {
+  ok: boolean
+  error?: string
+}
+
+/**
  * 链接解析组件（yt-dlp）的本机探测结果，包一层信封。
  * 这一栏界面只显示「读到了什么」，探测本身要 spawn 一次组件进程，是会失败的：
  * 回 null 会让界面永远停在「读取中...」，回一份 source 齐全的快照是编造来源，
@@ -586,6 +668,27 @@ export interface ElectronAPI {
   deleteProfile: (capability: ProfileCapability, profileId: string) => Promise<ProfilesResult>
   /** 换该档当前用的方案，下一次转写/校对/配音取值就走这条，无需重启应用 */
   setDefaultProfile: (capability: ProfileCapability, profileId: string) => Promise<ProfilesResult>
+
+  /**
+   * 历史记录（#247）。界面只用 id 找记录：产物在盘上的位置一刻都没跨过这条边界，
+   * 连「在文件夹里显示」也是主进程自己解路径。
+   */
+  listHistory: () => Promise<HistoryListResult>
+  /**
+   * 那一颗「留住」。第二个参数是这一刻渲染层手上那份稿子正文——记账时它从没落过盘，
+   * 只有用户点这一勾才过桥一次（「全文按需」这句承诺的范围就在这一次）。
+   * 留住一半也算 ok:false：产物原件被清扫收走时，`error` 是「只能重跑」那句，而稿子已经进盘了。
+   */
+  keepHistory: (id: string, draftText?: string) => Promise<HistoryResult>
+  /** 反悔：只删那几份副本，记录本身留着 */
+  dropHistoryCopies: (id: string) => Promise<HistoryResult>
+  /** 删一条记录，连它留住的东西一起没 */
+  deleteHistoryRecord: (id: string) => Promise<HistoryResult>
+  /**
+   * 在文件管理器里选中留住的副本。success 只代表「这一条确实有留住的副本、它此刻还在盘上」——
+   * shell 那一步没有回执，界面不许把它当「用户已经看见文件夹了」。
+   */
+  revealHistoryFile: (id: string) => Promise<{ success: boolean; error: string | null }>
 
   getServiceReady: () => Promise<{
     ready: boolean
