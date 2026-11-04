@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs'
 import { app, dialog } from 'electron'
 import { logger } from './logger'
 import { userDataPath } from './userDataStore'
+import { addHistoryRecord } from './historyService'
 import { fetchCookiesFromUrl, cleanupBrowserTemp } from './browserCookieFetcher'
 
 /** 解析这一步只取元信息，正常几秒；卡住（站点风控挂住连接）不能让界面永远转圈 */
@@ -843,6 +844,24 @@ export async function downloadMedia(
             name: basename(filePath),
             kind: target.kind,
             sizeBytes: size,
+          })
+          // 历史记一笔（#247）。记在 finish 之前：界面拿到成功就会去刷那份列表，
+          // 让刚跑完的那条排在第一行是这一版唯一的排序承诺。
+          // 这条链路三个 profileId 全空——它一个设置 getter 都不读（yt-dlp 的参数来自链接本身），
+          // 别为了让这一列「有值」去编一个。
+          await addHistoryRecord({
+            id: session.id,
+            name: basename(filePath),
+            profiles: { asr: null, ai: null, tts: null },
+            detail: {
+              kind: 'download',
+              mediaKind: target.kind,
+              durationSec: session.info.durationSeconds,
+              height: target.kind === 'video' ? target.height : null,
+              sizeBytes: size,
+            },
+            // 产物躺在会话临时目录里，界面 releaseMediaSession 之后就没了——留住要赶在那之前
+            source: filePath,
           })
           finish({ success: true, filePath, fileSizeBytes: size })
         } catch (err) {

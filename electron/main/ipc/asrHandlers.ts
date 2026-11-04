@@ -14,7 +14,8 @@ import { extractAudio, cleanupTemp } from '../services/audioProcessor'
 import { dropMediaSessionCookies, releaseMediaSessionsExcept } from '../services/urlDownloader'
 import { runTranscription } from '../services/asr/asrManager'
 import { restartLocalEngine } from '../services/asrServiceManager'
-import { getASRConfig, resolveProfileId } from '../services/settingsService'
+import { getASRConfig, normalizeLocalModel, resolveProfileId } from '../services/settingsService'
+import { addHistoryRecord } from '../services/historyService'
 import type { ASRModelInfo, ASRSegment, ASRStage } from '../services/asr/types'
 import { logger } from '../services/logger'
 import { failOkError, ipcHandle } from './guard'
@@ -48,6 +49,8 @@ export function registerASRHandlers() {
     ) => {
       const jobId = randomUUID()
       const signal = new AbortController()
+      // 历史记录要的是「这次跑了多久」，那就得从开工那刻算；提取和转写两段都在里面
+      const startedAt = Date.now()
 
       activeJobs.set(jobId, { jobId, signal, tempDir: null })
 
@@ -112,6 +115,33 @@ export function registerASRHandlers() {
 
         sendProgress(100)
         logger.info(TAG, 'Job completed', { jobId, provider: result.provider, segments: result.segments.length })
+
+        // 历史记一笔（#247）。记在返回之前，是因为这一步不该和界面渲染抢时序：
+        // 界面上「刚跑完那条必须排在第一行」是这一版唯一的排序承诺。
+        // 只记元信息，正文一段都不落盘；记账失败也不影响这一单已经转完了。
+        await addHistoryRecord({
+          id: jobId,
+          name: basename(filePath),
+          // 校对是另一条链路（proofread:local / ai:correct），它不产出新素材，所以这一列今天恒为 null
+          profiles: { asr: profileId, ai: null, tts: null },
+          detail: {
+            kind: 'transcribe',
+            provider: result.provider,
+            // 本地档记的是 normalizeLocalModel 之后那一档：asrManager 真拿它去对引擎的档位，
+            // 记 config.localModel 原样会把「设置里写了个没归一的档位」和「实际用了 base」混成一谈
+            model:
+              result.provider === 'cloud'
+                ? String(config.model ?? '')
+                : normalizeLocalModel(config.localModel),
+            language: options?.language ?? 'zh',
+            segments: result.segments.length,
+            // ffprobe 读不出时长时给的是 0，那是「不知道」而不是「零长的素材」
+            durationSec: extractResult.metadata.duration > 0 ? extractResult.metadata.duration : null,
+            elapsedMs: Date.now() - startedAt,
+          },
+          // 提取出来的 wav 在上面那行 cleanupTemp 就没了，这一类没有产物可以留
+          source: null,
+        })
 
         return { jobId, success: true, segments: result.segments, provider: result.provider }
       } catch (err) {

@@ -32,6 +32,8 @@ interface VoiceCallOptions {
   speed?: number
   /** 「这次用哪套配音配置」；空/不传＝该档当前默认方案 */
   profileId?: string
+  /** 历史记录里这一行叫什么（#247）。纯展示，主进程收到的只有正文，起不出这份稿子从哪来 */
+  sourceName?: string
 }
 
 /** 与 index.d.ts 的 VoiceProgress 对齐：index/total 是真实段号，不做假百分比 */

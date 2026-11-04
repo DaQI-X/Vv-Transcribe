@@ -128,6 +128,16 @@ function callOptions(state: { voice: string; speed: number; model: string; engin
   }
 }
 
+/**
+ * 历史记录（#247）里这一行叫什么。主进程收到的只有段落正文，它分不清这份稿子是手打的
+ * 还是从哪份素材转出来的，所以这个名字只能由界面报上去。素材名读的是转写那份 store——
+ * 「按字幕时间轴配音」用的就是它那一串段落，两条链路说的是同一份素材。
+ */
+function draftName(source: VoiceSource): string {
+  if (source !== 'subtitle') return '手输文本'
+  return useTranscriptionStore.getState().fileName ?? '转写素材'
+}
+
 function ensureProgressSubscription() {
   if (progressUnsubscribe) return
   const api = getElectronAPI()
@@ -363,7 +373,10 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     })
 
     try {
-      const res = await api.synthesizeVoice(queue, callOptions(get()))
+      const res = await api.synthesizeVoice(queue, {
+        ...callOptions(get()),
+        sourceName: draftName(get().source),
+      })
       set({ result: res, phase: 'done', jobId: res.jobId, progress: null })
       if (res.error) toast.error(res.error)
       else if (res.abortedReason) toast.error(res.abortedReason)

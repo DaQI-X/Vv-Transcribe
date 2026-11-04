@@ -34,6 +34,7 @@ import {
   type LocalTtsDetail,
 } from '../services/localTtsEngine'
 import { logger } from '../services/logger'
+import { addHistoryRecord } from '../services/historyService'
 import { engineBinaryInManifest } from '../services/componentService'
 import { failOkError, failSuccessError, ipcHandle } from './guard'
 
@@ -109,6 +110,12 @@ interface VoiceCallOptions {
    * 它是查表用的键，不会被拼进任何路径或目录名（引擎 id 那种白名单校验对它不适用）。
    */
   profileId?: string
+  /**
+   * 这一批稿子在历史记录里叫什么。主进程收到的只有段落正文，它分不清这是手打的还是
+   * 某份素材转出来的（#247 记的是元信息，正文不落盘，所以名字只能由界面报上来）。
+   * 它是纯展示字段：不进路径、不进目录名，也不参与任何取值。
+   */
+  sourceName?: string
 }
 
 /** 界面传来的一个字符串参数：非字符串与空串都收成空串，交给调用点按「没指定」处理 */
@@ -124,6 +131,13 @@ function trimArg(raw: unknown): string {
 function profileIdOf(raw: unknown): string | undefined {
   const value = (raw ?? {}) as { profileId?: unknown }
   return trimArg(value.profileId) || undefined
+}
+
+/** 历史记录那一行的名字：界面没报就叫「未命名」，不替用户猜一份稿子从哪来 */
+function sourceNameOf(raw: unknown): string {
+  const value = (raw ?? {}) as { sourceName?: unknown }
+  // 渲染层来的值当外部输入收口：截个长度就行，它只上界面，不进路径（留住的产物按原件名落盘）
+  return trimArg(value.sourceName).slice(0, 120) || '未命名'
 }
 
 /**
@@ -245,6 +259,33 @@ export function registerTTSHandlers() {
         sendProgress({ jobId, stage: 'assembling', index: queue.length, total: queue.length })
         const track = await composeVoiceTrack(jobId, result.clips)
         sendProgress({ jobId, stage: 'done', index: queue.length, total: queue.length })
+
+        // 历史记一笔（#247）：有产物就记，所以「取消/熔断但已经拼出一条轨」也在这——
+        // 那条轨用户能另存、也能勾「留住」，不记账就等于让他找不到自己那半条轨。
+        // 记的是 withOverrides 之后那一份 config：配音页开跑前可以临时换模型/音色/倍速而不写回设置，
+        // 记设置里现在的值会把「这次实际用了什么」答错。
+        await addHistoryRecord({
+          id: jobId,
+          name: sourceNameOf(opts),
+          profiles: { asr: null, ai: null, tts: profileId },
+          detail: {
+            kind: 'voice',
+            engine: config.engine,
+            // 本地档「这一批用的哪一档模型」在这套界面上就是引擎 id（配音页那个「模型」下拉
+            // 给本地档列的是 VITS / Kokoro），云端档才是服务商的模型 id。参数按档分叉，名字也得跟着。
+            model: config.engine === 'local' ? config.localEngine : config.model,
+            voice: config.voice,
+            speed: config.speed ?? 1,
+            clips: result.clips.length,
+            queueTotal: queue.length,
+            trackBytes: track.bytes,
+            trackDuration: track.duration,
+            pushedCount: track.pushedCount,
+          },
+          // 批次目录还在（界面要拿它播放），所以这一勾现在点得动；
+          // 界面清空结果或返回首页会 releaseBatch，那时原件没了，留住得赶在之前勾
+          source: track.filePath,
+        })
 
         return {
           jobId,

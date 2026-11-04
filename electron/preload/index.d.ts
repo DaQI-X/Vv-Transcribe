@@ -100,6 +100,11 @@ export interface VoiceCallOptions {
   speed?: number
   /** 「这次用哪套配音配置」：#222 第②步的方案 id，空/不传＝该档当前默认方案 */
   profileId?: string
+  /**
+   * 历史记录（#247）里这一行叫什么。主进程只收到段落正文，分不清这份稿子是手打的还是
+   * 从哪份素材转出来的，所以名字由界面报。纯展示：不进路径、不进目录名、不参与任何取值。
+   */
+  sourceName?: string
 }
 
 export interface VoiceProgress {
