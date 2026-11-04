@@ -50,6 +50,16 @@ const TABS: { key: HistoryTab; label: string }[] = [
 const CAP_LABEL: Record<ProfileCapability, string> = { asr: '转写', ai: '校对', tts: '配音' }
 
 /**
+ * 「留住了多少」要开始点名那一条的线。2GB 是拍的：一条留住的是稿子（几十 KB）或一条音轨（几 MB
+ * 到几百 MB），普通一期节目攒不到这个数，攒到了就说明这一栏正在被当成仓库用，该给用户看一眼。
+ *
+ * 它**不是**一条自动清理线：留住的行不参与修剪是刻意的决定（`historyService` 的 `pruneRows`
+ * 只剪「什么都没留住」的行，自动删掉用户点名要留的东西比账本长一点严重得多），所以这一句只负责
+ * 说数、并指着那一行的「删除」——越过这条线应用一个字都不会删。
+ */
+const KEPT_WARN_BYTES = 2e9
+
+/**
  * 记录里的时间是 ISO；界面只念到分钟——一行之差看不出是哪一次，但年份能看出是不是去年那批。
  * 补零交给 Intl，不自己拼：`formatTime.ts` 那把尺量的是「一段音频有几时几分几秒」，量不出日历日期，
  * 而 `tests/formatTime.test.ts` 把 `padStart(2` 当成「自己造第三把时钟」的指纹——这里要的是日期，
@@ -206,6 +216,15 @@ export function HistoryPanel() {
     : tab === 'all'
       ? items
       : items.filter((item) => item.kind === tab)
+
+  // 占多少地方这件事跟当前选中的标签无关：数的是整本账，不是这一屏。
+  // 留住的那侧不自动修剪，所以「一共占多大」必须由这一栏自己说出口。
+  const keptRows = (items ?? []).filter((item) => item.keptProduct || item.keptDraft)
+  const keptTotalBytes = keptRows.reduce((sum, item) => sum + item.keptBytes, 0)
+  const biggestKept = keptRows.reduce<HistoryItem | null>(
+    (max, item) => (max === null || item.keptBytes > max.keptBytes ? item : max),
+    null,
+  )
 
   return (
     <div
@@ -371,6 +390,15 @@ export function HistoryPanel() {
             没勾「留住」的产物放在临时目录，超过 24 小时会被清掉；记录本身最多留 200
             条，超了先删最老的「什么都没留住」那一条。
           </p>
+          {keptRows.length > 0 && (
+            <p className="history-panel__hint">
+              留住了 {keptRows.length} 份，一共 {formatBytes(keptTotalBytes)}
+              {keptTotalBytes >= KEPT_WARN_BYTES && biggestKept && biggestKept.keptBytes > 0
+                ? `，占最多的是「${biggestKept.name}」（${formatBytes(biggestKept.keptBytes)}）`
+                : ''}
+              。勾了「留住」的东西这一版不会自动清理，要腾地方就在对应那一行点「删除」。
+            </p>
+          )}
         </div>
       </div>
     </div>

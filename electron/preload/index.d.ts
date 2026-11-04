@@ -285,6 +285,8 @@ export interface HistoryItem {
   keptDraft: boolean
   /** 原件此刻还在不在盘上——24 小时清扫跑过之后是 false，界面据此说「只能重跑」 */
   productAvailable: boolean
+  /** 这一条留住的份实际占多少字节；没勾留住的是 0。界面累它去说「留住的东西一共占多少」 */
+  keptBytes: number
 }
 
 /**

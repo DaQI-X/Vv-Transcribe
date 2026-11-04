@@ -147,6 +147,13 @@ export interface HistoryItem {
   keptDraft: boolean
   /** 原件此刻还在不在盘上——24 小时清扫跑过之后就是 false，界面据此说「只能重跑」 */
   productAvailable: boolean
+  /**
+   * 这一条留住的份在盘上实际占多少字节（留住的那一到两份加在一起，缺一份就少一份）。
+   * 界面把它累成「留住的东西一共占多少」——留住的行不参与修剪是刻意的（自动删掉用户点名
+   * 要留的文件比账本长一点严重得多），代价就是这一栏必须自己说清楚占了地方，否则用户只能
+   * 等盘满那天才发现。没勾留住的恒为 0。
+   */
+  keptBytes: number
 }
 
 export interface NewHistoryRecord {
@@ -362,6 +369,25 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
+ * 这一条留住的份占多少字节。两份各 stat 一次，读不到就少一份——账上还挂着引用而盘上没了
+ * 是可能发生的（用户自己进那个目录删），这里不猜也不报错，那一行的真相由 `keptProduct` 与
+ * `productAvailable` 去说，这个数只负责「一共占了地方没有」。
+ */
+async function keptSize(record: HistoryRecord): Promise<number> {
+  const names = [record.kept.product, record.kept.draft].filter((name): name is string => name !== null)
+  let total = 0
+  for (const name of names) {
+    try {
+      const info = await stat(keepFile(record.id, name))
+      if (info.isFile()) total += info.size
+    } catch {
+      // 见上：缺的那一份按 0 记
+    }
+  }
+  return total
+}
+
+/**
  * 记一笔账。**从不抛错**：转写已经成功了，记账失败不能把它变成一次失败。
  * 返回 false 只用于日志，界面上不弹——用户不该因为「历史没记上」而以为稿子丢了。
  */
@@ -417,6 +443,8 @@ export async function listHistory(): Promise<HistoryListResult> {
     const items: HistoryItem[] = []
     for (const record of records) {
       const productPath = record.kept.product ? keepFile(record.id, record.kept.product) : record.source
+      const keptProduct = record.kept.product !== null
+      const keptDraft = record.kept.draft !== null
       items.push({
         id: record.id,
         at: record.at,
@@ -424,10 +452,12 @@ export async function listHistory(): Promise<HistoryListResult> {
         kind: record.detail.kind,
         profiles: record.profiles,
         detail: record.detail,
-        keptProduct: record.kept.product !== null,
-        keptDraft: record.kept.draft !== null,
+        keptProduct,
+        keptDraft,
         // 已经留住的当然「有」；没留住的看原件还在不在——在，那一勾才点得动
         productAvailable: productPath === null ? false : await exists(productPath),
+        // 没勾留住的不用 stat：那一大半行本来就占不了地方
+        keptBytes: keptProduct || keptDraft ? await keptSize(record) : 0,
       })
     }
     return { items, error: null }

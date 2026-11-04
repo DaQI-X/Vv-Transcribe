@@ -62,6 +62,11 @@ export interface HistoryItem {
   keptDraft: boolean
   /** 原件此刻还在不在盘上——24 小时清扫跑过之后是 false，那一勾也就点不动了 */
   productAvailable: boolean
+  /**
+   * 这一条留住的份占多少字节（没勾留住的恒为 0）。留住的行不参与自动修剪，所以这一栏必须
+   * 自己把「一共占了多大」说出来——不说就等于让用户等盘满那天才发现。
+   */
+  keptBytes: number
 }
 
 /** `items: null` 是「这本账读不出来」，`[]` 是「读过了，确实一条都没有」——界面必须分这两句说 */

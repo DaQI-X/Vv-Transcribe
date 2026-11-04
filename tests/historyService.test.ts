@@ -365,6 +365,52 @@ describe('留住（勾了才留）', () => {
   })
 })
 
+describe('留住占多少（界面那句「一共占多大」的那个数）', () => {
+  /** 盘上那两份的真实字节数之和：断言跟这把尺对表，不跟用例里手写的数字对表 */
+  async function realKeptBytes(id: string, names: string[]): Promise<number> {
+    let total = 0
+    for (const name of names) {
+      total += (await stat(join(recordsDir(), 'keep', id, name))).size
+    }
+    return total
+  }
+
+  it('没勾留住的恒为 0——原件还在临时目录也不能算进来（它 24 小时后就不在了）', async () => {
+    // 一份「很大」的原件：按 0 断言才说明这个数真的只看 keep/ 下面，而不是顺手读了 source
+    const product = await tempProduct('voice-track.mp3', 'x'.repeat(4096))
+    await add({ id: 'job-nokeep', name: '配音轨.mp3', profiles: noProfiles(), detail: voiceDetail, source: product })
+
+    const [item] = await listed()
+    expect(item).toMatchObject({ keptProduct: false, keptDraft: false, productAvailable: true })
+    expect(item.keptBytes).toBe(0)
+  })
+
+  it('产物加稿子：这个数就是那两份落盘后的真实字节之和', async () => {
+    const product = await tempProduct('voice-track.mp3', 'mp3-bytes-mp3-bytes')
+    await add({ id: 'job-sum', name: '配音轨.mp3', profiles: noProfiles(), detail: voiceDetail, source: product })
+    expect((await history.keepHistory('job-sum', '第一期采访稿\n第二行')).ok).toBe(true)
+
+    const expected = await realKeptBytes('job-sum', ['draft.txt', 'voice-track.mp3'])
+    expect(expected).toBeGreaterThan(0)
+    const [item] = await listed()
+    expect(item.keptBytes).toBe(expected)
+  })
+
+  it('留住的那一份被人自己删了：只算还在的那份，整本账照样列得出来', async () => {
+    const product = await tempProduct()
+    await add({ id: 'job-partial', name: '配音轨.mp3', profiles: noProfiles(), detail: voiceDetail, source: product })
+    await history.keepHistory('job-partial', '稿子')
+    await rm(join(recordsDir(), 'keep', 'job-partial', 'draft.txt'))
+
+    const items = await listed()
+    expect(items).toHaveLength(1)
+    const [item] = items
+    // 账上的引用不改口（那是「勾过的历史」），但这个数说的是盘上现在占了多少
+    expect(item).toMatchObject({ keptDraft: true, keptProduct: true })
+    expect(item.keptBytes).toBe(await realKeptBytes('job-partial', ['voice-track.mp3']))
+  })
+})
+
 describe('「在文件夹里显示」解路径', () => {
   it('留住的产物解得出位置，它就落在 records/keep 这一层下面', async () => {
     const product = await tempProduct()
