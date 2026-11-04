@@ -197,10 +197,12 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .header_actions {
   display: flex;
   align-items: center;
+  gap: 8px;
   -webkit-app-region: no-drag; /* 按钮区域可点击 */
 }
 
-.header_settings button {
+.header_settings button,
+.header_history button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -211,12 +213,19 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   background: #f5f5f5;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
-.header_settings button:hover {
+.header_settings button:hover,
+.header_history button:hover {
   background: #ebebeb;
   color: var(--text-primary);
+}
+
+/* 抽屉开着的时候这颗得能看出来是「按下去会关」的，不然屏幕上同时存在两个入口状态 */
+.header_history button.is-on {
+  background: var(--brand-teal-light);
+  color: var(--brand-blue);
 }
 
 /* ============================================
@@ -1031,6 +1040,320 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   display: flex;
   flex-direction: column;
 }
+
+/* ============================================
+ * 历史记录抽屉（#247④）
+ * ============================================ */
+/* 浮在三种视图之上，不参加 .result-layout 那条 flex：
+   这一栏要读的是「过去跑过什么」，跟当前这一单抢宽度没有道理。
+   收起时整块缩向入口那颗图标：它离窗口右边 80px、离抽屉右边 64px（→ 81%），
+   垂直中心在 40px 高的标题栏正中，而抽屉顶在 52px（→ -32px）。
+   z-index 卡在内容（1）与顶部设置菜单（200，它 portal 到 body）之间：抽屉不许盖住那张菜单。 */
+.history-drawer {
+  position: fixed;
+  z-index: 150;
+  top: 52px;
+  right: 16px;
+  bottom: 40px;
+  display: flex;
+  width: 340px;
+  transform-origin: 81% -32px;
+  transition: transform 0.26s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.18s ease;
+}
+
+.history-drawer--hidden {
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-drawer {
+    transition-duration: 0.01ms;
+  }
+}
+
+.history-panel {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.history-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 12px 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.history-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 分tab按「哪一类作业」切：转写、下载、配音是三件不同的事，混在一列里读不出重点。
+   着色抄首页 .upload-tabs 那一套，两档主题各自的覆盖也一起抄。 */
+.history-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 10px 12px 0;
+  padding: 4px;
+  border-radius: 10px;
+  background: #f0f2f5;
+}
+
+.history-tabs__item {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.history-tabs__item:hover {
+  color: var(--text-primary);
+}
+
+.history-tabs__item--active {
+  background: var(--bg-card);
+  color: var(--brand-blue);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.history-tabs__count {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.history-tabs__item--active .history-tabs__count {
+  color: var(--brand-blue);
+}
+
+/* 刷新／关闭这两颗是本栏的次要动作：不加底色，只描一圈边，免得跟行上的「删除」抢注意力 */
+.history-panel__ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.history-panel__ghost:hover:not(:disabled) {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+.history-panel__ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.history-panel__list {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+
+.history-panel__state {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.history-panel__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.history-panel__hint {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+/* 一条作业一行：名字和元信息各自截断，动作排在第三行。
+   二次确认长在行内而不是浮在行下——这一栏自己是滚动容器，绝对定位的气泡会被它裁掉。 */
+.history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.history-row--current {
+  border-color: var(--brand-blue);
+  background: var(--brand-teal-light);
+  box-shadow: 0 0 0 1px var(--brand-blue-ring), 0 0 14px var(--brand-blue-glow);
+}
+
+.history-row__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.history-row__chip {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--brand-blue);
+  background: var(--bg-hover);
+}
+
+.history-row__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-row__meta {
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-row__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 那一勾是本栏唯一会动磁盘的状态：勾上＝副本进应用数据目录，取消＝把副本删掉（记录本身留着） */
+.history-row__keep {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.history-row__keep input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--brand-blue);
+}
+
+.history-row__keep--disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.history-row__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--brand-blue);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.history-row__btn:hover:not(:disabled) {
+  border-color: var(--brand-blue);
+  background: rgba(27, 85, 245, 0.06);
+}
+
+.history-row__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.history-row__pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-page);
+}
+
+.history-row__pop-text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.history-row__pop-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.history-row__danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--error-color);
+  border-radius: 7px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--error-color);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.history-row__danger:hover:not(:disabled) {
+  background: var(--error-color);
+  color: #fff;
+}
+
+.history-row__danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 
 /* ============================================
  * 音频播放器
@@ -3709,13 +4032,26 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-primary);
 }
 
-:root[data-theme="dark"] .header_settings button {
+:root[data-theme="dark"] .header_settings button,
+:root[data-theme="dark"] .header_history button {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 
-:root[data-theme="dark"] .header_settings button:hover {
+:root[data-theme="dark"] .header_settings button:hover,
+:root[data-theme="dark"] .header_history button:hover {
   background: var(--bg-page);
+}
+
+/* 选中态在深色下要重新压过上面那条（两档都给了底色，靠后面的规则赢） */
+:root[data-theme="dark"] .header_history button.is-on {
+  background: var(--brand-teal-light);
+  color: var(--brand-blue);
+}
+
+/* 历史记录的 tab 条：浅档那条底色是写死的 #f0f2f5，深色下换回变量，跟首页那条同一处理 */
+:root[data-theme="dark"] .history-tabs {
+  background: var(--bg-hover);
 }
 
 /* 结果布局 */

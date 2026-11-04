@@ -225,8 +225,14 @@ function safeName(name: string): string {
   return cleaned === '' ? 'product' : cleaned
 }
 
-function emptyProfiles(): HistoryProfiles {
-  return { asr: null, ai: null, tts: null }
+/**
+ * 方案 id 落账只有两种形状：一条真 id，或 null。
+ * `resolveProfileId` 报「这一档当前没有方案在用」用的是空串（日志里就照 `profileId: ''` 落，那是它自己的口径），
+ * 但那一种状态进了账本得写成 null——同一件事在一本账里既可能记成 `""` 又可能记成 `null`，
+ * 日后照 `!== null` 读这一列的人会读错。
+ */
+function profileIdOf(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value : null
 }
 
 /**
@@ -328,9 +334,9 @@ function toRecord(row: unknown): HistoryRecord | null {
     at: raw.at,
     name: typeof raw.name === 'string' ? raw.name : '',
     profiles: {
-      asr: typeof profiles?.asr === 'string' ? profiles.asr : null,
-      ai: typeof profiles?.ai === 'string' ? profiles.ai : null,
-      tts: typeof profiles?.tts === 'string' ? profiles.tts : null,
+      asr: profileIdOf(profiles?.asr),
+      ai: profileIdOf(profiles?.ai),
+      tts: profileIdOf(profiles?.tts),
     },
     detail: raw.detail as HistoryDetail,
     source: typeof raw.source === 'string' ? raw.source : null,
@@ -373,7 +379,11 @@ export async function addHistoryRecord(input: NewHistoryRecord): Promise<boolean
         id,
         at: input.at ?? new Date().toISOString(),
         name: input.name,
-        profiles: { ...emptyProfiles(), ...input.profiles },
+        profiles: {
+          asr: profileIdOf(input.profiles.asr),
+          ai: profileIdOf(input.profiles.ai),
+          tts: profileIdOf(input.profiles.tts),
+        },
         detail: input.detail,
         source: input.source ?? null,
         kept: previous?.kept ?? { product: null, draft: null },

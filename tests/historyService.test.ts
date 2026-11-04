@@ -186,6 +186,18 @@ describe('记账：只落元信息', () => {
     expect(item.kind).toBe('download')
   })
 
+  it('「这一档当时没有方案在用」落账只有 null 一种形状', async () => {
+    // resolveProfileId 报这一状态用的是空串（那是日志的口径），但账本里同一件事不能既是 "" 又是 null
+    await add({
+      id: 'job-no-profile',
+      name: 'a.mp4',
+      profiles: { asr: '', ai: null, tts: null },
+      detail: transcribeDetail,
+    })
+    const [item] = await listed()
+    expect(item.profiles).toEqual({ asr: null, ai: null, tts: null })
+  })
+
   it('同一个作业 id 再记一次算更新，账本里只留一行', async () => {
     await add({ id: 'job-3', at: '2026-11-04T01:00:00.000Z', name: 'a.mp4', profiles: noProfiles(), detail: transcribeDetail })
     await add({

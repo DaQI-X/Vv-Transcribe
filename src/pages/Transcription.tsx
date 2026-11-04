@@ -2,15 +2,17 @@
  * 转写主页面
  * 顶部 tab 决定看哪一块：字幕配音是一整个页面（工作台），其余按文件状态切换三种视图：
  * 上传区 → 处理状态 → 结果展示（播放器 + 编辑器）
- * 顶部导航包含品牌标识和设置下拉菜单（转写配置 / 校对配置 / 配音配置）
+ * 顶部导航包含品牌标识、历史记录入口和设置下拉菜单（转写配置 / 校对配置 / 配音配置）；
+ * 历史记录是浮在页面右侧的抽屉，不占这三种视图的布局
  */
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Settings } from 'lucide-react'
+import { History, Settings } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { FileUploader } from '@/components/transcription/FileUploader'
 import { UploadStatus } from '@/components/transcription/UploadStatus'
 import { TranscriptEditor } from '@/components/transcription/TranscriptEditor'
 import { AudioPlayer } from '@/components/transcription/AudioPlayer'
+import { HistoryPanel } from '@/components/transcription/HistoryPanel'
 import { VoiceStudio } from '@/components/transcription/VoiceStudio'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { toast } from '@/components/ui/Toast'
@@ -19,6 +21,7 @@ import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { usePlayerStore } from '@/stores/usePlayerStore'
 import { useReferenceStore } from '@/stores/useReferenceStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
+import { useHistoryStore } from '@/stores/useHistoryStore'
 import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { openUserDataDirectory } from '@/utils/userData'
@@ -39,6 +42,9 @@ export function Transcription() {
   const openSettings = useSettingsModalStore((s) => s.open)
   const closeSettings = useSettingsModalStore((s) => s.close)
   const [appVersion, setAppVersion] = useState('')
+  // 历史记录抽屉的开关也放 store：入口在标题栏、抽屉在页面另一头，两边点的都是同一颗状态
+  const historyOpen = useHistoryStore((s) => s.open)
+  const toggleHistory = useHistoryStore((s) => s.toggleOpen)
   const { fileName, status, reset } = useTranscriptionStore()
   // 顶部 tab 也存在 store 里：配音跑起来是分钟级的后台任务，状态跟着组件走会丢
   const tab = useVoiceStudioStore((s) => s.tab)
@@ -152,6 +158,17 @@ export function Transcription() {
           <span className="header_app_name">Vv Transcribe</span>
         </div>
         <div className="header_actions">
+          <div className="header_history">
+            <button
+              type="button"
+              className={historyOpen ? 'is-on' : undefined}
+              onClick={toggleHistory}
+              title={historyOpen ? '收起历史记录' : '打开历史记录'}
+              aria-pressed={historyOpen}
+            >
+              <History size={16} />
+            </button>
+          </div>
           <div className="header_settings">
             <Dropdown items={SETTINGS_MENU.map((item) => ({ key: item.key, label: item.label, onClick: () => openSettings(item.key) }))}>
               <button>
@@ -180,6 +197,10 @@ export function Transcription() {
           </div>
         ) : null}
       </main>
+
+      {/* 历史记录浮在三种视图之上（fixed），不占布局：为了一条查完就要收回去的记录，
+          把字幕编辑器挤窄是本末倒置 */}
+      <HistoryPanel />
 
       <div className="version_footer">
         <span
