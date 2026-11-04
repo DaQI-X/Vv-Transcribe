@@ -56,6 +56,21 @@ export function settingsFile(): string {
   return userDataPath('settings.json')
 }
 
+/**
+ * 历史记录（#247）的落点：账本 `history.json` 与「用户勾了才留」的副本都在这层下面。
+ *
+ * 这一层存在的理由是**反向**的：启动清扫 `sweepStaleMediaTempDirs` 按 `transcribe-` 前缀
+ * 加 24 小时删目录，配音轨与下载的媒体原本全在那种目录里。要长期留的东西一旦图省事
+ * 也落进那个前缀下面，一份隔天的稿子就会被自己的清扫机制当垃圾删掉，而日志里
+ * 只剩一句 Stale temp dirs swept。所以「留住」只有这一个落点，别再往 temp 里放。
+ */
+export function recordsDir(): string {
+  return userDataPath('records')
+}
+
+/** 解不开的历史账本改名留档时用的文件名前缀，套路与 settings 那份一致 */
+export const CORRUPT_HISTORY_PREFIX = 'history.json.corrupt-'
+
 /** 解不开的原件改名留档时用的文件名前缀；清扫按它筛，界面上的提示也引用它 */
 export const CORRUPT_SETTINGS_PREFIX = 'settings.json.corrupt-'
 
@@ -159,9 +174,10 @@ export async function atomicWriteJson(
 /**
  * 同前缀的历史副本只留最新 keep 份（坏盘的话每次启动都会留一份，不能把数据目录变成垃圾场）。
  * 清扫失败从不影响主流程：多留几份老文件只是难看，把刚保住的原件搭进去才是事故。
+ * `dir` 默认根目录（settings.json.corrupt-* 那类平铺的档），recordsDir 里的账本副本要单独扫——
+ * 根目录扫不到子目录里的名字，反过来把子目录名混进根目录那份清单也不行。
  */
-export async function pruneOlderCopies(prefix: string, keep: number): Promise<void> {
-  const dir = userDataRoot()
+export async function pruneOlderCopies(prefix: string, keep: number, dir = userDataRoot()): Promise<void> {
   try {
     const names = (await readdir(dir)).filter((name) => name.startsWith(prefix)).sort()
     for (const old of names.slice(0, Math.max(0, names.length - keep))) {
@@ -169,5 +185,35 @@ export async function pruneOlderCopies(prefix: string, keep: number): Promise<vo
     }
   } catch {
     /* 保住的档已经够了，多余的老档交给下次 */
+  }
+}
+
+/**
+ * 非 JSON 的一份内容（稿子正文、从临时目录搬出来的音轨）走这道出口。
+ * 与 atomicWriteJson 同一个理由：裸 writeFile 崩在中途会留下一份半截文件，而历史记录里的
+ * 「已经留住」这句承诺是按文件在不在判的——半截 mp3 比没有更糟，用户会以为它和原件一样可靠。
+ */
+export async function atomicWriteBytes(file: string, data: string | Buffer): Promise<void> {
+  const tmp = `${file}.tmp`
+  await mkdir(dirname(file), { recursive: true })
+  try {
+    await writeFile(tmp, data)
+    await rename(tmp, file)
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw err
+  }
+}
+
+/** 从别处搬一份文件进来：先落 .tmp 再改名，所以「目标路径存在」等价于「这一份是完整的」 */
+export async function atomicCopy(src: string, dest: string): Promise<void> {
+  const tmp = `${dest}.tmp`
+  await mkdir(dirname(dest), { recursive: true })
+  try {
+    await copyFile(src, tmp)
+    await rename(tmp, dest)
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw err
   }
 }
