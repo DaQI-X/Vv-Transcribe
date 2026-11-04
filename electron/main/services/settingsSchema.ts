@@ -22,20 +22,22 @@
  * 本应用读写认到这一版。
  * v1 = 扁平的 17 个键（1.0.5～1.0.8）；v2 = 云端方案按能力各一个列表（1.0.9）。
  *
- * v2 在 1.0.9 开发中途改过一次口径，这里记下的是改完的那版：方案**只装凭据**
- * （接口地址 / Key / 模型），「用本地还是云端」「本地档位」「转写语言」这类不进方案，
+ * v2 在 1.0.9 开发中途改过一次口径，这里记下的是改完的那版：三档的方案都**只装这家网关的参数**
+ * （接口地址 / Key / 模型，配音另加音色），「走不走云端」「本地档位」「转写语言」这类不进方案，
  * 留在文档根上那批扁平键里（读进内存后叫 store.globals）。原先那版把 17 个键全搬进了
  * 方案，于是每条方案各自带着一份转写语言和本地档位——用户要的是「多家网关换着使」，
  * 不是「每家一套语言」。
- * 这轮先按用户的话只做转写（「先以转写配置来做修改，我在确认没问题后在推进校对和配音」），
- * 所以下面那张表里 asr 已经收成三项、ai / tts 还带着各自的非凭据字段，全局段此刻只有
- * asrProvider / asrLocalModel / asrLanguage 三个键；那两档改完时表一窄，全局段自己会长。
+ * 唯一一项不是凭据却留在方案里的是 ai 的 provider：它是「这套地址+Key 属于哪家」的书签，
+ * 界面上拿它预填地址和模型，换方案就得换书签；而 asr 那个同名键说的是「本地还是云端」，
+ * 是这一档要不要花钱的开关，所以它退回全局段。
  * 这一版没发到任何用户手上，所以改的是 v2 自己的定义，不另起 v3：发出去的人只有 v1→v2
  * 这一条路要走，而它现在搬的是对的形状。
  *
  * 「哪些键算全局」这件事不在这张表里再列一遍：CAPABILITY_FIELDS 没认领的扁平键就是全局段，
  * 那个集合由 settingsService 从 DEFAULT_SETTINGS 推出来。所以这一版改字段归属只改那张表，
  * 迁移与读写跟着就对了——v1→v2 也只删它真正搬走的那几个键，剩下的原样躺在根上。
+ * 但中途挪走过的那些键在开发机上已经躺在方案里了，那份残留靠下面这张
+ * PROFILE_FIELDS_MOVED_TO_GLOBALS 读回全局段，不然就是「读成功、写成功、东西没了」。
  */
 export const CURRENT_SETTINGS_VERSION = 2
 
@@ -86,7 +88,8 @@ export type SettingsProfiles = Record<ProfileCapability, Profile[]>
 export type DefaultProfileId = Record<ProfileCapability, string>
 
 /**
- * 全局段：不属于任何一档方案的扁平配置（此刻是 asrProvider / asrLocalModel / asrLanguage）。
+ * 全局段：不属于任何一档方案的扁平配置（此刻是 asrProvider / asrLocalModel / asrLanguage /
+ * ttsEngine / ttsLocalEngine / ttsLocalVoice）。
  * 键就是 v1 那批扁平键的名字，落盘时也平铺在文档根上，不再嵌一层——嵌进去就得让迁移知道
  * 哪些键归全局，而那份知识已经在 CAPABILITY_FIELDS 里了，抄第二遍迟早分叉。
  */
@@ -103,9 +106,14 @@ export interface SettingsStore {
  * 没被这张表认领的扁平键就留在文档根上（`SettingsGlobals`）——所以「这一档有哪几项配置」
  * 和「哪些配置全局共用」两件事仍然只有这一处定义，读盘、落盘、投给界面的扁平视图都按它走。
  *
- * asr 只有三项是有意的：接口地址 / Key / 模型才是「换一家网关」要换的东西，
- * 「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，不是这家网关的参数。
- * ai / tts 还带着各自的非凭据字段，是这一轮还没改到它们（口径同上，改完照样只剩三项）。
+ * 三档都按「换一家网关要换的东西」这条线收窄：
+ * - asr 三项：地址 / Key / 模型。「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，
+ *   不是这家网关的参数。
+ * - tts 四项：地址 / Key / 模型 / 音色。音色在 OpenAI 兼容网关里是对方给的名字（alloy 这套
+ *   不是到处都有），跟模型一样属于网关；「走本地还是云端」「本地引擎」「本地音色编号」不属于。
+ * - ai 四项：地址 / Key / 模型 + provider。provider 不是凭据，但它是「这套地址和 Key 是哪家」
+ *   的书签——界面上按它预填地址与模型，换一套凭据就得换这个书签。它也不被主进程读取
+ *   （取配置只看地址和 Key），所以留在方案里不改变任何行为。
  */
 export const CAPABILITY_FIELDS: Record<
   ProfileCapability,
@@ -127,11 +135,31 @@ export const CAPABILITY_FIELDS: Record<
     ['ttsApiKey', 'apiKey'],
     ['ttsModel', 'model'],
     ['ttsVoice', 'voice'],
-    ['ttsEngine', 'engine'],
-    ['ttsLocalEngine', 'localEngine'],
-    ['ttsLocalVoice', 'localVoice'],
   ],
 }
+
+/**
+ * v2 开发中途从方案里挪回全局段的那几个字段：`[哪一档, 方案里的旧字段名, 文档根上的扁平键]`。
+ *
+ * 这张表只为开发机上那份中途形状存在。口径改了而版本戳没改（v2 从没发到用户手上，
+ * 中途的几种形状都在同一台机器上被同一个版本号盖着），读的人按新表收口就会把
+ * 躺在方案里的旧字段直接丢掉：那是用户填过的「本地档位＝small」「配音引擎＝本地」，
+ * 丢完下一次写盘连痕迹都不剩，正是「读成功、写成功、东西没了」。所以读盘时先把这些值
+ * 升回文档根，再由 normalizeGlobals 收进全局段；方案里那份残留下一次写盘自然消失。
+ *
+ * 挪走而不是删除是另一回事：asr 的 provider / localModel / language 是 ①②步挪的，
+ * tts 那三个是 ⑧步挪的——两张表都得留在这里，直到 v2 定稿发出、这些形状不再可能出现。
+ */
+export const PROFILE_FIELDS_MOVED_TO_GLOBALS: ReadonlyArray<
+  readonly [ProfileCapability, string, string]
+> = [
+  ['asr', 'provider', 'asrProvider'],
+  ['asr', 'localModel', 'asrLocalModel'],
+  ['asr', 'language', 'asrLanguage'],
+  ['tts', 'engine', 'ttsEngine'],
+  ['tts', 'localEngine', 'ttsLocalEngine'],
+  ['tts', 'localVoice', 'ttsLocalVoice'],
+]
 
 /** 从 v1 搬出来的那条方案的 id 与界面上的名字：三步（迁移 / 读盘 / 落盘）都取这一处 */
 export const DEFAULT_PROFILE_IDS: DefaultProfileId = {

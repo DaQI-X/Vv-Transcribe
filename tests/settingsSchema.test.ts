@@ -6,7 +6,8 @@
  *
  * v2 落地之后生产注册表本身就有两步了，所以这里分成两半：
  * - 对真链提要求：进方案的扁平键一个不落地搬进对应那档、密钥原样搬、搬走的旧键删干净；
- *   没被方案认领的那几项（转写模式 / 本地档位 / 转写语言）留在文档根上。
+ *   没被方案认领的那几项（转写模式 / 本地档位 / 转写语言 / 配音引擎与本地那两样）
+ *   留在文档根上。
  *   那才是「用户填过的东西有没有在这一次搬运里丢掉」唯一说得清的地方。
  * - 保留假注册表那些极端形状（链中间缺一步、从链中间起步）：它们在第②③步之外
  *   永远证不了，等真缺一步时再测就晚了。
@@ -55,9 +56,10 @@ function profilesOf(doc: SettingsDocument): SettingsProfiles {
  * 这里刻意不 import CAPABILITY_FIELDS：表少写一条、把 localModel 归错档，
  * 用同一张表构造输入再用它断言输出会一起错过去，那样这条测试等于没写。
  *
- * asr 只有凭据三项进方案，模式 / 本地档位 / 转写语言落在下面那张全局表里——
- * 「换一家网关」换的是地址、Key、模型，语言跟着网关走是上一版拆错的地方。
- * ai / tts 这一轮还没改口径，所以仍带着各自的非凭据字段（provider / engine 等）。
+ * 进方案的是「这家网关的参数」：asr 三项（地址 / Key / 模型）、ai 四项（另加 provider，
+ * 它是「这套凭据属于哪家」的书签）、tts 四项（另加 voice，音色名是网关给的，不是我们选的）。
+ * 剩下的都在下面那张全局表里——走不走云端、本地档位、转写语言、本地引擎与本地音色编号，
+ * 换一家网关时这些东西都不该跟着换。
  */
 const V1_TO_PROFILE: ReadonlyArray<readonly [string, string, ProfileCapability, string]> = [
   ['asrApiKey', 'v1:YXNSLUtFWQ==', 'asr', 'apiKey'],
@@ -71,9 +73,6 @@ const V1_TO_PROFILE: ReadonlyArray<readonly [string, string, ProfileCapability, 
   ['ttsApiKey', 'v1:VFQtS0VZ', 'tts', 'apiKey'],
   ['ttsModel', 'tts-1', 'tts', 'model'],
   ['ttsVoice', 'alloy', 'tts', 'voice'],
-  ['ttsEngine', 'local', 'tts', 'engine'],
-  ['ttsLocalEngine', 'kokoro-multi-lang-v1_1', 'tts', 'localEngine'],
-  ['ttsLocalVoice', '3', 'tts', 'localVoice'],
 ]
 
 /** 没被任何一档方案认领的键：迁移一个都不许碰，它们照原样躺在文档根上（读进内存后叫 globals） */
@@ -81,6 +80,9 @@ const V1_GLOBAL: ReadonlyArray<readonly [string, string]> = [
   ['asrProvider', 'cloud'],
   ['asrLocalModel', 'small'],
   ['asrLanguage', 'en'],
+  ['ttsEngine', 'local'],
+  ['ttsLocalEngine', 'kokoro-multi-lang-v1_1'],
+  ['ttsLocalVoice', '3'],
 ]
 
 /** 一份写全了 v1 扁平键的文档（外加版本戳，好让这一步只测 v1→v2） */
@@ -171,16 +173,34 @@ describe('v1 → v2：扁平键拆成方案列表', () => {
 
   it('没进方案的那几项留在文档根上：搬完照原样，一条方案里都不许多出来', () => {
     // 上一版把 17 个键全塞进方案，于是每条网关各自带一份转写语言和本地档位——
-    // 用户切一家网关，语言跟着换了。这一条钉的就是拆错的那三键不许再进方案
+    // 用户切一家网关，语言跟着换了。这一条钉的就是那些「这次任务怎么选」的键不许再进方案
     const doc = migrated(migrateSettingsDocument(v1Document()))
     for (const [flatKey, value] of V1_GLOBAL) {
       expect(doc[flatKey], `全局键 ${flatKey} 不该被搬走或改掉`).toBe(value)
     }
-    const asr = profilesOf(doc).asr[0]
     for (const [flatKey] of V1_GLOBAL) {
-      expect(flatKey in asr, `全局键 ${flatKey} 不该出现在方案里`).toBe(false)
+      for (const cap of PROFILE_CAPABILITIES) {
+        expect(flatKey in profilesOf(doc)[cap][0], `全局键 ${flatKey} 不该出现在 ${cap} 的方案里`).toBe(false)
+      }
     }
-    expect(Object.keys(asr).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name'])
+    // 每档磁盘上的键名就是这一版的归属表：多一个键意味着有一项「全局共用」被搬进了某条方案
+    expect(Object.keys(profilesOf(doc).asr[0]).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name'])
+    expect(Object.keys(profilesOf(doc).ai[0]).sort()).toEqual([
+      'apiBase',
+      'apiKey',
+      'id',
+      'model',
+      'name',
+      'provider',
+    ])
+    expect(Object.keys(profilesOf(doc).tts[0]).sort()).toEqual([
+      'apiBase',
+      'apiKey',
+      'id',
+      'model',
+      'name',
+      'voice',
+    ])
   })
 
   it('三把 Key 原样搬，一个字符都不改', () => {

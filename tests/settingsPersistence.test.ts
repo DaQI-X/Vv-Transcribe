@@ -9,10 +9,11 @@
  * 1.0.9 把磁盘形状换成了按能力分列的**云端方案**列表（v2），这一层因此多出几条新的闸门与契约，
  * 都在下面：一次读盘/保存不许把用户没碰过的那几套方案弄没（列表是对象数组，
  * 「只收字符串」的旧收口会静默吃掉它），也不许把已经封好的 Key 在搬家路上换成一串解不开的。
- * 新口径还定了字段归属：方案里只躺凭据（接口地址 / Key / 模型），模式、本地档位、转写语言
- * 平铺在文档根上（内存里叫 store.globals）——所以「磁盘上这条方案的 keys 有哪几个」本身
- * 就是被测的契约，它是下一个版本要读的东西。某一档列表可以是空的（还没建过云端方案），
- * 空列表在落盘后仍然是空的：读盘与写盘都不许凭空补一条用户没建过的方案。
+ * 新口径还定了字段归属：方案里只躺这家网关的参数（接口地址 / Key / 模型，配音另加音色），
+ * 模式、本地档位、转写语言、配音引擎这些都平铺在文档根上（内存里叫 store.globals）——
+ * 所以「磁盘上这条方案的 keys 有哪几个」本身就是要被测的契约，它是下一个版本要读的东西。
+ * 三档列表都可以是空的（还没建过云端方案），空列表在落盘后仍然是空的：
+ * 读盘与写盘都不许凭空补一条用户没建过的方案。
  */
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -85,8 +86,12 @@ function diskProfile(
 
 /**
  * 一份 v2 形状的磁盘内容：默认三档各一条方案，按档整体替换、改默认指向，以及
- * **平铺在根上的全局段**（asrProvider / asrLocalModel / asrLanguage 这些不属于任何方案的键）。
- * 全局段必须能表达，因为新口径下「保存改了档位」看得见的位置就是文档根。
+ * **平铺在根上的全局段**（asrProvider / asrLocalModel / asrLanguage / ttsEngine 这些不属于任何方案的键）。
+ * 全局段必须能表达，因为新口径下「保存改了档位／引擎」看得见的位置就是文档根。
+ *
+ * 三条默认方案里只躺这一版认得的方案字段（地址 / Key / 模型 + 配音音色、校对服务商）。
+ * 「引擎」这种已经挪去全局段的键不放进来——放了它，每个用例都等于顺带测一次中途形状的救援，
+ * 那份证据就该由「字段归属改过」那条单独给。
  */
 function v2Document(
   profiles: Partial<Record<keyof SettingsProfiles, Array<Record<string, unknown>>>> = {},
@@ -100,7 +105,7 @@ function v2Document(
       profiles: {
         asr: [{ id: 'asr-default', name: '默认', apiKey: '', model: 'asr-default-model' }],
         ai: [{ id: 'ai-default', name: '默认', apiKey: '', model: 'gpt-4o' }],
-        tts: [{ id: 'tts-default', name: '默认', apiKey: '', engine: 'cloud' }],
+        tts: [{ id: 'tts-default', name: '默认', apiKey: '', model: 'tts-1', voice: 'alloy' }],
         ...profiles
       },
       defaultProfileId: { ...DEFAULT_PROFILE_IDS, ...defaultProfileId }
@@ -131,8 +136,8 @@ describe('首次运行', () => {
 
 describe('正常读写', () => {
   it('Key 以 v1: 密文落盘，重新载入后还能解出来（模拟一次重启）', async () => {
-    // 先放一份磁盘上已有的配置：新口径下转写这一档首次运行是 0 条方案，
-    // 而凭据只能写进某一条方案里（这一条要核的是密文往返，不是「没地方写」那句规矩）
+    // 先放一份磁盘上已有的配置：三档首次运行都是 0 条方案，而凭据只能写进某一条方案里
+    // （这一条要核的是密文往返，不是「没地方写」那句规矩）
     await writeFile(file(), v2Document())
     await loadInto(dir)
     await service.saveSettings({ asrApiKey: 'sk-first-abcdef', aiModel: 'gpt-4o' })
@@ -147,19 +152,25 @@ describe('正常读写', () => {
   })
 
   it('第二次保存前把上一份复制成 .bak，里面是被替换掉的那一版', async () => {
-    // 用校对那一档测：首次运行时它有一条默认方案，而转写那档还没有任何一条可写
+    // 从一个空目录开始：三档首次运行都是空列表，所以「建第一条方案」就是这里的第 1 次写盘。
+    // 它之前磁盘上没有文件可备份，所以那句「还没有 .bak」量的正是「第一次写不产生备份」
     await loadInto(dir)
-    await service.saveSettings({ aiApiKey: 'sk-first-abcdef' })
-    const first = diskProfile(await readJson(file()), 'ai').apiKey
+    const created = await service.createProfile('ai', { values: { aiModel: 'gpt-4o' } })
+    const id = created.profiles.ai[0].id
     expect(await namesWith('settings.json.bak')).toEqual([])
 
+    await service.saveSettings({ aiApiKey: 'sk-first-abcdef' })
+    const first = diskProfile(await readJson(file()), 'ai', id).apiKey
+    expect(first).toMatch(/^v1:/)
+
     await service.saveSettings({ aiApiKey: 'sk-second-uvwxyz' })
-    const backup = diskProfile(await readJson(`${file()}.bak`), 'ai').apiKey
+    const backup = diskProfile(await readJson(`${file()}.bak`), 'ai', id).apiKey
     expect(backup).toBe(first)
-    expect(diskProfile(await readJson(file()), 'ai').apiKey).not.toBe(first)
+    expect(diskProfile(await readJson(file()), 'ai', id).apiKey).not.toBe(first)
   })
 
   it('留空＝不改、null＝清除：只改模型名不会把磁盘上那把 Key 弄丢', async () => {
+    await writeFile(file(), v2Document())
     await loadInto(dir)
     await service.saveSettings({ aiApiKey: 'sk-keep-me' })
     await service.saveSettings({ aiModel: 'gpt-4o-mini' })
@@ -193,8 +204,11 @@ describe('settings.json 解不开（corrupt）', () => {
     await service.getSettingsView()
     const archived = (await namesWith('settings.json.corrupt-'))[0]
 
-    await service.saveSettings({ aiModel: 'gpt-4o' })
-    expect(diskProfile(await readJson(file()), 'ai').model).toBe('gpt-4o')
+    // 那份半截文件已经挪走，此刻的 store 是默认那份（三档都空）——所以建一条方案是
+    // 「写回新配置」最短的一次写；下面那句 storageProblem 才是这条真正要核的东西
+    const created = await service.createProfile('ai', { values: { aiModel: 'gpt-4o' } })
+    const createdId = created.profiles.ai[0].id
+    expect(diskProfile(await readJson(file()), 'ai', createdId).model).toBe('gpt-4o')
     // 这条是设计决定，不是实现巧合：留档发生过，界面就得一直说得出原件在哪个文件里
     expect((await service.getSettingsView()).storageProblem).toContain(archived)
   })
@@ -458,10 +472,11 @@ describe('多方案（v2）的两道闸门', () => {
     expect((await service.getASRConfig()).localModel).toBe('small')
   })
 
-  it('手写文件里 defaultProfileId 指不到任何方案：转写落空串、校对落第一条、空列表不补方案', async () => {
+  it('手写文件里 defaultProfileId 指不到任何方案：三档都落空串，空列表不补方案', async () => {
     // 磁盘是系统边界：这一条不许假设「我们写出去的 id 一定指得到人」。
-    // 三个分支各按各的口径：转写不替用户挑（新口径），校对/配音这一轮还兜着（那两档界面还没改），
-    // 而「列表本来就空」哪一档都不许凭空补一条——那是造用户没建过的配置
+    // 三档同一口径（#222 重写⑧）：没人指路时不落回第一条——那等于用排第一的那家网关替用户
+    // 做了决定，而下一次花的钱按那条计价。「列表本来就空」哪一档都不许凭空补一条，那是造用户
+    // 没建过的配置。
     await writeFile(
       file(),
       JSON.stringify(
@@ -482,15 +497,97 @@ describe('多方案（v2）的两道闸门', () => {
 
     const settings = await service.loadSettings()
     expect(settings.asrModel).toBe('')
+    expect(settings.aiModel).toBe('')
     expect(await service.resolveProfileId('asr')).toBe('')
-    expect(settings.aiModel).toBe('gpt-a')
+    expect(await service.resolveProfileId('ai')).toBe('')
     expect((await service.getSettingsView()).storageProblem).toBeNull()
 
-    await service.saveSettings({ aiModel: 'renamed' })
+    // 指针是空串＝「没选」，凭据得点名写进某一条；不带 profileIds 的这句会被拦下
+    await expect(service.saveSettings({ aiModel: 'no-place' })).rejects.toThrow(
+      '这一类现在还没有任何配置方案'
+    )
+    await service.saveSettings({ aiModel: 'renamed', profileIds: { ai: 'ai-a' } })
     const onDisk = await readJson(file())
-    expect(onDisk.defaultProfileId).toEqual({ asr: '', ai: 'ai-a', tts: '' })
+    expect(onDisk.defaultProfileId).toEqual({ asr: '', ai: '', tts: '' })
+    expect(diskProfile(onDisk, 'ai', 'ai-a').model).toBe('renamed')
     // 空着的那一档还是空着：落盘不补方案
     expect(diskProfiles(onDisk).tts).toEqual([])
     expect(diskProfiles(onDisk).asr).toHaveLength(1)
+  })
+
+  it('中途挪回全局段的那些字段：从方案里升回文档根，方案里那份随下一次写盘消失', async () => {
+    // v2 换过一次字段归属而版本戳没换（这一版从没发到用户手上），开发机上的文件还是
+    // 「引擎/档位/语言躺在方案里」那副形状。按新表收口会把这些值当怪键扔掉——
+    // 那是用户填过的「配音引擎＝本地」，丢完连痕迹都不剩。这一条钉的就是那次救援。
+    await writeFile(
+      file(),
+      JSON.stringify(
+        {
+          schemaVersion: 2,
+          profiles: {
+            asr: [{ id: 'asr-a', name: 'A', model: 'w1', provider: 'cloud', localModel: 'small', language: 'en' }],
+            ai: [{ id: 'ai-a', name: 'A', model: 'gpt-a' }],
+            tts: [{ id: 'tts-a', name: 'A', engine: 'local', localEngine: 'kokoro', localVoice: '3' }]
+          },
+          defaultProfileId: { asr: 'asr-a', ai: 'ai-a', tts: 'tts-a' }
+        },
+        null,
+        2
+      )
+    )
+    await loadInto(dir)
+
+    const settings = await service.loadSettings()
+    expect(settings).toMatchObject({
+      asrProvider: 'cloud',
+      asrLocalModel: 'small',
+      asrLanguage: 'en',
+      ttsEngine: 'local',
+      ttsLocalEngine: 'kokoro',
+      ttsLocalVoice: '3',
+    })
+
+    // 一次只改全局段的保存，把内存里那份（已升过字段）落回磁盘：读的时候救上来，
+    // 写的时候方案里就不该再带着这些没人读的键
+    await service.saveSettings({ asrLanguage: 'en' })
+    const onDisk = await readJson(file())
+    expect(onDisk).toMatchObject({ ttsEngine: 'local', ttsLocalEngine: 'kokoro', asrLocalModel: 'small' })
+    expect(diskProfile(onDisk, 'tts', 'tts-a')).toMatchObject({ id: 'tts-a' })
+    expect(Object.keys(diskProfile(onDisk, 'tts', 'tts-a')).sort()).toEqual([
+      'apiBase',
+      'apiKey',
+      'id',
+      'model',
+      'name',
+      'voice',
+    ])
+
+    // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住，不靠内存里那一次升字段
+    await loadInto(dir)
+    expect((await service.loadSettings()).ttsLocalVoice).toBe('3')
+  })
+
+  it('文档根上已经有那个键时以根上的为准：方案里的旧形状不许把它盖掉', async () => {
+    // 新形状写出来的那份在根上，方案里的是上一版形状的残留。谁的时代新用谁的，
+    // 否则一次「重读旧文件」就把用户后来改过的档位倒回去
+    await writeFile(
+      file(),
+      JSON.stringify(
+        {
+          schemaVersion: 2,
+          ttsEngine: 'cloud',
+          profiles: {
+            asr: [],
+            ai: [],
+            tts: [{ id: 'tts-a', name: 'A', engine: 'local' }]
+          },
+          defaultProfileId: { asr: '', ai: '', tts: 'tts-a' }
+        },
+        null,
+        2
+      )
+    )
+    await loadInto(dir)
+    expect((await service.loadSettings()).ttsEngine).toBe('cloud')
   })
 })

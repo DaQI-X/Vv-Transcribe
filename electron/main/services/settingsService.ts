@@ -47,6 +47,7 @@ import {
   DEFAULT_PROFILE_NAME,
   MAX_PROFILES_PER_CAPABILITY,
   PROFILE_CAPABILITIES,
+  PROFILE_FIELDS_MOVED_TO_GLOBALS,
   PROFILES_FIELD,
   migrateSettingsDocument,
   type DefaultProfileId,
@@ -214,7 +215,8 @@ const DEFAULT_SETTINGS: AppSettings = {
  * 从两张表推出来而不是在这里再列一遍：那张表是「哪一档有哪几项」唯一的事实来源，
  * 这里抄一份就会出现「asr 已经把 provider 退回全局、全局段还当它是方案字段」这种分叉，
  * 而分叉的方向是把用户填过的值写进一个没人读的位置——读得到、写进去、东西没了。
- * 此刻是 asrProvider / asrLocalModel / asrLanguage 三个（校对、配音的非凭据字段还留在各自方案里）。
+ * 此刻是 asrProvider / asrLocalModel / asrLanguage / ttsEngine / ttsLocalEngine / ttsLocalVoice
+ * 六个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」都在这）。
  */
 const GLOBAL_FLAT_KEYS: readonly string[] = (() => {
   const claimed = new Set<string>()
@@ -328,6 +330,20 @@ export class SettingsWriteBlockedError extends Error {
     super(message)
     this.name = 'SettingsWriteBlockedError'
   }
+}
+
+/**
+ * 动手改配置之前先问一次闸门，和 writeRaw 里那句是同一个条件、两处都要：
+ * writeRaw 那句保证「无论如何都写不出去」，这一句保证**报的是真原因**。
+ * 读失败时内存里那份是默认 store（三档都空），于是界面拿着的每一个方案 id 都「指不到人」——
+ * 不先拦这一步，用户看到的是「配音配置里已经没有这套方案了（可能在别处被删掉）」，
+ * 而真相是文件压根没读出来。让他去找一把自己没删过的 Key，是我们把话说错了。
+ *
+ * 调用点必须在 `await readCache()` 之后：闸门是那次读盘读出来才立起来的，
+ * 放在读之前看到的一律是 false，这道检查就成了空动作。
+ */
+function rejectIfWriteBlocked(): void {
+  if (writeBlocked) throw new SettingsWriteBlockedError(writeBlockedMessage())
 }
 
 /**
@@ -551,24 +567,20 @@ function defaultProfileFor(cap: ProfileCapability): Profile {
 /**
  * 首次运行、以及「读盘失败退回默认配置」用的那份。
  *
- * 转写档是**空列表**：用户选了「云端优先」而一条方案都没建过时，界面要给的正是
- * 「新建一套」那颗按钮，而不是一条空凭据的方案占着列表（#222 新口径里的 0 配置）。
- * 校对、配音仍各留一条默认方案——这一轮没改它们的界面，那两条还是「设为当前使用」那套
- * 老交互，列表空着会让它们没有可编辑的对象。
- * 全局段照 DEFAULT_SETTINGS 起步：转写模式默认本地，所以空列表不影响首次运行能用。
+ * 三档都是**空列表**：一条方案都没建过时，界面要给的正是那颗「新建API接入」，
+ * 而不是一条空凭据的方案占着列表（#222 新口径里的 0 配置）。以前校对/配音各留一条
+ * 「默认」方案是为了喂老那套「设为当前使用」交互——它们的界面换成同一个列表之后，
+ * 那条凭空出现的空方案就只剩副作用：界面上多一行没填过的东西，而 `getAIConfig` 拿到的
+ * 是「有一条方案、但地址和 Key 都空」，报错话术比「一条都没有」更难指路。
+ * 全局段照 DEFAULT_SETTINGS 起步：转写模式与配音引擎都默认本地/云端各自的默认值，
+ * 空列表不影响「本地转写 + 本地校对」这条零配置的路能走。
  */
 function defaultStore(): SettingsStore {
   const profiles = {} as SettingsProfiles
   const defaultProfileId = {} as DefaultProfileId
   for (const cap of PROFILE_CAPABILITIES) {
-    if (cap === 'asr') {
-      profiles[cap] = []
-      defaultProfileId[cap] = ''
-      continue
-    }
-    const profile = defaultProfileFor(cap)
-    profiles[cap] = [profile]
-    defaultProfileId[cap] = profile.id
+    profiles[cap] = []
+    defaultProfileId[cap] = ''
   }
   return { globals: defaultGlobals(), profiles, defaultProfileId }
 }
@@ -591,23 +603,15 @@ function cloneStore(store: SettingsStore): SettingsStore {
  *
  * - 列表空 → 空串。没有可指的方案，硬指一条等于凭空造配置。
  * - id 指得到人 → 原样。
- * - id 指不到人（缺失、被删、手写坏）：转写落空串，校对/配音落回第一条。
- *   转写这档按 #222 新口径来：用户删掉「当前使用」那条之后，界面和 readiness 会直接说
- *   「现在没有正在使用的转写方案」，让应用悄悄换成列表里排第一的那条等于替他选了家网关，
- *   而下一次转写花的钱是按那条网关计价的。校对/配音这一轮还是「设为当前使用」那套交互，
- *   没人指路时 `getAIConfig` 会回一份空凭据、正在用的校对当场失败——所以这里先替它们兜住。
- *   第②③步把那两档改成同一口径后，这个分支就该删掉。
+ * - id 指不到人（缺失、被删、手写坏）→ 空串。
+ *   用户删掉「当前使用」那条之后，界面和 readiness 会直接说「现在没有正在使用的方案」，
+ *   让应用悄悄换成列表里排第一的那条等于替他选了家网关，而下一次花的钱是按那条网关计价的。
+ *   原来这里给校对/配音留过「落回第一条」的兜底，因为那时它们的凭据取值没有别的路解释
+ *   「没选」；那两档换成同一个列表口径之后，兜底就成了唯一的分叉，所以删了。
  */
-const REPOINT_DEFAULT_WHEN_MISSING: readonly ProfileCapability[] = ['ai', 'tts']
-
-function fixDefaultId(
-  cap: ProfileCapability,
-  list: Profile[],
-  wanted: string
-): string {
+function fixDefaultId(list: Profile[], wanted: string): string {
   if (list.length === 0) return ''
-  if (list.some((profile) => profile.id === wanted)) return wanted
-  return REPOINT_DEFAULT_WHEN_MISSING.includes(cap) ? list[0].id : ''
+  return list.some((profile) => profile.id === wanted) ? wanted : ''
 }
 
 /**
@@ -714,6 +718,38 @@ function normalizeGlobals(doc: SettingsDocument): SettingsGlobals {
 }
 
 /**
+ * 中途从方案挪回全局段的那几个字段（表在 settingsSchema 的 PROFILE_FIELDS_MOVED_TO_GLOBALS）：
+ * 读盘时先把值升回文档根，再由 normalizeGlobals 收进全局段。
+ *
+ * 这一步只在开发机上有效力，但它守的是那条不许破的承诺：v2 中途换过一次归属，而版本戳没换
+ * （这一版从没发到用户手上），同一台机器上的 settings.json 可能还是「引擎/档位/语言躺在方案里」
+ * 那副形状。按新表收口等于把这些字段当没认出来的怪键扔掉——用户填过的「配音引擎＝本地」
+ * 读得到、写成功、东西没了。升回根上之后，方案里那份残留因为不在表里，下一次 writeRaw 自然不再写它。
+ *
+ * 两条取舍：
+ * - 根上已经有个字符串就不接管。根上那份是新形状写出来的，方案里的是旧形状，谁的年代新用谁的。
+ * - donor 用「当前使用」那条，指不到人就用列表第一条。多条方案各自带着不同的引擎值时，
+ *   新口径下这个值本来就不属于方案——按正在用的那条走是唯一不猜的理由。
+ */
+function hoistRelocatedFields(
+  doc: SettingsDocument,
+  rawProfiles: Record<string, unknown>,
+  rawIds: Record<string, unknown>
+): SettingsDocument {
+  let next = doc
+  for (const [cap, field, flatKey] of PROFILE_FIELDS_MOVED_TO_GLOBALS) {
+    if (typeof next[flatKey] === 'string') continue
+    const entries = Array.isArray(rawProfiles[cap]) ? rawProfiles[cap] : []
+    const wanted = typeof rawIds[cap] === 'string' ? rawIds[cap] : ''
+    const donor = asObject(entries.find((entry) => asObject(entry).id === wanted) ?? entries[0])
+    const value = donor[field]
+    if (typeof value !== 'string' || !value) continue
+    next = { ...next, [flatKey]: value }
+  }
+  return next
+}
+
+/**
  * 把迁移过的文档落成 SettingsStore。
  *
  * 这一层存在的理由就写在名字里：v1 时代的读盘收口「只收字符串」，而方案列表是对象数组——
@@ -726,6 +762,8 @@ function normalizeStore(doc: SettingsDocument): SettingsStore {
   const defaultProfileId = {} as DefaultProfileId
   const src = asObject(doc[PROFILES_FIELD])
   const ids = asObject(doc[DEFAULT_PROFILE_ID_FIELD])
+  // 先升字段再收口：normalizeProfile 只认表里那几项，方案里的旧字段一旦被它接手就没了
+  const docForGlobals = hoistRelocatedFields(doc, src, ids)
   for (const cap of PROFILE_CAPABILITIES) {
     const entries = Array.isArray(src[cap]) ? src[cap] : []
     const list: Profile[] = []
@@ -748,13 +786,9 @@ function normalizeStore(doc: SettingsDocument): SettingsStore {
     // （createProfile），读侧剪掉就是「读成功、写成功、东西没了」——破的是「绝不静默丢用户
     // 的东西」。手改文件里有 5 条就照 5 条读，界面上多出来的那几条照样能选、能删。
     profiles[cap] = list
-    defaultProfileId[cap] = fixDefaultId(
-      cap,
-      list,
-      typeof ids[cap] === 'string' ? ids[cap] : ''
-    )
+    defaultProfileId[cap] = fixDefaultId(list, typeof ids[cap] === 'string' ? ids[cap] : '')
   }
-  return { globals: normalizeGlobals(doc), profiles, defaultProfileId }
+  return { globals: normalizeGlobals(docForGlobals), profiles, defaultProfileId }
 }
 
 /**
@@ -930,6 +964,10 @@ function hasCredentialInput(patch: SettingsPatch, cap: ProfileCapability): boole
  */
 export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> {
   const current = await readCache()
+  // 闸门先看，再谈「这几项没地方写」：这一档此刻没有方案是 0 配置的正常状态（三档都从空列表
+  // 起步），而「先新建一套再保存」这条出路在闸门落着的时候一个字都走不通。两个原因都要说，
+  // 但磁盘不能碰那个才是用户当下能行动的那个。
+  rejectIfWriteBlocked()
   const merged = cloneStore(current.raw)
   const incoming = patch as Partial<AppSettings>
   // 全局段只认 GLOBAL_FLAT_KEYS 里那几个名字，且只收字符串：界面上多带的字段
@@ -973,7 +1011,7 @@ export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> 
   }
   // 写盘前把「默认 id 指得到人」这条不变量再对一遍，与每条增删改共用同一个规则
   for (const cap of PROFILE_CAPABILITIES) {
-    merged.defaultProfileId[cap] = fixDefaultId(cap, merged.profiles[cap], merged.defaultProfileId[cap])
+    merged.defaultProfileId[cap] = fixDefaultId(merged.profiles[cap], merged.defaultProfileId[cap])
   }
   await writeRaw(merged)
   // 回来的视图要说的是「刚写进去的那几条」，不然界面编辑一条非默认方案时
@@ -1043,11 +1081,7 @@ export async function listProfiles(): Promise<ProfilesView> {
  */
 async function commitStore(merged: SettingsStore): Promise<ProfilesView> {
   for (const cap of PROFILE_CAPABILITIES) {
-    merged.defaultProfileId[cap] = fixDefaultId(
-      cap,
-      merged.profiles[cap],
-      merged.defaultProfileId[cap]
-    )
+    merged.defaultProfileId[cap] = fixDefaultId(merged.profiles[cap], merged.defaultProfileId[cap])
   }
   await writeRaw(merged)
   return listProfiles()
@@ -1089,6 +1123,7 @@ export async function createProfile(
 ): Promise<ProfilesView> {
   const cap = normalizeCapability(rawCap)
   const current = await readCache()
+  rejectIfWriteBlocked()
   const merged = cloneStore(current.raw)
   const list = merged.profiles[cap]
   if (list.length >= MAX_PROFILES_PER_CAPABILITY) {
@@ -1149,22 +1184,24 @@ export async function renameProfile(
   const next = normalizeProfileName(name)
   if (!next) throw new SettingsProfileRuleError(PROFILE_NAME_REQUIRED_MESSAGE)
   const current = await readCache()
+  rejectIfWriteBlocked()
   const merged = cloneStore(current.raw)
   mustFindProfile(merged, cap, profileId).name = next
   return commitStore(merged)
 }
 
 /**
- * 删掉一条方案，含它保存的密钥。允许删到最后一条：转写这一档从此是「0 配置」，
- * 界面给的是「新建一套」，getter 投出来的是空凭据，readiness 拦下这次云端转写并说清楚为什么。
+ * 删掉一条方案，含它保存的密钥。允许删到最后一条：这一档从此是「0 配置」，
+ * 界面给的是那颗「新建API接入」，getter 投出来的是空凭据，readiness 拦下这一次云端调用并说清楚为什么。
  *
- * 删掉的正是「当前使用」那条时，转写这边**不落回剩下第一条**（`fixDefaultId` 那句），
- * 因为那等于用界面上排第一的那家网关替用户做了决定；校对/配音这一轮还兜着，理由在那句的注释里。
+ * 删掉的正是「当前使用」那条时**不落回剩下第一条**（`fixDefaultId` 那句），
+ * 因为那等于用界面上排第一的那家网关替用户做了决定，而下一次花的钱按那条计价。
  */
 export async function deleteProfile(rawCap: unknown, rawProfileId: unknown): Promise<ProfilesView> {
   const cap = normalizeCapability(rawCap)
   const profileId = normalizeProfileIdArg(rawProfileId)
   const current = await readCache()
+  rejectIfWriteBlocked()
   const merged = cloneStore(current.raw)
   mustFindProfile(merged, cap, profileId)
   merged.profiles[cap] = merged.profiles[cap].filter((profile) => profile.id !== profileId)
@@ -1183,6 +1220,7 @@ export async function setDefaultProfile(
   const cap = normalizeCapability(rawCap)
   const profileId = normalizeProfileIdArg(rawProfileId)
   const current = await readCache()
+  rejectIfWriteBlocked()
   const merged = cloneStore(current.raw)
   mustFindProfile(merged, cap, profileId)
   merged.defaultProfileId[cap] = profileId

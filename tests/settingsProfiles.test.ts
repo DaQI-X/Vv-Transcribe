@@ -126,8 +126,10 @@ const sealed = (plain: string) => `v1:${Buffer.from(`fake:${plain}`, 'utf-8').to
 
 /**
  * 一份 v2 文档：三档的方案列表、每档默认指向，以及**平铺在根上的全局段**都能整体替换。
- * 全局段那第三参是新口径的关键形状——asrProvider / asrLocalModel / asrLanguage 躺在根上，
+ * 全局段那第三参是新口径的关键形状——asrProvider / ttsEngine 这些躺在根上，
  * 不在任何一条方案里，所以这一份 helper 必须能表达「根上有值」这件事。
+ * 三条默认方案里只躺这一版认得的方案字段（配音那档是地址 / Key / 模型 / 音色），
+ * 已经挪去全局段的键不放进来——放了它，每个用例都等于顺带测一次中途形状的救援。
  */
 function v2Document(
   profiles: Partial<Record<keyof SettingsProfiles, Array<Record<string, unknown>>>> = {},
@@ -141,7 +143,7 @@ function v2Document(
       profiles: {
         asr: [{ id: 'asr-default', name: '默认', apiKey: '', model: 'asr-default-model' }],
         ai: [{ id: 'ai-default', name: '默认', apiKey: '', model: 'gpt-4o' }],
-        tts: [{ id: 'tts-default', name: '默认', apiKey: '', engine: 'cloud' }],
+        tts: [{ id: 'tts-default', name: '默认', apiKey: '', model: 'tts-1', voice: 'alloy' }],
         ...profiles
       },
       defaultProfileId: { ...DEFAULT_PROFILE_IDS, ...defaultProfileId }
@@ -174,13 +176,6 @@ async function onlyExtra(cap: keyof SettingsProfiles, known: string[]): Promise<
   const extra = list.filter((profile) => !known.includes(profile.id))
   if (extra.length !== 1) throw new Error(`${cap} 那一列里新出来的方案应该有 1 条，实际 ${extra.length} 条`)
   return extra[0] as unknown as Record<string, unknown>
-}
-
-/** 这一档此刻磁盘上唯一那条（0→1 之后用的就是它，id 仍然不许猜） */
-async function onlyProfile(cap: keyof SettingsProfiles): Promise<Record<string, unknown>> {
-  const list = diskProfiles(await readJson(file()))[cap]
-  if (list.length !== 1) throw new Error(`${cap} 那一列里应该有 1 条，实际 ${list.length} 条`)
-  return list[0] as unknown as Record<string, unknown>
 }
 
 function idOf(cap: ProfileCapability, view: ProfilesView, name: string): string {
@@ -232,8 +227,8 @@ describe('取值按 id 挑方案', () => {
           { id: 'ai-second', name: '第二套', apiKey: sealed('sk-ai-second'), apiBase: 'https://ai-second.example', model: 'gpt-second' }
         ],
         tts: [
-          { id: 'tts-default', name: '默认', apiKey: '', engine: 'cloud', model: 'tts-default', apiBase: 'https://tts-default.example' },
-          { id: 'tts-second', name: '第二套', apiKey: '', engine: 'cloud', model: 'tts-second', apiBase: '' }
+          { id: 'tts-default', name: '默认', apiKey: '', model: 'tts-default', voice: 'alloy', apiBase: 'https://tts-default.example' },
+          { id: 'tts-second', name: '第二套', apiKey: '', model: 'tts-second', voice: '', apiBase: '' }
         ]
       },
       { asr: 'asr-default', ai: 'ai-default', tts: 'tts-default' },
@@ -309,20 +304,33 @@ describe('取值按 id 挑方案', () => {
     }
   })
 
-  it('方案里躺着表外的键（开发中途那版形状）：读进来不收，也不许当成凭据投出去', async () => {
-    // 这一条防的是分叉：CAPABILITY_FIELDS 把 provider 退回全局之后，谁都不该再读方案里那份
+  it('方案里躺着表外的键（开发中途那版形状）：值升回全局段，方案里那份不再算这条网关的参数', async () => {
+    // CAPABILITY_FIELDS 把 provider / localModel / language 退回全局段之后，方案里那份是
+    // 中途那版形状的残留。直接扔掉等于「读成功、写成功、东西没了」——那是用户填过的档位，
+    // 所以读盘先把它们升回文档根（表在 settingsSchema 的 PROFILE_FIELDS_MOVED_TO_GLOBALS），
+    // 升上来就是全局段：按哪条方案取都同一个值，而不是每条各自带一份
     await writeFile(
       file(),
-      v2Document({
-        asr: [{ id: 'asr-x', name: 'X', apiKey: '', model: 'm-x', provider: 'openai', localModel: 'small', language: 'en' }]
-      })
+      v2Document(
+        {
+          asr: [
+            { id: 'asr-x', name: 'X', apiKey: '', model: 'm-x', provider: 'cloud', localModel: 'small', language: 'en' },
+            { id: 'asr-y', name: 'Y', apiKey: '', model: 'm-y' }
+          ]
+        },
+        { asr: 'asr-x' }
+      )
     )
     await loadInto(dir)
-    const config = await service.getASRConfig('asr-x')
-    expect(config.provider).toBe('local')
-    expect(config.localModel).toBe('base')
-    expect((await service.loadSettings({ asr: 'asr-x' })).asrLanguage).toBe('zh')
-    expect(await onlyProfile('asr')).toMatchObject({ id: 'asr-x', model: 'm-x' })
+    expect((await service.getASRConfig('asr-x')).provider).toBe('cloud')
+    expect((await service.getASRConfig('asr-x')).localModel).toBe('small')
+    // 换一条方案，档位与语言跟着换是上一版拆错的地方
+    expect((await service.getASRConfig('asr-y')).localModel).toBe('small')
+    expect((await service.loadSettings({ asr: 'asr-y' })).asrLanguage).toBe('en')
+    // 凭据照各自那条投，投给界面的方案形状里也没有那三项
+    expect((await service.getASRConfig('asr-y')).model).toBe('m-y')
+    const view = await service.listProfiles()
+    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel'])
   })
 
   it('配音留空回落的「校对那套」固定是校对档当前默认那条，不跟配音的 id 走', async () => {
@@ -374,13 +382,18 @@ describe('这一档 0 条方案时（新口径的「还没建过云端方案」�
     expect(view.storageProblem).toBeNull()
   })
 
-  it('首次运行（磁盘上根本没文件）：转写档 0 条，校对/配音各留一条默认', async () => {
+  it('首次运行（磁盘上根本没文件）：三档都 0 条，界面给的是那颗「新建API接入」', async () => {
     await resetDir()
     await loadInto(dir)
     const view = await service.listProfiles()
-    expect(view.profiles.asr).toEqual([])
-    expect(view.defaultProfileId).toEqual({ asr: '', ai: DEFAULT_PROFILE_IDS.ai, tts: DEFAULT_PROFILE_IDS.tts })
+    expect(view.profiles).toEqual({ asr: [], ai: [], tts: [] })
+    expect(view.defaultProfileId).toEqual({ asr: '', ai: '', tts: '' })
+    // 三档空列表不许把零配置那条路堵死：全局段照 DEFAULT_SETTINGS 起步，本地转写照样投得出档位，
+    // 校对在没有任何方案时投出的是「没填」+ 端点兜底，而不是一条凭空出现的空方案
     expect((await service.getASRConfig()).provider).toBe('local')
+    expect((await service.getASRConfig()).localModel).toBe('base')
+    expect((await service.getAIConfig()).apiKey).toBe('')
+    expect((await service.getAIConfig()).apiBase).toBe('https://api.openai.com')
     // 只读不该在磁盘上留下任何文件
     expect(await keptNames()).toEqual([])
   })
@@ -521,11 +534,15 @@ describe('方案列表：一次给全的脱敏形状', () => {
 
   it('values 的键名就是界面上那套扁平名，且不包含密钥', async () => {
     const view = await service.listProfiles()
-    // 转写这一档只剩两项非凭据字段可见（Key 走状态位）：模式/档位/语言是全局段，不在方案里
+    // 三档都只剩「这家网关的参数」（Key 走状态位）：模式 / 档位 / 语言 / 引擎是全局段，不在方案里
     expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel'])
     expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['aiApiBase', 'aiModel', 'aiProvider'])
     expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
-    expect(view.profiles.tts[0].values).toHaveProperty('ttsLocalEngine')
+    expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual([
+      'ttsApiBase',
+      'ttsModel',
+      'ttsVoice',
+    ])
     // 连密钥的**键名**都不许出现：表单把这一份直接盖到自己身上，
     // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串
     for (const cap of ['asr', 'ai', 'tts'] as const) {
@@ -764,7 +781,7 @@ describe('改名 / 删除 / 换默认', () => {
     expect(view.defaultProfileId.ai).toBe(DEFAULT_PROFILE_IDS.ai)
   })
 
-  it('校对/配音这一轮还兜第一条（那两档的界面还没改口径）', async () => {
+  it('三档同口径：id 指不到人一律落空串，不替用户挑第一条', async () => {
     await writeFile(
       file(),
       v2Document({
@@ -775,11 +792,14 @@ describe('改名 / 删除 / 换默认', () => {
       }, { ai: 'ai-ghost' })
     )
     await loadInto(dir)
-    // 转写指不到人 → 空串；校对指不到人 → 落第一条。两个方向都在这一条里对出来
-    expect((await service.listProfiles()).defaultProfileId.ai).toBe('ai-a')
-    expect((await service.getAIConfig()).model).toBe('gpt-a')
+    // 校对/配音以前在这里兜第一条，是因为那两档的取值还没有「没选」这个状态；
+    // 换成同一个列表口径之后，兜底就成了唯一的分叉——落第一条等于用排第一的那家网关
+    // 替用户做了决定，而下一次花的钱按那条计价
+    expect((await service.listProfiles()).defaultProfileId.ai).toBe('')
+    expect(await service.resolveProfileId('ai')).toBe('')
+    expect((await service.getAIConfig()).apiKey).toBe('')
     await service.deleteProfile('ai', 'ai-a')
-    expect((await service.listProfiles()).defaultProfileId.ai).toBe('ai-b')
+    expect((await service.listProfiles()).defaultProfileId.ai).toBe('')
   })
 
   it('增删改对一条指不到人的方案一律报错，绝不落到第一条', async () => {
@@ -825,10 +845,10 @@ describe('读盘出问题时，闸门对增删改同样生效', () => {
     await expect(service.setDefaultProfile('tts', DEFAULT_PROFILE_IDS.tts)).rejects.toThrow(
       SETTINGS_WRITE_BLOCKED
     )
-    // 删除也落在闸门上（默认 store 里配音那档有「默认」那条，指得到人），
-    // 转写这一档此刻是 0 条：连「删哪一条」都指不到人，报的是规矩那句——两种都不许落盘
+    // 闸门先看，再看「这条方案在不在」：读失败时内存里是默认 store（三档都空），
+    // 界面手里每个 id 都「指不到人」——先报规矩那句等于让用户去找一把自己没删过的方案
     await expect(service.deleteProfile('tts', DEFAULT_PROFILE_IDS.tts)).rejects.toThrow(SETTINGS_WRITE_BLOCKED)
-    await expect(service.deleteProfile('asr', 'asr-default')).rejects.toThrow('已经没有这套方案')
+    await expect(service.deleteProfile('asr', 'asr-default')).rejects.toThrow(SETTINGS_WRITE_BLOCKED)
     expect(await keptNames()).toEqual(['settings.json'])
   })
 
