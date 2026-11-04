@@ -1098,6 +1098,33 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--text-primary);
 }
 
+/* 贴在标题旁那颗刷新：不带边框、不给文字，hover 才出底色。
+   它是「随时可点一下」的辅助动作，给成 .history-panel__ghost 那颗的样子就跟「关闭」一样重了。 */
+.history-panel__icon {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.history-panel__icon:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.history-panel__icon:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* 分tab按「哪一类作业」切：转写、下载、配音是三件不同的事，混在一列里读不出重点。
    着色抄首页 .upload-tabs 那一套，两档主题各自的覆盖也一起抄。 */
 .history-tabs {

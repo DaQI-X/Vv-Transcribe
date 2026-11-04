@@ -236,15 +236,16 @@ export function HistoryPanel() {
       <div className="history-panel">
         <div className="history-panel__header">
           <span className="history-panel__title">历史记录</span>
+          {/* 刷新收成一颗图标贴在标题旁：两颗都带边框和文字会把辅助动作抬到跟「关闭」一样重 */}
           <button
             type="button"
-            className="history-panel__ghost"
+            className="history-panel__icon"
             onClick={() => void refresh()}
             disabled={loading}
             title={loading ? '正在读盘' : '重新读一遍磁盘上那本账'}
+            aria-label="刷新历史记录"
           >
             <RotateCw size={12} className={loading ? 'animate-spin' : undefined} />
-            {loading ? '读取中' : '刷新'}
           </button>
           <button
             type="button"
