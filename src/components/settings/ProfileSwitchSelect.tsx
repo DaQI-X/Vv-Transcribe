@@ -23,7 +23,7 @@ interface ProfileSwitchSelectProps {
   /** 页面在忙什么只有页面知道：正在跑的那一批用的是开跑时读好的那套，这时候不许再切 */
   disabled?: boolean
   /**
-   * 配音那一条要顺带清空单次参数（云端模型与音色跟着方案走）并重读设置，
+   * 配音那一条要顺带清空单次参数（配音模型跟着方案走，音色不在方案里）并重读设置，
    * 所以它交进来的是自己那条链路；不给就走 store 里那个通用切换。
    */
   switchTo?: (profileId: string) => void | Promise<void>

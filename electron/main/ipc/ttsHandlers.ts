@@ -4,7 +4,8 @@
  * 都应该在这一步暴露，而不是等整条稿子跑到中途。
  * 段落时间轴只由渲染层持有，主进程按 id 记账（jobId → 临时目录 → 成品轨），
  * 界面报回来的路径一律不用。
- * 音色、倍速、模型与本地引擎走「单次调用参数」，不写回 settings.json：工作台上的临时试错不该变成用户的长期默认值。
+ * 音色、倍速与本地引擎走「单次调用参数」，不写回 settings.json：工作台上的临时试错不该变成用户的长期默认值。
+ * 云端配音模型不在这一份里（1.1.0 起跟着「配音方案」整套走），界面只能换方案，不能换这一项。
  * 本地配音那两档另外开了 tts:localStatus / tts:localRestart：引擎是懒启动的，界面得能在「不花资源」
  * 的前提下知道组件在不在场，也得能在启动失败后有个不用退出重开的出路。
  * 统一口径由 guard.ts 落成机制：每条通道在这里声明自己失败回什么形状，函数体里不再各写一份 try/catch。
@@ -94,19 +95,19 @@ export interface LocalTtsStatusResult extends LocalTtsDetail {
 }
 
 /**
- * 单次调用可覆盖的参数：配音页让用户在开跑前挑模型、挑音色、定倍速，但不写回设置——
+ * 单次调用可覆盖的参数：配音页让用户在开跑前挑本地模型、挑音色、定倍速，但不写回设置——
  * 「设置改动要点保存才生效」这条口径不该被工作台绕过。
+ * 云端配音模型不在这里：1.1.0 起它跟着「配音方案」走，界面要换整套，不给换单项。
  */
 interface VoiceCallOptions {
-  /** 云端档的配音模型 id；本地档没有这个概念，传了也不参与取值 */
-  model?: string
   voice?: string
   /** 本地档用哪个引擎（VITS / Kokoro）。只认白名单，见下面 withOverrides */
   localEngine?: string
   speed?: number
   /**
    * 「这次用哪套配音配置」：#222 第②步接上的方案 id。
-   * 空或指不到人时走该档当前默认方案，所以配音页还没长出方案下拉时这一格就是空的。
+   * 空或指不到人时走该档当前默认方案——配音页那条方案下拉做的是「设为当前使用」（落盘后重读），
+   * 所以它一直不走这一格；留给的是「不改长期设置、只这一次用另一套」的入口。
    * 它是查表用的键，不会被拼进任何路径或目录名（引擎 id 那种白名单校验对它不适用）。
    */
   profileId?: string
@@ -142,11 +143,11 @@ function sourceNameOf(raw: unknown): string {
 
 /**
  * 渲染层来的值一律当外部输入收口：
- * - 模型与音色空串回落设置里那个（空值会打到 ttsConfigProblem 之前，不如按「没覆盖」处理）；
+ * - 音色空串回落设置里那个（空值会打到 ttsConfigProblem 之前，不如按「没覆盖」处理）；
  * - 倍速夹进 OpenAI 标准的 0.25–4.0，NaN/字符串/越界都退回 1；
  * - 引擎 id 必须过 normalizeLocalTtsEngine 的白名单——它会被拼进模型目录名和 sidecar 的
  *   engine 字段，不能把渲染层传来的字符串直接当值用（这条 IPC 是界面唯一能指定「跑哪档模型」的口子）。
- *   空串同样按「没覆盖」处理，和上面 model/voice 一个写法：配音页的引擎下拉没动过时存的是空串，
+ *   空串同样按「没覆盖」处理，和上面 voice 一个写法：配音页的引擎下拉没动过时存的是空串，
  *   用 `??` 就只挡 null/undefined，空串会一路走到白名单外、落回 VITS 默认档，
  *   于是界面显示 Kokoro、实际合成用的是另一档模型（2026-10-29 本机试听时踩实过）。
  * 档（云端/本地）不在这里覆盖：它决定的是「这次要不要花钱、要不要拉起本机进程」，
@@ -154,13 +155,11 @@ function sourceNameOf(raw: unknown): string {
  */
 export function withOverrides(base: TTSConfig, raw: unknown): TTSConfig {
   const input = (raw ?? {}) as VoiceCallOptions
-  const model = typeof input.model === 'string' ? input.model.trim() : ''
   const voice = typeof input.voice === 'string' ? input.voice.trim() : ''
   const localEngine = typeof input.localEngine === 'string' ? input.localEngine.trim() : ''
   const speed = Number(input.speed)
   return {
     ...base,
-    model: model || base.model,
     voice: voice || base.voice,
     localEngine: normalizeLocalTtsEngine(localEngine || base.localEngine),
     speed: Number.isFinite(speed) && speed > 0 ? Math.min(4, Math.max(0.25, speed)) : 1,
@@ -186,7 +185,8 @@ export function toSegments(input: unknown): TTSSegmentInput[] {
 }
 
 export function registerTTSHandlers() {
-  // 端点、模型、音色三样里任何一样不对，失败原因都落进 error 那一句给界面弹出来。
+  // 接口地址、Key、模型任一不对，或音色被这家拒了，失败原因都落进 error 那一句给界面弹出来
+  // （1.1.0 起音色不再是必填门槛，填错的由服务商回原话，见 ttsService 的错误正文截断）。
   // 失败那一句由 guard 落，只带通道名和 message；这里另记一条「这次按哪套方案跑的」——
   // 记的只有方案 id 和云端/本地这一档，Key、接口地址、文稿正文从来不入日志（入参不整份记）。
   ipcHandle(
@@ -262,8 +262,8 @@ export function registerTTSHandlers() {
 
         // 历史记一笔（#247）：有产物就记，所以「取消/熔断但已经拼出一条轨」也在这——
         // 那条轨用户能另存、也能勾「留住」，不记账就等于让他找不到自己那半条轨。
-        // 记的是 withOverrides 之后那一份 config：配音页开跑前可以临时换模型/音色/倍速而不写回设置，
-        // 记设置里现在的值会把「这次实际用了什么」答错。
+        // 记的是 withOverrides 之后那一份 config：配音页开跑前可以临时换音色/倍速（本地档还能换模型）
+        // 而不写回设置，记设置里现在的值会把「这次实际用了什么」答错。
         await addHistoryRecord({
           id: jobId,
           name: sourceNameOf(opts),

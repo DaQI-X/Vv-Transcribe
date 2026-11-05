@@ -39,15 +39,19 @@ describe('withOverrides', () => {
   })
 
   it('空串与纯空白＝没覆盖，回落到设置里那值（不是把配置清空）', () => {
-    const got = withOverrides(base, { model: '', voice: '   ' })
-    expect(got.model).toBe('tts-1')
+    const got = withOverrides(base, { voice: '   ' })
     expect(got.voice).toBe('alloy')
   })
 
   it('非空值才生效，且先 trim', () => {
-    const got = withOverrides(base, { model: '  cosyvoice-v2  ', voice: ' longxiaochun ' })
-    expect(got.model).toBe('cosyvoice-v2')
+    const got = withOverrides(base, { voice: ' longxiaochun ' })
     expect(got.voice).toBe('longxiaochun')
+  })
+
+  it('配音模型改不动：1.1.0 起它跟着「配音方案」整套走，界面上没有换单项的口子', () => {
+    // 渲染层传来的对象当外部输入看，所以「多带一个 model」也得当场验一次：它只能被丢掉
+    expect(withOverrides(base, { model: 'tts-1-hd' }).model).toBe('tts-1')
+    expect(withOverrides(base, { model: '' }).model).toBe('tts-1')
   })
 
   it('回归锚：引擎传空串必须保住设置里那档 Kokoro，不能落回 VITS 默认值', () => {
@@ -84,10 +88,12 @@ describe('withOverrides', () => {
     expect(got.engine).toBe('cloud')
   })
 
-  it('覆盖只动该动的四个字段，Key 与接口地址原样带过去', () => {
-    const got = withOverrides(base, { model: 'tts-1-hd' })
+  it('覆盖只动该动的三个字段，方案带来的那一套（Key/地址/模型）原样带过去', () => {
+    const got = withOverrides(base, { voice: 'echo', localEngine: VITS, speed: 1.5 })
     expect(got.apiKey).toBe('sk-test')
     expect(got.apiBase).toBe('https://gateway.example.com')
+    expect(got.model).toBe('tts-1')
+    expect(got.engine).toBe('cloud')
   })
 })
 

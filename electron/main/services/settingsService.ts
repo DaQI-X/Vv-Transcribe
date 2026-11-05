@@ -89,6 +89,11 @@ export interface AppSettings {
   ttsApiBase: string
   ttsApiKey: string
   ttsModel: string
+  /**
+   * 云端档的音色名。1.1.0 起它不在方案里——那是「这一批怎么念」的问题，不是「这家网关有什么」的问题；
+   * 现在也没有任何界面写它：配音页那一格是单次覆盖，这一份存的是旧版留下的默认音色，
+   * 界面没选时按它走，它本身也空着就干脆不发 voice 这一项（有的模型不收）。
+   */
   ttsVoice: string
   /**
    * 配音用云端接口还是本机引擎：'cloud' | 'local'。
@@ -216,7 +221,8 @@ const DEFAULT_SETTINGS: AppSettings = {
  * 这里抄一份就会出现「asr 已经把 provider 退回全局、全局段还当它是方案字段」这种分叉，
  * 而分叉的方向是把用户填过的值写进一个没人读的位置——读得到、写进去、东西没了。
  * 此刻是 asrProvider / asrLocalModel / asrLanguage / ttsEngine / ttsLocalEngine / ttsLocalVoice
- * 六个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」都在这）。
+ * / ttsVoice 七个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」
+ * 都在这；配音音色从 v3 起也回到这里——它是这一批怎么选的问题，不是这家网关的参数）。
  */
 const GLOBAL_FLAT_KEYS: readonly string[] = (() => {
   const claimed = new Set<string>()

@@ -22,7 +22,8 @@ const api = {
   getLocalVoiceStatus: vi.fn(),
 }
 
-/** `settings:listProfiles` 的脱敏视图：只把被测那一档填满，另外两档留空不影响判据 */
+/** `settings:listProfiles` 的脱敏视图：只把被测那一档填满，另外两档留空不影响判据。
+ *  tts 那一行从 v3 起只有地址与模型两格（音色不在方案里），别再往 values 里塞 ttsVoice */
 function profilesView(cap: 'ai' | 'tts', ids: string[], defaultId: string) {
   const rows = ids.map((id) => ({
     id,
@@ -30,7 +31,7 @@ function profilesView(cap: 'ai' | 'tts', ids: string[], defaultId: string) {
     values:
       cap === 'ai'
         ? { aiProvider: 'openai', aiApiBase: 'https://gw.example.com', aiModel: 'gpt-4o-mini' }
-        : { ttsApiBase: 'https://gw.example.com', ttsModel: 'tts-1', ttsVoice: 'alloy' },
+        : { ttsApiBase: 'https://gw.example.com', ttsModel: 'tts-1' },
     keyStatus: 'encrypted' as const,
   }))
   return {
@@ -124,7 +125,7 @@ describe('checkVoiceReady 的云端方案分支', () => {
     api.getSettings.mockResolvedValue(noVoiceKey())
     api.listProfiles.mockResolvedValue(profilesView('tts', [], ''))
 
-    const blocked = await checkVoiceReady({ model: 'tts-1', voice: 'alloy' })
+    const blocked = await checkVoiceReady({ voice: 'alloy' })
 
     expect(blocked?.settingsTab).toBe('tts')
     expect(blocked?.message).toContain('一条云端配音方案都还没有')
@@ -145,21 +146,30 @@ describe('checkVoiceReady 的云端方案分支', () => {
   })
 
   it('校对那把能用时不因配音档拦人：回落口径与 getTTSConfig 一致', async () => {
-    api.getSettings.mockResolvedValue(noVoiceKey({ aiKeyStatus: 'encrypted' }))
+    // 模型跟着「当前使用那一条」走，界面上不再有单次覆盖（1.1.0 起摘掉云端模型输入），
+    // 所以这一条要给 settings 填上 ttsModel，否则先被「还缺配音模型」拦下、测不到 Key 回落
+    api.getSettings.mockResolvedValue(noVoiceKey({ aiKeyStatus: 'encrypted', ttsModel: 'tts-1' }))
 
-    expect(await checkVoiceReady({ model: 'tts-1', voice: 'alloy' })).toBeNull()
+    expect(await checkVoiceReady({ voice: 'alloy' })).toBeNull()
     expect(api.listProfiles).not.toHaveBeenCalled()
   })
 
   it('有当前使用的方案但缺配音模型：补法指向弹窗，不再说「在配音配置里填好并保存」', async () => {
-    // ttsModel 是「当前使用那一条」的读数（视图里的扁平名），空＝这一条没填过
-    api.getSettings.mockResolvedValue(noVoiceKey({ ttsKeyStatus: 'encrypted', ttsModel: '', ttsVoice: 'alloy' }))
+    // ttsModel 是「当前使用那一条」的读数（视图里的扁平名），空＝这一条没填过。
+    // 音色留空不再拦人：有的服务商模型不收这一项，界面只提供选项，填错由接口回原话。
+    api.getSettings.mockResolvedValue(noVoiceKey({ ttsKeyStatus: 'encrypted', ttsModel: '', ttsVoice: '' }))
 
     const blocked = await checkVoiceReady({})
 
     expect(blocked?.message).toContain('字幕配音还缺「配音模型」')
-    expect(blocked?.message).toContain('点那一行的「编辑」，在弹窗里补上并点「保存」')
+    expect(blocked?.message).toContain('点当前那一行的「编辑」，在弹窗里填模型 id 并点「保存」')
     expect(blocked?.message).not.toContain('保存设置')
+  })
+
+  it('音色空着不拦人：有的模型不收这一项，这一格只给选项、不做强校验', async () => {
+    api.getSettings.mockResolvedValue(noVoiceKey({ ttsKeyStatus: 'encrypted', ttsModel: 'tts-1', ttsVoice: '' }))
+
+    expect(await checkVoiceReady({ voice: '' })).toBeNull()
   })
 
   it('配音引擎切到本地时整段方案判据都不出现', async () => {

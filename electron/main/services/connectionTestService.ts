@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
 import { logger } from './logger'
-import { normalizeApiBase, normalizeTtsEngine } from './settingsService'
+import { normalizeApiBase, normalizeLocalVoice, normalizeTtsEngine } from './settingsService'
 import { getLocalEngineDetail } from './asrServiceManager'
 import {
   COMPONENT_ROW_TITLES,
@@ -69,6 +69,13 @@ export interface TTSTestValues {
   apiBase: string
   apiKey: string
   model: string
+  /**
+   * 云端＝服务商的音色名，本地＝音色编号。
+   * 本地档跟着表单走：表单换引擎时把编号归回第一个，这一档测的就是换完那档的第一个说话人；
+   * 表单没带（空串）按真配音同一口径落回推荐档 0，不拦人——1.1.0 起设置页没有这一格，空串才是常态。
+   * 云端档面板上没有这一格（1.1.0 起音色不在方案里），传来的空串由 settingsHandlers 回落成
+   * 设置里那一份全局值；两边都空就是「这一批不指定音色」，请求体里干脆不发这一项。
+   */
   voice: string
 }
 
@@ -420,12 +427,16 @@ async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestO
     }
   }
 
-  const sid = parseLocalTtsSid(rawVoice)
+  // 空串按真配音那一条收口（`normalizeLocalVoice`：空 → 推荐档 0），别在这儿拦下。
+  // 1.1.0 起设置页没有「本地音色」那格了，磁盘上那份默认值就是空串——把它当「音色填错」
+  // 报出去，等于给每个没动过音色的用户一条永远按不动的自检。非空的怪值（云端残留的 alloy）
+  // 照旧拦：那是真填坏的东西，悄悄换成 0 只会让用户以为自己的选择通过了验证。
+  const sid = parseLocalTtsSid(normalizeLocalVoice(rawVoice))
   if (sid === null) {
     return {
       level: 'fail',
       title: '还测不了',
-      message: `本地配音的音色要选「本地音色」列表里的一项，当前是「${(rawVoice || '').trim() || '空'}」。请在「设置 → 配音配置 → 本地音色」里选一个`,
+      message: `本地配音的音色要选配音页「音色」里的一项，当前是「${rawVoice.trim()}」。设置页从 1.1.0 起没有这一格了，请到配音页那一格重选一个编号`,
     }
   }
 
@@ -438,7 +449,7 @@ async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestO
     logger.info('ConnTest', 'local tts probe done', { engine, sid, latencyMs, bytes: clip.bytes })
     // 时长读不出来时不报「0.0 秒」：那看起来像坏了，而真实情况只是引擎没回 X-Vv-Duration
     const sizeNote = clip.duration > 0 ? `${clip.duration.toFixed(1)} 秒、${audioSize(clip.bytes)}` : audioSize(clip.bytes)
-    // 档位名与音色编号都按界面上的叫法给：sherpa 的 sid 从 0 数起、用户在「本地音色」里从 1 数起，
+    // 档位名与音色编号都按界面上的叫法给：sherpa 的 sid 从 0 数起、用户在配音页「音色」里从 1 数起，
     // 这里若直出「音色 0」，看着就像跟下拉里选的那一个对不上。
     return {
       level: 'pass',
@@ -472,14 +483,16 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     return { level: 'fail', title: '还测不了', message: '配音需要 API Key 才能调用' }
   }
 
-  // 与 getTTSConfig 同一个口径：模型和音色不替用户猜，空着就是没配
+  // 模型不替用户猜，空着就是没配；音色不是必填（1.1.0）——有的服务商模型不收这一项，
+  // 空着就干脆不发，与 ttsService 那条请求体同一个写法。
   const model = values.model.trim()
   const voice = values.voice.trim()
-  if (!model || !voice) {
+  if (!model) {
     return {
       level: 'fail',
       title: '还测不了',
-      message: `配音${model ? '音色' : '模型'}还没填。音频接口收的是配音模型 id 与音色 id（如 tts-1 / alloy），拿校对的 chat 模型去调会被直接拒`,
+      message: '配音模型还没填。音频接口收的是配音模型 id（如 tts-1），拿校对的 chat 模型去调会被直接拒；' +
+        '填在「设置 → 配音配置」里当前使用那一条的「配音模型」那一格',
     }
   }
 
@@ -492,7 +505,10 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
         'Content-Type': 'application/json',
         Authorization: `Bearer ${values.apiKey.trim()}`,
       },
-      body: JSON.stringify({ model, input: TTS_PROBE_TEXT, voice, response_format: 'mp3' }),
+      // 音色空着整个字段不发：发一个空串过去，在一些网关上是「要一个叫空字符串的音色」，
+      // 报回来的 400 会被当成「这家不支持配音」，而真因只是我们多发了一个字段
+      body: JSON.stringify(voice ? { model, input: TTS_PROBE_TEXT, voice, response_format: 'mp3' }
+                               : { model, input: TTS_PROBE_TEXT, response_format: 'mp3' }),
       signal: AbortSignal.timeout(TTS_TEST_TIMEOUT_MS),
     })
   } catch (err) {
@@ -527,6 +543,7 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
   return {
     level: 'pass',
     title: '配音接口可用',
-    message: `耗时 ${formatLatency(latencyMs)}，用「${model} · ${voice}」合成出 ${audioSize(bytes)}。本次只合成一句，按字符计费的接口上这是最小的一笔`,
+    // 没带音色时不能写成「tts-1 · 」：那一串看着像音色被吃了，而这一档本来就没指定音色
+    message: `耗时 ${formatLatency(latencyMs)}，用「${model}${voice ? ` · ${voice}` : '（未指定音色）'}」合成出 ${audioSize(bytes)}。本次只合成一句，按字符计费的接口上这是最小的一笔`,
   }
 }

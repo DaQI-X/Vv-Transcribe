@@ -434,12 +434,17 @@ describe('保存：全局段、落到哪一条、以及「先新建一套」', (
   it('显式传了 id 却指不到人时报错，且这次保存完全没落盘', async () => {
     // 与上一条是同一条规则的两面：静默落到默认那条会吃掉用户没碰过的配置，
     // 而「报错了但已经写下去一半」比报错更难查
+    // 判据用「整份文件字节不变」，不用「目录里只有 settings.json」：这份 v2 fixture 在第一次读盘时
+    // 会被迁移改写（并留一份 .bak）。那次写属于读路径，跟这次被拒的保存无关，所以先用一次只读
+    // 把它趟出来，再拿之后的字节当基准——拿文件清单当证据会把迁移那一次算成这次保存的。
+    await service.loadSettings()
+    const before = await readFile(file(), 'utf-8')
     expect(
       await profileRuleRejection(service.saveSettings({ asrModel: 'nope', profileIds: { asr: 'asr-ghost' } }))
     ).toContain('已经没有这套方案')
     expect(await readFile(file(), 'utf-8')).toContain('keep-me')
     expect(diskProfile(await readJson(file()), 'asr', 'asr-default').model).toBe('keep-me')
-    expect(await keptNames()).toEqual(['settings.json'])
+    expect(await readFile(file(), 'utf-8')).toBe(before)
   })
 
   it('返回的视图说的是「刚写进去的那一条」，不是默认那条', async () => {
@@ -488,13 +493,16 @@ describe('保存：全局段、落到哪一条、以及「先新建一套」', (
   })
 
   it('开关给一个指不到人的 id 时报错，整个保存一个字都没落盘', async () => {
+    // 同上一条：先一次只读把 v2→v3 的迁移写趟掉，之后的字节才是「这次保存之前磁盘上的样子」
+    await service.loadSettings()
+    const before = await readFile(file(), 'utf-8')
     expect(
       await profileRuleRejection(
         service.saveSettings({ asrModel: 'half-written', defaultProfileIds: { asr: 'asr-ghost' } })
       )
     ).toContain('已经没有这套方案')
     expect(diskProfile(await readJson(file()), 'asr', 'asr-default').model).toBe('keep-me')
-    expect(await keptNames()).toEqual(['settings.json'])
+    expect(await readFile(file(), 'utf-8')).toBe(before)
   })
 
   it('这一档 0 条方案却带着凭据来保存：报「先新建API接入」，磁盘一个字不动', async () => {
@@ -535,14 +543,11 @@ describe('方案列表：一次给全的脱敏形状', () => {
   it('values 的键名就是界面上那套扁平名，且不包含密钥', async () => {
     const view = await service.listProfiles()
     // 三档都只剩「这家网关的参数」（Key 走状态位）：模式 / 档位 / 语言 / 引擎是全局段，不在方案里
+    // tts 也从 v3 起不再带音色——用户事先不知道模型支持哪些音色，那是这一批怎么选的问题
     expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel'])
     expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['aiApiBase', 'aiModel', 'aiProvider'])
     expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
-    expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual([
-      'ttsApiBase',
-      'ttsModel',
-      'ttsVoice',
-    ])
+    expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual(['ttsApiBase', 'ttsModel'])
     // 连密钥的**键名**都不许出现：表单把这一份直接盖到自己身上，
     // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串
     for (const cap of ['asr', 'ai', 'tts'] as const) {

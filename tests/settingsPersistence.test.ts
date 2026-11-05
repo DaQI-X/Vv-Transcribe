@@ -9,9 +9,10 @@
  * 1.0.9 把磁盘形状换成了按能力分列的**云端方案**列表（v2），这一层因此多出几条新的闸门与契约，
  * 都在下面：一次读盘/保存不许把用户没碰过的那几套方案弄没（列表是对象数组，
  * 「只收字符串」的旧收口会静默吃掉它），也不许把已经封好的 Key 在搬家路上换成一串解不开的。
- * 新口径还定了字段归属：方案里只躺这家网关的参数（接口地址 / Key / 模型，配音另加音色），
- * 模式、本地档位、转写语言、配音引擎这些都平铺在文档根上（内存里叫 store.globals）——
- * 所以「磁盘上这条方案的 keys 有哪几个」本身就是要被测的契约，它是下一个版本要读的东西。
+ * 字段归属定了两次：v2 说方案里只躺这家网关的参数（接口地址 / Key / 模型，配音另加音色），
+ * 1.1.0 的 v3 把配音音色也挪回文档根——所以下面大部分用例是拿**真 v2 文件**读过来的
+ * （顺手把迁移跑一遍），只有「版本对上了就别动手」那几条用本版本自己写的形状。
+ * 「磁盘上这条方案的 keys 有哪几个」本身就是要被测的契约，它是下一个版本要读的东西。
  * 三档列表都可以是空的（还没建过云端方案），空列表在落盘后仍然是空的：
  * 读盘与写盘都不许凭空补一条用户没建过的方案。
  */
@@ -25,6 +26,7 @@ import {
   SETTINGS_WRITE_BLOCKED_NEWER_VERSION
 } from '../electron/main/services/settingsService'
 import {
+  CURRENT_SETTINGS_VERSION,
   DEFAULT_PROFILE_IDS,
   type DefaultProfileId,
   type SettingsProfiles
@@ -62,6 +64,9 @@ async function namesWith(prefix: string): Promise<string[]> {
     .sort()
 }
 
+/** setup.ts 里那份假加密的可解形式：`v1:` + base64('fake:<明文>') */
+const sealed = (plain: string) => `v1:${Buffer.from(`fake:${plain}`, 'utf-8').toString('base64')}`
+
 async function readJson(path: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(path, 'utf-8')) as Record<string, unknown>
 }
@@ -85,27 +90,40 @@ function diskProfile(
 }
 
 /**
- * 一份 v2 形状的磁盘内容：默认三档各一条方案，按档整体替换、改默认指向，以及
- * **平铺在根上的全局段**（asrProvider / asrLocalModel / asrLanguage / ttsEngine 这些不属于任何方案的键）。
- * 全局段必须能表达，因为新口径下「保存改了档位／引擎」看得见的位置就是文档根。
+ * 一份磁盘内容：三档各一条默认方案、默认指向、以及**平铺在根上的全局段**
+ * （asrProvider / asrLocalModel / asrLanguage / ttsEngine 这些不属于任何方案的键）。
+ * 全局段必须能表达，因为「保存改了档位／引擎」看得见的位置就是文档根。
  *
- * 三条默认方案里只躺这一版认得的方案字段（地址 / Key / 模型 + 配音音色、校对服务商）。
+ * `at` 决定它长成一版还是三版，这是这一层唯一的形状来源：v2（1.0.9 发出去的那份）把配音音色
+ * 存在方案里，v3 起它在根上叫 `ttsVoice`。「读一份真用户的旧文件」与「读本版本自己写的文件」
+ * 只有靠这个参数才分得开——而这两条路的证据不一样：前者测迁移，后者测「版本没对上就别动手」。
+ *
+ * 方案里只躺**那一版认得的**方案字段（地址 / Key / 模型，v2 的配音另加音色、校对另带服务商）。
  * 「引擎」这种已经挪去全局段的键不放进来——放了它，每个用例都等于顺带测一次中途形状的救援，
  * 那份证据就该由「字段归属改过」那条单独给。
  */
-function v2Document(
+function diskDocument(
+  at: number,
   profiles: Partial<Record<keyof SettingsProfiles, Array<Record<string, unknown>>>> = {},
   defaultProfileId: Partial<DefaultProfileId> = {},
   globals: Record<string, unknown> = {}
 ): string {
+  const ttsDefault: Record<string, unknown> = {
+    id: 'tts-default',
+    name: '默认',
+    apiKey: '',
+    model: 'tts-1',
+    ...(at >= 3 ? {} : { voice: 'alloy' })
+  }
   return JSON.stringify(
     {
-      schemaVersion: 2,
+      schemaVersion: at,
+      ...(at >= 3 ? { ttsVoice: 'alloy' } : {}),
       ...globals,
       profiles: {
         asr: [{ id: 'asr-default', name: '默认', apiKey: '', model: 'asr-default-model' }],
         ai: [{ id: 'ai-default', name: '默认', apiKey: '', model: 'gpt-4o' }],
-        tts: [{ id: 'tts-default', name: '默认', apiKey: '', model: 'tts-1', voice: 'alloy' }],
+        tts: [ttsDefault],
         ...profiles
       },
       defaultProfileId: { ...DEFAULT_PROFILE_IDS, ...defaultProfileId }
@@ -113,6 +131,24 @@ function v2Document(
     null,
     2
   )
+}
+
+/** 1.0.9 真发出去的那份形状：读它等于走一次 v2→v3 */
+function v2Document(
+  profiles: Partial<Record<keyof SettingsProfiles, Array<Record<string, unknown>>>> = {},
+  defaultProfileId: Partial<DefaultProfileId> = {},
+  globals: Record<string, unknown> = {}
+): string {
+  return diskDocument(2, profiles, defaultProfileId, globals)
+}
+
+/** 本版本自己写得出来的形状：读它一个字节都不该动 */
+function v3Document(
+  profiles: Partial<Record<keyof SettingsProfiles, Array<Record<string, unknown>>>> = {},
+  defaultProfileId: Partial<DefaultProfileId> = {},
+  globals: Record<string, unknown> = {}
+): string {
+  return diskDocument(CURRENT_SETTINGS_VERSION, profiles, defaultProfileId, globals)
 }
 
 beforeEach(resetDir)
@@ -265,28 +301,69 @@ describe('settings.json 读不出内容（unreadable）', () => {
 })
 
 describe('配置格式版本（schemaVersion 与迁移链）', () => {
-  it('没有版本字段的旧文件：一路搬到 v2 并把版本盖回去，而且这事不打扰用户', async () => {
+  it('没有版本字段的旧文件：一路搬到当前版并把版本盖回去，而且这事不打扰用户', async () => {
     // 1.0.5 及之前的文件确实不写版本号，这一条既是迁移也是「别再靠猜」的收口：
-    // 只有写盘那一处产生版本字段，下一个读的人不用再猜第二遍
-    await writeFile(file(), JSON.stringify({ aiTtsModel: 'cosyvoice-v1', aiModel: 'gpt-4o' }))
+    // 只有写盘那一处产生版本字段，下一个读的人不用再猜第二遍。
+    // 这份输入故意带上寄存过的旧配音键：走完三步之后它落在**根上**（v3 的音色归属），
+    // 而模型名进了方案——一条链走到底的样子只有在这儿看得见
+    await writeFile(file(), JSON.stringify({ aiTtsModel: 'cosyvoice-v1', aiTtsVoice: 'zh-x', aiModel: 'gpt-4o' }))
     await loadInto(dir)
 
     const settings = await service.loadSettings()
     expect(settings.ttsModel).toBe('cosyvoice-v1')
+    expect(settings.ttsVoice).toBe('zh-x')
     expect(settings.aiModel).toBe('gpt-4o')
     expect((await service.getSettingsView()).storageProblem).toBeNull()
 
     const onDisk = await readJson(file())
-    expect(onDisk.schemaVersion).toBe(2)
+    expect(onDisk.schemaVersion).toBe(CURRENT_SETTINGS_VERSION)
+    expect(onDisk.ttsVoice).toBe('zh-x')
     expect('aiTtsModel' in onDisk).toBe(false)
+    expect('aiTtsVoice' in onDisk).toBe(false)
     expect('ttsModel' in onDisk).toBe(false)
     expect(diskProfile(onDisk, 'tts').model).toBe('cosyvoice-v1')
+    expect('voice' in diskProfile(onDisk, 'tts')).toBe(false)
+  })
+
+  it('1.0.9 那份 v2 文件：音色升到根上并当场写回，方案列表其余一个字都不动', async () => {
+    // 这一条是 v2→v3 唯一「连磁盘一起」的证据：settingsSchema 那边证的是纯函数，
+    // 而用户实际撞上的是「升级后第一次启动就把他的文件改了形状」——改完必须自己站得住，
+    // 下次启动不能再靠内存里那一次搬运
+    const key = sealed('sk-tts-abcdef')
+    await writeFile(
+      file(),
+      v2Document({
+        tts: [
+          { id: 'tts-default', name: '默认', apiKey: '', model: 'tts-1', voice: 'alloy' },
+          { id: 'tts-work', name: '工作', apiKey: key, apiBase: 'https://work.example', model: 'cosyvoice-v2', voice: 'longxiaochun' }
+        ]
+      })
+    )
+    await loadInto(dir)
+    expect((await service.loadSettings()).ttsVoice).toBe('alloy')
+    expect((await service.loadSettings({ tts: 'tts-work' })).ttsModel).toBe('cosyvoice-v2')
+
+    const onDisk = await readJson(file())
+    expect(onDisk.schemaVersion).toBe(CURRENT_SETTINGS_VERSION)
+    // donor 是「当前使用」那条（默认指向 tts-default），所以根上留下的是它那份音色；
+    // 另一条的音色没有第二个落点——见 liftTtsVoiceToRoot 正文里那条取舍
+    expect(onDisk.ttsVoice).toBe('alloy')
+    expect('voice' in diskProfile(onDisk, 'tts', 'tts-default')).toBe(false)
+    expect('voice' in diskProfile(onDisk, 'tts', 'tts-work')).toBe(false)
+    // 而那一条方案的凭据、地址、模型必须原样还在（搬音色不是「整理列表」的许可证）
+    expect(diskProfile(onDisk, 'tts', 'tts-work')).toMatchObject({ apiBase: 'https://work.example', model: 'cosyvoice-v2' })
+    expect(diskProfile(onDisk, 'tts', 'tts-work').apiKey).toBe(key)
+
+    // 当「重启一次」：磁盘上那份得自己站得住，不靠内存里那一次升字段
+    await loadInto(dir)
+    expect((await service.loadSettings()).ttsVoice).toBe('alloy')
+    expect(await namesWith('settings.json.corrupt-')).toEqual([])
   })
 
   it('版本已经是当前值：读完一个字节都不动', async () => {
-    // 迁移不是「顺手整理一下」。文件说自己已经是 v2 了还去重写，用户看到的保存成功
+    // 迁移不是「顺手整理一下」。文件说自己已经是当前版了还去重写，用户看到的保存成功
     // 其实是我们替他改过一次配置，而这次改动没有任何人要求过
-    const content = v2Document()
+    const content = v3Document()
     await writeFile(file(), content)
     await loadInto(dir)
     await service.loadSettings()
@@ -296,11 +373,12 @@ describe('配置格式版本（schemaVersion 与迁移链）', () => {
   })
 
   it('文件来自更新版本：界面说得出是哪个版本，写盘被拦，那份文件一字未动', async () => {
-    // 这条防的是「装了 1.0.10 又回退到本版」：v3 的历史记录那一段（#247）本版本读不懂，
-    // 但读不懂不等于坏了——改名留档会挪走人家正在用的配置，写回会抹掉 histories
+    // 这条防的是「装了更新的版本又回退到本版」：那一版的形状本版本读不懂，
+    // 但读不懂不等于坏了——改名留档会挪走人家正在用的配置，写回会抹掉他不认识的段落
+    const next = CURRENT_SETTINGS_VERSION + 1
     const content = JSON.stringify(
       {
-        schemaVersion: 3,
+        schemaVersion: next,
         profiles: { asr: [{ id: 'a', name: '工作', apiKey: 'v1:x' }] },
         defaultProfileId: { asr: 'a', ai: 'b', tts: 'c' },
         histories: [{ id: 'h1', profileIds: { asr: 'a', ai: 'b', tts: 'c' } }]
@@ -313,7 +391,7 @@ describe('配置格式版本（schemaVersion 与迁移链）', () => {
 
     const view = await service.getSettingsView()
     expect(view.storageProblem).toContain('更新版本')
-    expect(view.storageProblem).toContain('v3')
+    expect(view.storageProblem).toContain(`v${next}`)
     expect(view.aiModel).toBe('')
 
     await expect(service.saveSettings({ aiModel: 'gpt-4o-mini' })).rejects.toThrow(
@@ -327,12 +405,12 @@ describe('配置格式版本（schemaVersion 与迁移链）', () => {
 
   it('版本写坏成字符串/小数时不按「未来版本」处理：先搬回当前再盖新戳', async () => {
     // 与上一条的分别是「哪个方向更可恢复」：这种写法更像是有人手改坏了文件，
-    // 按 v0 走两步就把它整理回本版本认得的样子；装成未来版本会让人一直卡在写不进去
+    // 按 v0 走三步就把它整理回本版本认得的样子；装成未来版本会让人一直卡在写不进去
     await writeFile(file(), JSON.stringify({ schemaVersion: '1', aiTtsModel: 'old-voice' }))
     await loadInto(dir)
     expect((await service.getSettingsView()).storageProblem).toBeNull()
     const onDisk = await readJson(file())
-    expect(onDisk.schemaVersion).toBe(2)
+    expect(onDisk.schemaVersion).toBe(CURRENT_SETTINGS_VERSION)
     expect(diskProfile(onDisk, 'tts').model).toBe('old-voice')
     expect('aiTtsModel' in onDisk).toBe(false)
   })
@@ -348,7 +426,7 @@ describe('配置格式版本（schemaVersion 与迁移链）', () => {
     expect((await service.loadSettings()).aiApiKey).toBe('sk-legacy-plaintext')
 
     const onDisk = await readJson(file())
-    expect(onDisk.schemaVersion).toBe(2)
+    expect(onDisk.schemaVersion).toBe(CURRENT_SETTINGS_VERSION)
     expect('aiTtsModel' in onDisk).toBe(false)
     expect('aiApiKey' in onDisk).toBe(false)
     expect(diskProfile(onDisk, 'ai').apiKey).toMatch(/^v1:/)
@@ -367,10 +445,7 @@ describe('配置格式版本（schemaVersion 与迁移链）', () => {
   })
 })
 
-describe('多方案（v2）的两道闸门', () => {
-  /** setup.ts 里那份假加密的可解形式：`v1:` + base64('fake:<明文>') */
-  const sealed = (plain: string) => `v1:${Buffer.from(`fake:${plain}`, 'utf-8').toString('base64')}`
-
+describe('多方案的两道闸门', () => {
   it('一次保存不许吃掉用户没碰过的那套方案，也不许动它的 Key', async () => {
     // 这就是第①步最容易翻车的一处：v1 时代的读盘收口「只收字符串」，而方案列表是对象数组。
     // 照那份写法，用户在这里加的第二套方案会「读成功、写成功、东西没了」——
@@ -553,13 +628,13 @@ describe('多方案（v2）的两道闸门', () => {
     const onDisk = await readJson(file())
     expect(onDisk).toMatchObject({ ttsEngine: 'local', ttsLocalEngine: 'kokoro', asrLocalModel: 'small' })
     expect(diskProfile(onDisk, 'tts', 'tts-a')).toMatchObject({ id: 'tts-a' })
+    // v3 的 tts 方案与 asr 同形：只剩地址 / Key / 模型三项（音色已经不在方案里了）
     expect(Object.keys(diskProfile(onDisk, 'tts', 'tts-a')).sort()).toEqual([
       'apiBase',
       'apiKey',
       'id',
       'model',
       'name',
-      'voice',
     ])
 
     // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住，不靠内存里那一次升字段

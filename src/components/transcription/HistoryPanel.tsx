@@ -123,7 +123,8 @@ function summaryOf(item: HistoryItem, profiles: Record<ProfileCapability, Profil
   } else {
     const who = d.engine === 'local' ? `本地 ${localTtsEngineLabel(d.model)}` : `云端 ${d.model}`
     row = `${at} · ${who} · ${d.clips}/${d.queueTotal} 段 · ${formatTime(d.trackDuration)}`
-    const voice = d.engine === 'local' ? voiceSidLabel(d.voice) : `音色 ${d.voice}`
+    // 云端这一格可能是空串（没指定音色也跑得成，1.1.0 起界面不拦）——写成「音色 」比少一句更误导
+    const voice = d.engine === 'local' ? voiceSidLabel(d.voice) : d.voice.trim() ? `音色 ${d.voice}` : '未指定音色'
     more = `${voice} · ${d.speed}× · ${formatBytes(d.trackBytes)}${d.pushedCount > 0 ? ` · 有 ${d.pushedCount} 段被顺延` : ''}`
   }
   // 方案 id 记在账上是为了事后对「这次跟那次不一样」，但一串 uuid 写在行上没人读得下去；

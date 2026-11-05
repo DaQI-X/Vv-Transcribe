@@ -6,16 +6,20 @@
  *   云端档每一次都花用户自己 Key 里的钱。
  * - 右边只有一个状态位（待开始 / 合成中 / 完成），不并列摆两块进度。
  *
- * 模型与音色按档给两种交互（这是 #238 的本意：用户不知道该填什么）：
- * - 本地档两样都能枚举——模型是白名单里那两档，音色是引擎报的编号，所以下拉。
- * - 云端档枚举不了：能填什么由服务商决定，应用不替用户猜，只能手输 + 一句「先试听验一次」。
- *   把云端也做成下拉就得编一份模型/音色清单，那份清单错了比没有更糟。
+ * 这一页从上到下就三格：选方案（本地档＝选模型）→ 选音色 → 设倍速（1.1.0 收敛成这样）：
+ * - 云端档那一格是「配音方案」下拉：一条方案＝接口地址 + Key + 配音模型这一组凭据，
+ *   所以「换模型」在这档里本来就是「换一套」，不再有第二个手输的模型格——下拉里那一行念的就是模型名，
+ *   旁边再摆一个输入框说的是同一件事，用户只会以为是两件事。
+ * - 本地档同一格换成「配音模型」下拉（白名单里那两档）。这是这一次调用的参数，不写回设置。
+ * - 音色两档都留着，也都不做必填校验：本地能枚举（引擎报编号），云端能填什么由服务商决定，
+ *   各家字段名与取值都不一样，应用不替你猜一份清单。留空＝不指定，请求里干脆不带这一项；
+ *   真被模型拒绝了，接口回的原话会出现在结果卡上。
  * - 「云端还是本地」这一档不在页面上给选择：它决定花不花钱、要不要拉起本机进程，
  *   是用户保存过的长期配置，只在「设置 → 配音配置」里改。
- * - 「配音方案」那个下拉（#222 第④步）也不开「这一次用哪套」的口子：一条方案里就带着上面那一档，
- *   做成单次覆盖等于把那扇关着的门从侧面推开。它做的是设置页那颗「设为当前使用」同一件事——
- *   语义、文案、禁用条件都跟那边一个口径，界面上不留第二种「切方案」。挂这一个控件的只剩校对
- *   弹窗和这一页（转写首页原来也有一条，#222 重写第③步撤了），落盘与话术都在 useProfileStore 一处。
+ * - 云端那一格（#222 第④步的 ProfileSwitchSelect）做的还是「设为当前使用」，不是「这一次用哪套」：
+ *   它决定的是后面每次调用花谁的 Key、打哪家网关。语义、文案、禁用条件跟设置页那颗同一口径，
+ *   界面上不留第二种「切方案」。挂这一个控件的只剩校对弹窗和这一页（转写首页原来也有一条，
+ *   #222 重写第③步撤了），落盘与话术都在 useProfileStore 一处。
  *
  * 合成中那张卡复用转写的 processing 视觉（徽章 + 波形 + 进度 + 取消），因为它是同一件事：
  * 一个分钟级的活儿在后台跑。段号是主进程推回来的真实段号，不是编出来的百分比。
@@ -251,7 +255,7 @@ function ResultCard() {
           <p className="voice-result__scope">
             {mode === 'local'
               ? '本地这一档不看地址和 Key；引擎二进制、模型、音色编号三样里任何一样不对，都长这样。'
-              : '地址、Key、模型、音色四样里任何一样不对，都长这样。'}
+              : '地址、Key、模型三样里任何一样不对都长这样；音色是可选的，填了而这个模型不认，也是这一句。'}
           </p>
         </>
       )}
@@ -287,8 +291,6 @@ export function VoiceStudio() {
   const setText = useVoiceStudioStore((s) => s.setText)
   const voice = useVoiceStudioStore((s) => s.voice)
   const setVoice = useVoiceStudioStore((s) => s.setVoice)
-  const model = useVoiceStudioStore((s) => s.model)
-  const setModel = useVoiceStudioStore((s) => s.setModel)
   const engine = useVoiceStudioStore((s) => s.engine)
   const setEngine = useVoiceStudioStore((s) => s.setEngine)
   const speed = useVoiceStudioStore((s) => s.speed)
@@ -387,30 +389,14 @@ export function VoiceStudio() {
             </div>
           )}
 
-          {showProfileSelect && (
-            <>
-              <div className="voice-studio__fields">
-                <ProfileSwitchSelect
-                  capability="tts"
-                  className="voice-studio__field"
-                  labelClassName="voice-studio__label"
-                  style={{ flex: '0 1 220px', minWidth: 150 }}
-                  disabled={running || previewing}
-                  switchTo={(picked) => setProfile(picked)}
-                />
-              </div>
-              <p className="voice-studio__hint">
-                {/* 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 下一次」 */}
-                {'这一格切的是「当前使用的配音配置」：那套的接口地址、Key、配音模型和音色都跟着换。' +
-                  '下一次配音起效，正在跑的这一批还是原来那套。走不走云端由「设置 → 配音配置」里那一格决定，切方案不会改它。'}
-              </p>
-            </>
-          )}
-
           <div className="voice-studio__fields">
-            <label className="voice-studio__field voice-studio__field--wide">
-              <span className="voice-studio__label">模型</span>
-              {local ? (
+            {/* 这一格按 mode 分叉，两种模式各问各的「用哪档模型」：
+                本地档＝白名单里那两档，界面上直接换（这一次调用的参数，不写回设置）；
+                云端档＝整套「配音方案」，换的是地址 + Key + 模型这一组凭据，所以它做的是「设为当前使用」，
+                没有「只把模型换一下」这种半套状态。列表没读出来或只有一套时这个控件自己不出现。 */}
+            {local ? (
+              <label className="voice-studio__field voice-studio__field--wide">
+                <span className="voice-studio__label">配音模型</span>
                 <select
                   className="settings-form-select"
                   value={selectedEngine}
@@ -424,17 +410,16 @@ export function VoiceStudio() {
                     </option>
                   ))}
                 </select>
-              ) : (
-                <input
-                  className="settings-form-input"
-                  type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder={configModel || '配音配置里的那个模型'}
-                  disabled={running}
-                />
-              )}
-            </label>
+              </label>
+            ) : (
+              <ProfileSwitchSelect
+                capability="tts"
+                className="voice-studio__field voice-studio__field--wide"
+                labelClassName="voice-studio__label"
+                disabled={running || previewing}
+                switchTo={(picked) => setProfile(picked)}
+              />
+            )}
             <label className="voice-studio__field">
               <span className="voice-studio__label">音色</span>
               {local ? (
@@ -456,7 +441,7 @@ export function VoiceStudio() {
                   type="text"
                   value={voice}
                   onChange={(e) => setVoice(e.target.value)}
-                  placeholder={configVoice || '配音配置里的那个音色'}
+                  placeholder={configVoice || '留空＝不发这一项'}
                   disabled={running}
                 />
               )}
@@ -485,13 +470,25 @@ export function VoiceStudio() {
                 : // 只报数、不给出路：这一档的模型在不在盘上、能不能下载，这句话都猜不到，
                   // 写一条会被前置检查当场拦下的出路比不写更糟
                   '这一档的音色总数还没报上来，所以现在只列得出默认那一个。'
-              : '云端能填哪些模型和音色由服务商决定，应用不替你猜，所以这两项手输。留空＝用配音配置里保存的那个。'}
+              : // 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 这一档」
+                (showProfileSelect
+                  ? '上面那格切的是「当前使用的配音方案」：地址、Key 和配音模型跟着整套换，音色不在方案里。下一次配音起效，正在跑的这一批还是原来那套。'
+                  : '') +
+                  '这一档模型能念哪些音色由服务商决定，应用不替你猜，所以这一格手输——OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感上 onyx 偏沉、nova 偏亮），换网关时以对方给的名字为准。填错由接口回原话。' +
+                  // 留空到底等于什么，取决于根上那一份 `ttsVoice` 有没有值（`withOverrides` 是 voice || base.voice）。
+                  // 1.1.0 起这一页是唯一入口、它又不写回设置，所以旧版存下来的那个名字会一直当默认——
+                  // 那句「留空＝不指定音色」在这时候就是说谎：留空照样把 alloy 发出去了。
+                  (configVoice
+                    ? `留空＝用设置里存着的那一份「${configVoice}」，要换就在这儿填一个名字（只作用于这一批，不写回设置）。`
+                    : '留空＝不指定音色，请求里干脆不发这一项，有的模型本来就不收这一项。')}
           </p>
 
           {local && engineCaveat && <p className="voice-studio__hint">{engineCaveat}</p>}
 
           <div className="voice-studio__config">
-            {!showProfileSelect && currentProfile && (
+            {/* 本地档不提配音方案：那条下拉只在云端档出现，方案里那三项凭据（地址/Key/模型）
+                这一档一个都不读，说出去就是「你以为在用的那套其实没参与」 */}
+            {!local && !showProfileSelect && currentProfile && (
               <>
                 配音方案 <code>{profileRowTitle('tts', currentProfile)}</code>
                 {' · '}
@@ -503,10 +500,14 @@ export function VoiceStudio() {
               <code>{localTtsEngineLabel(selectedEngine)}</code>
             ) : (
               <>
-                模型 <code>{model || configModel || '未填写'}</code>
+                {/* 只有「当前使用那套的模型」这一份：页面上没有手输的覆盖，所以这里念的就是待会儿真发出去的那个 */}
+                模型 <code>{configModel || '未填写'}</code>
               </>
             )}
-            {!selectedPresent && (
+            {/* 这句只在本地档说：它讲的是「本机那一档模型的权重不在盘上」，而云端档一个字都不读它。
+                1.1.0 本机 CDP 回放时这句话正挂在「配音引擎：云端接口」后面，还补了一句「现在开跑会被拦下」——
+                而云端那次调用根本不会因为本地模型缺失被拦，摆在横幅里就是让界面说一句假话 */}
+            {local && !selectedPresent && (
               <>
                 {' '}
                 <span className="voice-studio__hint">{missingModelHint(selectedEngine)}（现在开跑会被拦下）</span>

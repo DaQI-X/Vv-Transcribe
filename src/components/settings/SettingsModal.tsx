@@ -5,13 +5,15 @@
  *   选「云端优先」才露出「云端转写方案」那一列
  * - 校对配置（ai）：一列「云端校对方案」加本地词典版本与更新——这一档没有全局字段，
  *   服务商／地址／Key／模型四项全在方案里
- * - 配音配置（tts）：先选「云端接口 / 本地配音」这一档（全局字段），本地档给的是本地模型与
- *   本地音色两个下拉，云端档给的是「云端配音方案」那一列（地址／Key／配音模型／音色四项）
+ * - 配音配置（tts）：先选「云端接口 / 本地配音」这一档（全局字段），本地档给的是「本地模型」一个下拉，
+ *   云端档给的是「云端配音方案」那一列（地址／Key／配音模型三项）——音色两档都不在这一页，
+ *   它是「这一批要听哪一个」，入口只有配音页那一格
  * - 主题（theme）、关于与更新（about：版本、按需组件下载）
  * 设置通过 IPC 持久化到 userData/settings.json
  *
  * 保存分两处：三档的凭据都在「新建API接入／编辑API接入」那个弹窗里点「保存」当场写盘，
- * 面板上那几个全局字段（转写的模式、档位、语言，配音的引擎、本地模型、本地音色）
+ * 面板上那几个全局字段（转写的模式、档位、语言，配音的引擎与本地模型——换本地模型时
+ * 连磁盘上那份默认音色编号一起归回第一个）
  * 仍只在右下角「保存设置」时落盘，且保存后不关窗，方便紧接着点「测试连接」；
  * 校对一档一个全局字段都没有，所以那一页不给这颗按钮——点它只会报一句「设置已保存」，
  * 而盘上什么都没变。有未保存修改时关闭会先二次确认，切 Tab 不重新拉取磁盘值，避免静默丢掉刚填的内容。
@@ -55,8 +57,6 @@ import {
   missingBinaryHint,
   missingModelHint,
   modelPresenceTag,
-  voiceSidLabel,
-  voiceSidOptions,
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import { ProfileList } from '@/components/settings/ProfileList'
@@ -82,13 +82,15 @@ interface SettingsValues {
   asrLocalModel: string
   asrLanguage: string
   /**
-   * 配音走哪一档，以及本地档那两个下拉。云端档的四项凭据（地址／Key／模型／音色）
-   * 不在这里：它们属于某一条方案，见 `PROFILE_CAP_SPEC.tts`。
+   * 配音走哪一档，以及本地档用哪一款模型（连同它下面的默认音色编号）。
+   * 云端档的三项凭据（地址／Key／配音模型）不在这里：它们属于某一条方案，见 `PROFILE_CAP_SPEC.tts`。
+   * 音色两档都不再给输入格——1.1.0 起它是「这一批听哪一个」，入口只有配音页那一格；
+   * `ttsLocalVoice` 留在这一份里是因为它还是磁盘上的默认值，换本地模型时跟着归回第一个。
    */
   ttsEngine: string
   /** 本地档的引擎 id（白名单在主进程 localTtsEngine；空＝主进程按默认档处理） */
   ttsLocalEngine: string
-  /** 本地档的音色编号（0-based sid，界面上写「音色 1…」）；条数主进程先按钉死的模型表给，引擎加载后由实报值覆盖 */
+  /** 本地档的默认音色编号（0-based sid，界面上写「音色 1…」）；条数主进程先按钉死的模型表给，引擎加载后由实报值覆盖 */
   ttsLocalVoice: string
 }
 
@@ -108,7 +110,11 @@ const DEFAULT_VALUES: SettingsValues = {
   ttsLocalVoice: '',
 }
 
-/** 面板上摊开的那几格，就是全局段的全部（主进程 GLOBAL_FLAT_KEYS 投进视图的也是这几项） */
+/**
+ * 这一次保存要带的全局段字段。它比屏幕上摊开的那几格多一项：`ttsLocalVoice` 在 1.1.0
+ * 之后没有对应的格子（音色是「这一批听哪一个」，入口只剩配音页），但换本地模型时仍要把它
+ * 归回第一个——磁盘上那份默认编号得跟着档位走，配音页起手读的就是它。
+ */
 const GLOBAL_VALUE_KEYS: (keyof SettingsValues)[] = [
   'asrProvider',
   'asrLocalModel',
@@ -327,7 +333,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   }
 
   /**
-   * 面板上只剩两组全局字段（转写的模式／档位／语言，配音的引擎／本地模型／本地音色），
+   * 面板上只剩两组全局字段（转写的模式／档位／语言，配音的引擎／本地模型），
    * 校对一档一个都没有，所以前缀只需要分这两家。
    */
   const updateField = (field: keyof SettingsValues, value: string) => {
@@ -349,8 +355,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
 
   /**
    * 配音那一档的方案刚落盘，替配音页补读一次设置。
-   * 那页抬头「配音引擎：云端接口 · 模型 X」和模型/音色两格的 placeholder 读的是主进程按
-   * 「当前使用」那条方案解析出来的 `ttsModel`/`ttsVoice`，而弹窗与删除只把**方案列表**推回了界面。
+   * 那页抬头「配音引擎：云端接口 · 模型 X」、云端那一格下拉里显示的行名、以及音色格的 placeholder
+   * 读的是主进程按「当前使用」那条方案解析出来的 `ttsModel` 与根上的 `ttsVoice`，
+   * 而弹窗与删除只把**方案列表**推回了界面。
    * 不补这一次就出现「盘上已改成 tts-2、回配音页还写着 tts-1」——同一个动作在两个地方两种话。
    * 和 `handleSave` 里那句是同一个道理：那处改的是全局段档位，这处改的是方案里的凭据。
    */
@@ -660,7 +667,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
           )
         } else if (Object.keys(saved).length > 0) {
           // 只挑全局段那六格。脱敏视图里还带着各档「当前使用」那条投影出来的凭据
-          // （地址／模型／服务商／音色），那些住在列表那一行上、要改走弹窗，
+          // （地址／模型／服务商），那些住在列表那一行上、要改走弹窗，
           // 整份盖进表单就成了「屏幕上看不见、却跟着保存发出去」的值
           const picked: Partial<SettingsValues> = {}
           for (const key of GLOBAL_VALUE_KEYS) {
@@ -869,8 +876,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 apiBase: fields.ttsApiBase ?? '',
                 apiKey: '',
                 model: fields.ttsModel ?? '',
-                // 两档的「音色」不是一个东西：云端是服务商的音色名（在方案里），本地是编号（在全局段）
-                voice: ttsLocal ? values.ttsLocalVoice : (fields.ttsVoice ?? ''),
+                // 本地档的编号跟着表单走（换引擎时上面那个下拉会归回第一个）；
+                // 云端档这一页压根没有音色格（1.1.0 起它不在方案里），传空串让主进程回落成
+                // 设置里那一份全局值——测的必须是真配音会发的那一份，不然合格证救不了命
+                voice: ttsLocal ? values.ttsLocalVoice : '',
               }
             : { apiBase: fields.aiApiBase ?? '', apiKey: '', model: fields.aiModel ?? '' }
       // Key 一律留空（密钥从不过 IPC），主进程那边按这条 id 回落到它保存的那把；
@@ -1370,7 +1379,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       value={values.ttsLocalEngine || LOCAL_TTS_DEFAULT_ENGINE}
                       onChange={(e) => {
                         updateField('ttsLocalEngine', e.target.value)
-                        // 编号是「这一档模型里的第几个说话人」，换档后旧编号指的是另一个人，不能留
+                        // 编号是「这一档模型里的第几个说话人」，换档后旧编号指的是另一个人，不能留。
+                        // 1.1.0 起这一页没有「本地音色」那格了，这一次归零是这个字段在这页唯一的写入点：
+                        // 磁盘上那份默认编号还得跟着档位走，配音页打开时读的就是它。
                         updateField('ttsLocalVoice', '0')
                       }}
                     >
@@ -1389,6 +1400,17 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                           : localVoiceState.modelPresent[selectedTtsEngine] === false
                             ? `${missingModelHint(selectedTtsEngine)}。`
                             : `${localTtsEngineLabel(selectedTtsEngine)}的模型已在磁盘上。换档要点「保存设置」才生效；配音页那次换档只对本次调用有效，不会写回这里。`}
+                      {/* 音色不在这一页（1.1.0）：它是「这一批想听哪一个」，入口只有配音页那一格。
+                          这里只把「这一档有几个可挑」说一句，免得用户以为换档之后人还是那几个。 */}
+                      {localVoiceState && (
+                        <>
+                          <br />
+                          {(localVoiceState.speakers ?? 0) > 0
+                            ? `这一档共 ${localVoiceState.speakers} 个音色，从 1 开始编号；上游没给音色名字，只能到配音页挨个试听来认。`
+                            : '这一档的音色总数要引擎报一次才知道，所以现在只能按默认那一个算。'}
+                        </>
+                      )}
+                      {selectedTtsCaveat && <><br />{selectedTtsCaveat}</>}
                       {localVoiceState &&
                         // 引擎那一行只在「清单里确实有它」或「还没查过清单」时才值得跳过去；
                         // 明确没有包时这一跳就是把人领到一行收着按钮的记录前面
@@ -1405,38 +1427,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                         )}
                     </span>
                   </div>
-                  <div className="settings-form-group">
-                    <label className="settings-form-label">本地音色</label>
-                    <select
-                      className="settings-form-select"
-                      value={/^\d+$/.test(values.ttsLocalVoice) ? values.ttsLocalVoice : '0'}
-                      onChange={(e) => updateField('ttsLocalVoice', e.target.value)}
-                    >
-                      {voiceSidOptions(localVoiceState?.speakers ?? 0, values.ttsLocalVoice).map((sid) => (
-                        <option key={sid} value={sid}>
-                          {voiceSidLabel(sid)}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="settings-form-hint">
-                      {(localVoiceState?.speakers ?? 0) > 0
-                        ? `这一档共 ${localVoiceState?.speakers} 个音色，从 1 开始编号。上游没给音色名字，只能挨个试听来认。`
-                        : // 不写「点测试连接让引擎报一次」这种出路：这一档的模型在不在盘上、能不能下载，
-                          // 这一句都答不上来，答应一条会被当场拦下的出路比不答应更糟
-                          '这一档的音色总数还没报上来，所以现在只列得出默认那一个。'}
-                      {/* 这一格和配音页那一格是「默认」与「这一次」的关系，界面得把这句话说明白，否则它看着就是
-                          同一件事的第二个入口。两个真消费者：① 配音页没动过音色时发的是空覆盖，主进程取的就是
-                          这一份（settingsService 的 voice / readiness 那道拦人的问的是同一个字段），而页面上那个
-                          选择只活在 store 里、退出即丢，这是唯一能跨重启留住的那一个；② 下面这颗「测试连接」在
-                          本地档就是按这里选的编号合成一句（testLocalTTS 收的 voice 来自表单当前值）。 */}
-                      {'这是配音页打开时默认选中的那一个：在页面上临时换一个不写回这里，重启应用后回到这一个；下面那颗「测试连接」也按这里选的编号合成一句。'}
-                      {selectedTtsCaveat && <><br />{selectedTtsCaveat}</>}
-                    </span>
-                  </div>
                 </>
               )}
 
-              {/* 本地档不看地址、Key、模型、音色这四样：填了也不生效，摆在能切到的地方就是让人往不生效的框里填 Key */}
+              {/* 本地档不看地址、Key、模型这三样：填了也不生效，摆在能切到的地方就是让人往不生效的框里填 Key */}
               {!ttsLocal && (
                 <ProfileList
                   capability="tts"
@@ -1481,7 +1475,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       '重启用的是已保存的那一档，表单里换了没保存不算。'
                     : !ttsRow
                       ? testBlockedHint('tts')
-                      : `按「当前使用」那一套（${profileRowTitle('tts', ttsRow, '没填模型')}）已保存的地址、模型、音色和 Key 合成一句话（约 10 个字），确认这一套能出音频。本次只合成一句，按字符计费的接口上这是最小的一笔；弹窗里没点「保存」的那些字不算，地址和 Key 留空时沿用校对那一套。`}
+                      : `按「当前使用」那一套（${profileRowTitle('tts', ttsRow, '没填模型')}）已保存的地址、模型和 Key 合成一句话（约 10 个字），确认这一套能出音频。音色跟磁盘上那一份走——1.1.0 起这一页没有音色格了，旧版存过就用它，没存过干脆不发这一项，不影响这次自检。本次只合成一句，按字符计费的接口上这是最小的一笔；弹窗里没点「保存」的那些字不算，地址和 Key 留空时沿用校对那一套。`}
                 </span>
                 {testResults.tts && <TestResultView result={testResults.tts} />}
               </div>

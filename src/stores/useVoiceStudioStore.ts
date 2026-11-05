@@ -6,8 +6,9 @@
  * 也丢了那批已经花掉的钱换来的产物。
  *
  * 三条口径：
- * - 音色/倍速/模型/本地引擎是「这一次任务」的参数，不写回 settings.json：工作台上的试错不该变成用户的长期默认值。
- *   「云端还是本地」这一档不在可覆盖之列——它决定的是要不要花钱、要不要拉起本机进程，是用户保存过的长期选择。
+ * - 音色/倍速/本地模型是「这一次任务」的参数，不写回 settings.json：工作台上的试错不该变成用户的长期默认值。
+ *   云端配音模型也不在这里——1.1.0 起它跟着「配音方案」整套走，界面只给「换一套」，不给「换这一项」。
+ *   「云端还是本地」这一档同样不在可覆盖之列：它决定的是要不要花钱、要不要拉起本机进程，是用户保存过的长期选择。
  * - 本地档的音色只有编号，编号的上限由引擎报（模型没读进内存前谁也不知道有几个），界面上不写死也不编名字。
  * - 中间产物由 jobId 记账，在「重新发起一批」「清空」「离开工作台」三处回收，不靠组件卸载。
  */
@@ -45,11 +46,9 @@ interface VoiceStudioState {
 
   source: VoiceSource
   text: string
-  /** 空串＝不覆盖，按「设置 → 配音配置」里那个音色走 */
+  /** 空串＝不覆盖：有保存过的音色就用那个，没有就干脆不把这一项发给接口（有的模型不收音色） */
   voice: string
   speed: number
-  /** 云端档手输的配音模型 id；空串＝不覆盖 */
-  model: string
   /** 本地档选的那一档模型（引擎 id）；空串＝不覆盖，用设置里保存的 */
   engine: string
   /** 配音引擎这一档，来自已保存设置（界面不覆盖它） */
@@ -84,7 +83,6 @@ interface VoiceStudioState {
   setSource: (source: VoiceSource) => void
   setText: (text: string) => void
   setVoice: (voice: string) => void
-  setModel: (model: string) => void
   setEngine: (engine: string) => void
   setSpeed: (speed: number) => void
   loadConfig: () => Promise<void>
@@ -114,16 +112,16 @@ function str(value: unknown): string {
 }
 
 /**
- * 单次调用的四个可覆盖参数。空串一律「不覆盖」，由主进程按已保存的设置取值——
- * 界面没填的东西不该在这里替用户猜一个（尤其音色：VITS 的 0 和 Kokoro 的 0 不是同一个人）。
+ * 单次调用的三个可覆盖参数。空串一律「不覆盖」，由主进程按已保存的设置取值——
+ * 界面没填的东西不该在这里替用户猜一个（尤其音色：VITS 的 0 和 Kokoro 的 0 不是同一个人，
+ * 而云端有的模型压根不收音色）。
  * 同一份也交给 checkVoiceReady：拦人的那道问的参数，必须和真跑起来用的参数是同一份，
  * 否则会出现「按设置拦下、按界面跑通」这种两头都说不清的失败。
  */
-function callOptions(state: { voice: string; speed: number; model: string; engine: string }) {
+function callOptions(state: { voice: string; speed: number; engine: string }) {
   return {
     voice: state.voice,
     speed: state.speed,
-    model: state.model,
     localEngine: state.engine,
   }
 }
@@ -177,7 +175,6 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   text: '',
   voice: '',
   speed: 1,
-  model: '',
   engine: '',
   mode: 'cloud',
   configModel: '',
@@ -199,14 +196,13 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
 
   setTab: (tab) => {
     set({ tab })
-    // 每次进配音页都重读一次设置：用户可能刚在「配音配置」里换了模型或音色
+    // 每次进配音页都重读一次设置：用户可能刚在「配音配置」里换了方案，或换了本地引擎那一档的模型
     if (tab === 'voice') void get().loadConfig()
   },
 
   setSource: (source) => set({ source }),
   setText: (text) => set({ text }),
   setVoice: (voice) => set({ voice }),
-  setModel: (model) => set({ model }),
   setSpeed: (speed) => set({ speed }),
 
   /**
@@ -272,11 +268,11 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     if (phase === 'running' || previewing) return
     // 切换在途那一层由 store 的那个动作自己挡（三档共用同一个标记）
     if (!(await useProfileStore.getState().setProfile('tts', profileId))) return
-    // 单次参数是照着**原来那套**挑的：模型与音色就在方案里，跟着换；本地那一档的引擎编号在
-    // 全局段，清空只是把手输的覆盖收回，改由下面这次 loadConfig 重读的那一份接管。
-    // 留着就会出现「下拉里挂着 A 套挑的音色、实际按 B 套跑」这种最难解释的分歧。
-    // 倍速不在方案字段里（也不在全局段），是这一页自己的参数，留着。
-    set({ model: '', voice: '', engine: '', speakers: 0 })
+    // 单次参数是照着**原来那套**挑的：配音模型就在方案里，跟着整套换掉，页面上那次临时改动
+    // 已经不属于新这一套；音色不在方案里（1.1.0 起它是全局那一份），清空只是把手输的覆盖收回，
+    // 改由下面这次 loadConfig 重读的那一份接管。留着就会出现「下拉里挂着 A 套挑的音色、
+    // 实际按 B 套跑」这种最难解释的分歧。倍速不在方案字段里，是这一页自己的参数，留着。
+    set({ voice: '', engine: '', speakers: 0 })
     // 换完必须重读设置：下面那行「配音引擎：云端/本地 · 模型 X」和 checkVoiceReady 走的都是这一份
     await get().loadConfig()
   },

@@ -254,8 +254,12 @@ export function registerSettingsHandlers() {
           kind === 'tts' && normalizeTtsEngine((values as { engine?: unknown }).engine) === 'local'
         const needSavedKey = !isLocalTTS && !formKey.trim()
         const needSavedBase = !isLocalTTS && kind === 'tts' && !formBase.trim()
+        // 云端这一腿的音色面板上没有格子（1.1.0 起它既不在方案里、也不在这页填，界面上那次覆盖不算），
+        // 所以表单传来的永远是空串。空串不能当成「不测音色」——真配音发的是设置里那一份全局值，
+        // 自检就得按同一份发，否则测出来的合格证和实际跑的又不是一回事了。
+        const needSavedVoice = !isLocalTTS && kind === 'tts' && !String((values as { voice?: unknown }).voice ?? '').trim()
         let probe = values
-        if (needSavedKey || needSavedBase) {
+        if (needSavedKey || needSavedBase || needSavedVoice) {
           const view = await getSettingsView(selection)
           const saved = await loadSettings(selection)
           const effectiveKey =
@@ -281,6 +285,7 @@ export function registerSettingsHandlers() {
             ...values,
             apiKey: needSavedKey ? effectiveKey : values.apiKey,
             apiBase: needSavedBase ? saved.aiApiBase : values.apiBase,
+            ...(needSavedVoice ? { voice: saved.ttsVoice } : {}),
           }
         }
         if (kind === 'tts') return await testTTSConfig(probe as TTSTestValues)

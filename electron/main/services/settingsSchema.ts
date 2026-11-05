@@ -20,7 +20,8 @@
 
 /**
  * 本应用读写认到这一版。
- * v1 = 扁平的 17 个键（1.0.5～1.0.8）；v2 = 云端方案按能力各一个列表（1.0.9）。
+ * v1 = 扁平的 17 个键（1.0.5～1.0.8）；v2 = 云端方案按能力各一个列表（1.0.9）；
+ * v3 = 配音音色从方案里退回全局段（1.1.0）。
  *
  * v2 在 1.0.9 开发中途改过一次口径，这里记下的是改完的那版：三档的方案都**只装这家网关的参数**
  * （接口地址 / Key / 模型，配音另加音色），「走不走云端」「本地档位」「转写语言」这类不进方案，
@@ -30,8 +31,9 @@
  * 唯一一项不是凭据却留在方案里的是 ai 的 provider：它是「这套地址+Key 属于哪家」的书签，
  * 界面上拿它预填地址和模型，换方案就得换书签；而 asr 那个同名键说的是「本地还是云端」，
  * 是这一档要不要花钱的开关，所以它退回全局段。
- * 这一版没发到任何用户手上，所以改的是 v2 自己的定义，不另起 v3：发出去的人只有 v1→v2
- * 这一条路要走，而它现在搬的是对的形状。
+ * 那次中途改动改的是 v2 自己定义（那种形状从没发到用户手上），所以只有 v1→v2 一条路要走。
+ * **v2 定稿发出之后，归属再变就必须另起一版**——v3 就是这么来的：用户磁盘上确实躺着一份
+ * 「音色在方案里」的 v2 文件，靠改表不搬它，就是「读成功、写成功、东西没了」。
  *
  * 「哪些键算全局」这件事不在这张表里再列一遍：CAPABILITY_FIELDS 没认领的扁平键就是全局段，
  * 那个集合由 settingsService 从 DEFAULT_SETTINGS 推出来。所以这一版改字段归属只改那张表，
@@ -39,7 +41,7 @@
  * 但中途挪走过的那些键在开发机上已经躺在方案里了，那份残留靠下面这张
  * PROFILE_FIELDS_MOVED_TO_GLOBALS 读回全局段，不然就是「读成功、写成功、东西没了」。
  */
-export const CURRENT_SETTINGS_VERSION = 2
+export const CURRENT_SETTINGS_VERSION = 3
 
 /** 磁盘上还没收口成配置对象的那份原始文档：字段可能是旧的、多余的、类型不对的 */
 export type SettingsDocument = Record<string, unknown>
@@ -89,7 +91,7 @@ export type DefaultProfileId = Record<ProfileCapability, string>
 
 /**
  * 全局段：不属于任何一档方案的扁平配置（此刻是 asrProvider / asrLocalModel / asrLanguage /
- * ttsEngine / ttsLocalEngine / ttsLocalVoice）。
+ * ttsEngine / ttsLocalEngine / ttsLocalVoice / ttsVoice）。
  * 键就是 v1 那批扁平键的名字，落盘时也平铺在文档根上，不再嵌一层——嵌进去就得让迁移知道
  * 哪些键归全局，而那份知识已经在 CAPABILITY_FIELDS 里了，抄第二遍迟早分叉。
  */
@@ -102,15 +104,17 @@ export interface SettingsStore {
 }
 
 /**
- * v1 那些扁平键与 v2 方案字段的对应表：`[扁平键, 方案字段]`。表里只列**进方案**的那些键，
+ * 扁平键与方案字段的对应表：`[扁平键, 方案字段]`。表里只列**进方案**的那些键，
  * 没被这张表认领的扁平键就留在文档根上（`SettingsGlobals`）——所以「这一档有哪几项配置」
  * 和「哪些配置全局共用」两件事仍然只有这一处定义，读盘、落盘、投给界面的扁平视图都按它走。
  *
  * 三档都按「换一家网关要换的东西」这条线收窄：
  * - asr 三项：地址 / Key / 模型。「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，
  *   不是这家网关的参数。
- * - tts 四项：地址 / Key / 模型 / 音色。音色在 OpenAI 兼容网关里是对方给的名字（alloy 这套
- *   不是到处都有），跟模型一样属于网关；「走本地还是云端」「本地引擎」「本地音色编号」不属于。
+ * - tts 三项：地址 / Key / 模型。**音色从 v3 起不在方案里**：它和「本地档位」「转写语言」一样，
+ *   是这一批怎么选的问题，不是这家网关的参数。理由写在 v2→v3 那条迁移上——用户事先并不知道
+ *   某个模型支持哪些音色，各家网关的字段名与取值也不一样，把它钉死在方案里等于替用户猜一份清单。
+ *   「走本地还是云端」「本地引擎」「本地音色编号」本来就不属于方案。
  * - ai 四项：地址 / Key / 模型 + provider。provider 不是凭据，但它是「这套地址和 Key 是哪家」
  *   的书签——界面上按它预填地址与模型，换一套凭据就得换这个书签。它也不被主进程读取
  *   （取配置只看地址和 Key），所以留在方案里不改变任何行为。
@@ -134,7 +138,6 @@ export const CAPABILITY_FIELDS: Record<
     ['ttsApiBase', 'apiBase'],
     ['ttsApiKey', 'apiKey'],
     ['ttsModel', 'model'],
-    ['ttsVoice', 'voice'],
   ],
 }
 
@@ -259,12 +262,73 @@ function splitFlatIntoProfiles(doc: SettingsDocument): SettingsDocument {
 }
 
 /**
+ * v2 → v3：把配音音色从方案里搬回文档根上（扁平键 `ttsVoice`），并且把所有 tts 方案里的
+ * `voice` 抹掉。
+ *
+ * 为什么要把已经发出去的归属再改一次：音色钉在方案里，等于替用户猜了一份「这个模型能用哪些
+ * 音色」的清单——大多数用户事先并不知道模型支持什么，各家网关的字段名与取值还不一样。
+ * 1.0.9 界面验收撞出来的则是重复：列表那一行显示的就是模型名，配音页选了方案还要再输一次
+ * 模型。新口径是「配置方案是方案，界面里的选项是选项」——方案只留地址 / Key / 模型，
+ * 音色在配音页按这一批选，根上那个值只是它的默认。
+ *
+ * 三条规矩（和读盘那步 hoistRelocatedFields 一模一样，因为守的是同一种丢失）：
+ * - donor 用「当前使用」那条，指不到人就用列表第一条：多条方案各带不同音色时，按正在用的
+ *   那条走是唯一不猜的理由。
+ * - 根上已经有个字符串就不接管（那是新形状写出来的，比方案里那份新）。
+ * - 只搬字符串，类型不对的不搬也不替它编一个值——取值收口在 settingsService。
+ *
+ * 其余方案里的 `voice` 一律删掉，跟 v1→v2 搬完就删扁平键同理：新表不认它，留着就是磁盘上
+ * 一份没人读的残留。这一步因此是本项目里**唯一一处会少数据**的迁移——非当前那些方案各自带
+ * 的音色值不再留痕。不给它兜底（比如挂到方案名上、或塞进某条新键），因为那等于替用户发明
+ * 一份他没见过、界面也读不出的新结构。
+ *
+ * 这里的三个名字写死而不从 CAPABILITY_FIELDS 推：这张表描述的是**旧**形状，而 `voice`
+ * 正是新表不再认领的那一项；以后表再变，这条迁移也必须继续搬得动 1.0.9 那份文件。
+ */
+const TTS_VOICE_FIELD = 'voice'
+const TTS_VOICE_FLAT_KEY = 'ttsVoice'
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
+function liftTtsVoiceToRoot(doc: SettingsDocument): SettingsDocument {
+  const next = { ...doc }
+  const section = asRecord(next[PROFILES_FIELD])
+  // 整段缺失、或 tts 那一列压根不是数组：没东西可搬，也不去替它编一个空列表——
+  // 坏形状是 normalizeStore 的活，迁移顺手「整理」过一次，就没人能复盘这一步改了什么
+  if (!Array.isArray(section.tts)) return next
+  const list = section.tts
+  const ids = asRecord(next[DEFAULT_PROFILE_ID_FIELD])
+  const wanted = typeof ids.tts === 'string' ? ids.tts : ''
+  const donor = asRecord(list.find((entry) => asRecord(entry).id === wanted) ?? list[0])
+
+  const voice = donor[TTS_VOICE_FIELD]
+  if (typeof next[TTS_VOICE_FLAT_KEY] !== 'string' && typeof voice === 'string' && voice) {
+    next[TTS_VOICE_FLAT_KEY] = voice
+  }
+
+  // 只摘带得了这个键的对象条目，其余原样（同一个引用）交回去：迁移不碰它看不懂的东西
+  const kept = list.map((entry) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return entry
+    if (!(TTS_VOICE_FIELD in entry)) return entry
+    const profile = { ...(entry as Record<string, unknown>) }
+    delete profile[TTS_VOICE_FIELD]
+    return profile
+  })
+  return { ...next, [PROFILES_FIELD]: { ...section, tts: kept } }
+}
+
+/**
  * 迁移注册表。一条一步、首尾相接（0→1、1→2…）；中间缺一步会被下面的走链逻辑
  * 判成 gap 而不是「跳过那步」——跳过就等于把一份看不懂的文件当成看懂了。
  */
 export const SETTINGS_MIGRATIONS: ReadonlyArray<SettingsMigration> = [
   { from: 0, to: 1, run: adoptLegacyTtsFields },
   { from: 1, to: 2, run: splitFlatIntoProfiles },
+  { from: 2, to: 3, run: liftTtsVoiceToRoot },
 ]
 
 /**

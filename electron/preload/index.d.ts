@@ -90,9 +90,7 @@ export interface VoiceSegment {
 
 /** 单次调用的可覆盖参数：配音页选音色/倍速时用，只作用于这一次任务，不写回 settings.json */
 export interface VoiceCallOptions {
-  /** 云端档的配音模型 id；空串＝不覆盖，按「设置 → 配音配置」里那个走。本地档没有模型这一说，传了也不取 */
-  model?: string
-  /** 空串＝不覆盖，按「设置 → 配音配置」里那个音色走 */
+  /** 空串＝不覆盖：有保存过的音色就用那个，没有就干脆不把这一项发给接口（有的模型不收音色） */
   voice?: string
   /** 本地档跑哪一档模型（VITS / Kokoro）；主进程按白名单收口，空串＝用设置里保存的那一档 */
   localEngine?: string
@@ -358,7 +356,10 @@ export interface ConnectionTestValues {
   apiBase: string
   apiKey: string
   model: string
-  /** 配音用：音频接口除了模型还要音色 id，两项都是必填 */
+  /**
+   * 配音用：云端＝服务商的音色名（可留空，留空＝请求里干脆不带这一项），本地＝sid 编号。
+   * 只有模型是必填——音色从 1.1.0 起不再拦人，各家网关收不收这一项、收什么值都不一样。
+   */
   voice?: string
 }
 

@@ -13,8 +13,9 @@
  * 没有 seed 可钉，缓存上一次的结论就是把误差累进时间轴。
  *
  * 四条踩过坑的口径写在这里：
- * - 配音有独立的一整套配置（接口地址、Key、模型、音色）；地址与 Key 留空时沿用校对那套，
- *   但模型和音色**绝不共用**（chat 模型调音频接口会被直接拒）。
+ * - 配音的凭据（接口地址、Key、模型）整套住在「配音方案」里；地址与 Key 留空时沿用校对那套，
+ *   但模型**绝不共用**（chat 模型调音频接口会被直接拒）。音色不在方案里（1.1.0 起）：
+ *   它是「这一批怎么念」的问题，界面上每次调用可以覆盖，空着就干脆不发这一项。
  * - 各家兼容程度不一样，接口返回 200 但 body 是 JSON 错误的网关确实存在，所以内容类型必须验，
  *   否则落盘一个 .mp3 里面装着 `{"error":...}`，用户在播放器里只会看到「加载失败」。
  * - 花费落在用户自己的 Key 上，所以任何一次调用前都得让他看清要调多少次。
@@ -33,7 +34,7 @@ import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './lo
 /** 主进程内部用的配音配置：明文 Key，只有主进程拿得到（见 settingsService 的脱敏视图） */
 export interface TTSConfig {
   /**
-   * 用哪一档。云端档要 Key/模型/音色三样，本地档一样都不要——所以后面那三个字段的含义
+   * 用哪一档。云端档要 Key 和模型两样（音色可以空），本地档一样都不要——所以后面那三个字段的含义
    * 是按这一档变的，任何「不分档就取值」的写法都会把另一档的配置要求强加过来。
    */
   engine: 'cloud' | 'local'
@@ -69,8 +70,16 @@ const SPEECH_TIMEOUT_MS = 60_000
 const ERROR_BODY_LIMIT = 200
 
 /**
+ * 把服务商回的错误正文压成一句：各家返回的 JSON 常带换行和缩进，原样贴进 toast 或失败列表
+ * 会把最有用那半句挤到看不见。「测试连接」那条链路（connectionTestService）也是这个口径。
+ */
+function errorSnippet(body: string): string {
+  return body.replace(/\s+/g, ' ').trim().slice(0, ERROR_BODY_LIMIT)
+}
+
+/**
  * 缺哪项说哪项。让请求带着空 model 发出去，用户收到的是一条看不懂的 400，
- * 而真实原因只是「设置里配音模型还没填」。
+ * 而真实原因只是「配音模型还没填」。
  *
  * 本地档只问本地档会坏的那件事：它没有 Key、没有模型名、也没有接口地址，
  * 唯一能从云端那档带坏的字段是音色——界面切了引擎，配置里留着的还可能是 `alloy`。
@@ -78,13 +87,15 @@ const ERROR_BODY_LIMIT = 200
 export function ttsConfigProblem(config: TTSConfig): string | null {
   if (config.engine === 'local') {
     if (parseLocalTtsSid(config.voice) === null) {
-      return `本地配音的音色要选「本地音色」列表里的一项，当前是「${config.voice || '空'}」。请在「设置 → 配音配置 → 本地音色」里重选一个`
+      return `本地配音的音色要选配音页「音色」里的那一项，当前是「${config.voice || '空'}」。在这一格重选一个编号即可`
     }
     return null
   }
   if (!config.apiKey) return '未配置 API Key，请在「设置 → 配音配置」中填写（留空则沿用校对配置那把）'
-  if (!config.model) return '未配置配音模型，请在「设置 → 配音配置 → 配音模型」中填写'
-  if (!config.voice) return '未配置配音音色，请在「设置 → 配音配置 → 配音音色」中填写'
+  if (!config.model) return '未配置配音模型，请在「设置 → 配音配置」里点那一行的「编辑」，在弹窗里填「配音模型」并保存'
+  // 云端音色不在这儿拦：能不能填、填什么由服务商决定，各家字段名与取值都不一样（1.1.0 拍板）。
+  // 拦下等于替用户猜一份「这个模型该有音色」的清单；空着的调用由下面省略这个字段，
+  // 真不收音色的模型就照常出声，收了却填错的由接口自己的报错原话送到界面上。
   return null
 }
 
@@ -146,9 +157,11 @@ export async function synthesizeSpeech(
   const body: Record<string, unknown> = {
     model: config.model,
     input: trimmed,
-    voice: config.voice,
     response_format: 'mp3',
   }
+  // 音色空着就整个字段不发：有些配音模型不收 voice，发一个空串过去会被当成「要一个叫空字符串的音色」。
+  // 和上面 speed 同一个写法——这一格没填＝不指定，而不是指定一个空值。
+  if (config.voice) body.voice = config.voice
   if (config.speed && config.speed !== 1) body.speed = config.speed
 
   const controller = new AbortController()
@@ -165,7 +178,7 @@ export async function synthesizeSpeech(
       signal: controller.signal,
     })
     if (!response.ok) {
-      const body = (await response.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT)
+      const detail = errorSnippet(await response.text().catch(() => ''))
       // 404 几乎只有两种原因：这家服务商根本没有这个端点，或者接口地址填错了层级。
       // 说清楚，比让人对着 404 猜强。
       const hint =
@@ -174,12 +187,12 @@ export async function synthesizeSpeech(
           : response.status === 401
             ? '（Key 不对或没有调用该模型的权限）'
             : ''
-      throw new Error(`配音接口返回 ${response.status}${hint}${body ? `：${body}` : ''}`)
+      throw new Error(`配音接口返回 ${response.status}${hint}${detail ? `：${detail}` : ''}`)
     }
     const contentType = response.headers.get('content-type') || ''
     if (contentType.includes('json')) {
-      const body = (await response.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT)
-      throw new Error(`配音接口没返回音频，返回的是 JSON：${body || '空 body'}`)
+      const detail = errorSnippet(await response.text().catch(() => ''))
+      throw new Error(`配音接口没返回音频，返回的是 JSON：${detail || '空 body'}`)
     }
     bytes = Buffer.from(await response.arrayBuffer())
   } catch (err) {
