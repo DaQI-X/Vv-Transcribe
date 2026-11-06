@@ -15,6 +15,7 @@ const VITS = 'sherpa-onnx-vits-zh-ll'
 /** 一份「云端档、已保存过模型与音色」的配置，作为 base 参与覆盖计算 */
 const base: TTSConfig = {
   engine: 'cloud',
+  vendor: 'openai',
   apiKey: 'sk-test',
   apiBase: 'https://gateway.example.com',
   model: 'tts-1',
@@ -86,6 +87,13 @@ describe('withOverrides', () => {
   it('云端/本地这一档不允许被单次调用改写：它决定花不花钱、要不要拉起本机进程', () => {
     const got = withOverrides(base, { engine: 'local' })
     expect(got.engine).toBe('cloud')
+  })
+
+  it('厂商也改不动：它在「配音方案」里，界面这一次只能改音色和倍速（1.1.1）', () => {
+    // 这一项决定请求发到哪家、长什么形状，能被单次调用改写就等于界面可以绕过方案
+    // 拿 MiniMax 的 Key 去打 OpenAI 的路径——换一家就得回去改方案，这才是原意
+    expect(withOverrides(base, { provider: 'minimax' } as Record<string, unknown>).vendor).toBe('openai')
+    expect(withOverrides({ ...base, vendor: 'dashscope' }, { provider: '' }).vendor).toBe('dashscope')
   })
 
   it('覆盖只动该动的三个字段，方案带来的那一套（Key/地址/模型）原样带过去', () => {

@@ -56,6 +56,11 @@ interface VoiceStudioState {
   /** 只读展示用的那两样，来自设置；含义跟着 mode 变（本地档的音色是编号，模型这一项用不上） */
   configModel: string
   configVoice: string
+  /**
+   * 「当前使用那一条配音方案」是哪家（1.1.1）。空串＝磁盘上没这一项的老方案，按 OpenAI 兼容读，
+   * 界面上的音色那一格要跟着它换说法：MiniMax／百炼不收空音色，那句「留空＝不发这一项」对它们是谎话。
+   */
+  configProvider: string
   /** 设置里保存的本地档引擎 id，也是模型下拉的当前值（没在界面上改过时） */
   configEngine: string
   /** 本地音色上限：引擎把模型读进内存后 /health 才报得出，0＝还不知道 */
@@ -179,6 +184,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   mode: 'cloud',
   configModel: '',
   configVoice: '',
+  configProvider: 'openai',
   configEngine: LOCAL_TTS_DEFAULT_ENGINE,
   speakers: 0,
   engineModelPresent: {},
@@ -236,6 +242,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
         // 把它们混成一个 configVoice 就会把云端残留的 alloy 显示成本地编号
         configModel: mode === 'local' ? '' : str(settings?.ttsModel),
         configVoice: mode === 'local' ? str(settings?.ttsLocalVoice) : str(settings?.ttsVoice),
+        configProvider: str(settings?.ttsProvider),
       })
       // 读设置失败回的是 null（IPC 收口后不再 reject，见 ipc/guard.ts），而 null 会落成上面那个云端档：
       // 设置里明明选了本地配音，这里却显示走云端接口。不说这一句，用户会去云端的地址框里
@@ -244,7 +251,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
         toast.info('配音设置读不出来，本页先按云端档显示；去设置里重新保存一次可恢复', 10000)
       }
     } catch {
-      set({ mode, configModel: '', configVoice: '', configEngine: requested })
+      set({ mode, configModel: '', configVoice: '', configProvider: '', configEngine: requested })
     }
     if (mode === 'local') await refreshLocalVoiceState(get().engine || requested)
     // 方案列表和设置是两回事：设置读不出（null）不代表列表读不出，反过来也一样。

@@ -28,6 +28,14 @@ import {
   synthesizeLocally,
 } from './localTtsEngine'
 import { hasActiveTTSSynthesis } from './ttsService'
+import {
+  buildSpeechRequest,
+  normalizeTtsVendor,
+  readSpeechAudio,
+  ttsVendorNeedsVoice,
+  TTS_VENDOR_NAMES,
+  type TtsAudioResult,
+} from './ttsVendor'
 import { engineBinaryInManifest } from './componentService'
 import { DEFAULT_PROMPT } from './ai/openaiCompatible'
 // 相对路径而非 @/ 别名：主进程这条 build 链（vite.config.ts 里 electron 那两项）没有配别名，
@@ -66,6 +74,12 @@ export interface TTSTestValues {
   engine?: string
   /** 本地档要用哪个引擎（如 sherpa-onnx-vits-zh-ll / kokoro-multi-lang-v1_1），同样来自表单当前值 */
   localEngine?: string
+  /**
+   * 云端档走哪一家（'openai' | 'minimax' | 'dashscope'），决定这次自检发的请求是什么形状。
+   * 表单里带了这一格就按它测；没带时（配音页那颗按钮只带地址/Key/模型）由 settingsHandlers
+   * 回落成设置里保存的那一份——测的必须是干活时那一家，理由与下面音色那一项相同。
+   */
+  provider?: string
   apiBase: string
   apiKey: string
   model: string
@@ -74,7 +88,8 @@ export interface TTSTestValues {
    * 本地档跟着表单走：表单换引擎时把编号归回第一个，这一档测的就是换完那档的第一个说话人；
    * 表单没带（空串）按真配音同一口径落回推荐档 0，不拦人——1.1.0 起设置页没有这一格，空串才是常态。
    * 云端档面板上没有这一格（1.1.0 起音色不在方案里），传来的空串由 settingsHandlers 回落成
-   * 设置里那一份全局值；两边都空就是「这一批不指定音色」，请求体里干脆不发这一项。
+   * 设置里那一份全局值。两边都空时：OpenAI 兼容那档干脆不发这一项（有些模型不收音色），
+   * MiniMax 与阿里云百炼那两档必填，空着就当场判「还测不了」（1.1.1）。
    */
   voice: string
 }
@@ -120,7 +135,9 @@ function connectFail(err: unknown): TestOutcome {
   const raw = e.cause?.message || e.message || String(err)
 
   let hint: string
-  if (e.name === 'AbortError' || code.includes('TIMEOUT')) {
+  // TimeoutError 是 AbortSignal.timeout 到点时抛的那个名字（不是 AbortError），
+  // 漏掉它会把一次「等响应等太久」报成「无法建立连接」
+  if (e.name === 'AbortError' || e.name === 'TimeoutError' || code.includes('TIMEOUT')) {
     hint = '连接或等响应超时（转写、校对最长等 30 秒，配音等 60 秒）。地址可能指向了一个不会响应请求的服务，或者网络被拦截'
   } else if (code.includes('ENOTFOUND') || code.includes('EAI_AGAIN')) {
     hint = '域名解析失败。API Base 可能写错了；如果是海外服务，需要开代理或 VPN 后再试'
@@ -466,9 +483,11 @@ async function testLocalTTS(rawEngine: unknown, rawVoice: string): Promise<TestO
 }
 
 /**
- * 配音接口自检：真发一次合成请求，请求体与 ttsService 干活时完全一致。
+ * 配音接口自检：真发一次合成请求，请求体和响应解析都走 ttsService 干活时那一份（ttsVendor）。
  * 为什么必须真调：模型名和音色 id 是这两项最容易填错的地方，而兼容网关常常对任意模型名都照常
  * 返回 200——探活全绿，等用户在批量配音点了「开始」才撞上 400，烧的是他自己 Key 上的额度。
+ * 为什么必须共用：这一条链路只要自己拼过一次 URL、自己解过一次响应，「自检通过、配音失败」
+ * 就重新出现了（#220/#227 记的都是这类分歧）。
  * 本地档走 testLocalTTS：那三样（地址/Key/模型）根本不参与，按云端那套问只会把能用的人拦在门外。
  */
 export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome> {
@@ -476,6 +495,7 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     return testLocalTTS(values.localEngine, values.voice)
   }
 
+  const vendor = normalizeTtsVendor(values.provider)
   const base = normalizeApiBase(values.apiBase)
   const baseProblem = invalidBase(base)
   if (baseProblem) return { level: 'fail', title: '还测不了', message: baseProblem }
@@ -483,54 +503,62 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     return { level: 'fail', title: '还测不了', message: '配音需要 API Key 才能调用' }
   }
 
-  // 模型不替用户猜，空着就是没配；音色不是必填（1.1.0）——有的服务商模型不收这一项，
-  // 空着就干脆不发，与 ttsService 那条请求体同一个写法。
+  // 模型不替用户猜，空着就是没配；音色看不选的那一家（下面按 vendorNeedsVoice 分叉）。
   const model = values.model.trim()
   const voice = values.voice.trim()
   if (!model) {
     return {
       level: 'fail',
       title: '还测不了',
-      message: '配音模型还没填。音频接口收的是配音模型 id（如 tts-1），拿校对的 chat 模型去调会被直接拒；' +
-        '填在「设置 → 配音配置」里当前使用那一条的「配音模型」那一格',
+      message: `配音模型还没填。${TTS_VENDOR_NAMES[vendor]} 收的是它自己的配音模型 id，` +
+        '拿校对的 chat 模型去调会被直接拒；填在「设置 → 配音配置」里当前使用那一条的「配音模型」那一格',
+    }
+  }
+  if (ttsVendorNeedsVoice(vendor) && !voice) {
+    return {
+      level: 'fail',
+      title: '还测不了',
+      message: `${TTS_VENDOR_NAMES[vendor]} 必须有音色才能出声，而现在这一批没指定音色。` +
+        '去字幕配音页的「音色」那一格填一个该家的音色 id（以对方文档为准）再测',
     }
   }
 
+  const request = buildSpeechRequest(vendor, {
+    apiBase: base,
+    apiKey: values.apiKey.trim(),
+    model,
+    voice,
+    speed: 1,
+    text: TTS_PROBE_TEXT,
+  })
+
+  // 一个 signal 用到底：阿里云百炼拿地址要再发一次 GET，不递进去那一次就没有超时
+  const signal = AbortSignal.timeout(TTS_TEST_TIMEOUT_MS)
   const started = Date.now()
   let response: Response
   try {
-    response = await fetch(`${base}/v1/audio/speech`, {
+    response = await fetch(request.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${values.apiKey.trim()}`,
-      },
-      // 音色空着整个字段不发：发一个空串过去，在一些网关上是「要一个叫空字符串的音色」，
-      // 报回来的 400 会被当成「这家不支持配音」，而真因只是我们多发了一个字段
-      body: JSON.stringify(voice ? { model, input: TTS_PROBE_TEXT, voice, response_format: 'mp3' }
-                               : { model, input: TTS_PROBE_TEXT, response_format: 'mp3' }),
-      signal: AbortSignal.timeout(TTS_TEST_TIMEOUT_MS),
+      headers: request.headers,
+      body: request.body,
+      signal,
     })
   } catch (err) {
     return connectFail(err)
   }
 
   const latencyMs = Date.now() - started
-  if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''))
-
-  // 200 但 body 是 JSON 的网关确实存在（真实配音链路也验这一条），不验就等于把错误当成功
-  const contentType = response.headers.get('content-type') || ''
-  if (contentType.includes('json')) {
-    const body = (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 200)
-    return {
-      level: 'fail',
-      title: '接口 200 但没给音频',
-      message: `返回的是 JSON${body ? `：${body}` : ''}。这家的音频接口大概率不是 OpenAI 标准的 /v1/audio/speech`,
-    }
+  let audio: TtsAudioResult
+  try {
+    audio = await readSpeechAudio(vendor, response, signal)
+  } catch (err) {
+    // 适配层那句已经是「发生了什么 + 能改哪一格」，原样贴出来，不再翻成通用文案
+    const message = err instanceof Error ? err.message : String(err)
+    logger.warn('ConnTest', 'tts probe got no audio', { vendor, model, message })
+    return { level: 'fail', title: '配音接口没出声', message }
   }
 
-  const audio = await response.arrayBuffer().catch(() => null)
-  const bytes = audio?.byteLength ?? 0
+  const bytes = audio.bytes.length
   if (bytes === 0) {
     return {
       level: 'fail',
@@ -539,11 +567,11 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     }
   }
 
-  logger.info('ConnTest', 'tts probe done', { model, voice, latencyMs, bytes })
+  logger.info('ConnTest', 'tts probe done', { vendor, model, voice, latencyMs, bytes })
   return {
     level: 'pass',
     title: '配音接口可用',
     // 没带音色时不能写成「tts-1 · 」：那一串看着像音色被吃了，而这一档本来就没指定音色
-    message: `耗时 ${formatLatency(latencyMs)}，用「${model}${voice ? ` · ${voice}` : '（未指定音色）'}」合成出 ${audioSize(bytes)}。本次只合成一句，按字符计费的接口上这是最小的一笔`,
+    message: `耗时 ${formatLatency(latencyMs)}，用「${model}${voice ? ` · ${voice}` : '（未指定音色）'}」合成出 ${audioSize(bytes)}${audio.note ? `（${audio.note}）` : ''}。本次只合成一句，按字符计费的接口上这是最小的一笔`,
   }
 }

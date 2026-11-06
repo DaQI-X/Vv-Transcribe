@@ -6,8 +6,8 @@
  * - 校对配置（ai）：一列「云端校对方案」加本地词典版本与更新——这一档没有全局字段，
  *   服务商／地址／Key／模型四项全在方案里
  * - 配音配置（tts）：先选「云端接口 / 本地配音」这一档（全局字段），本地档给的是「本地模型」一个下拉，
- *   云端档给的是「云端配音方案」那一列（地址／Key／配音模型三项）——音色两档都不在这一页，
- *   它是「这一批要听哪一个」，入口只有配音页那一格
+ *   云端档给的是「云端配音方案」那一列（厂商／地址／Key／配音模型四项，1.1.1 多了厂商）——
+ *   音色两档都不在这一页，它是「这一批要听哪一个」，入口只有配音页那一格
  * - 主题（theme）、关于与更新（about：版本、按需组件下载）
  * 设置通过 IPC 持久化到 userData/settings.json
  *
@@ -61,7 +61,16 @@ import {
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import { ProfileList } from '@/components/settings/ProfileList'
 import { ProfileDialog, type ProfileDraft } from '@/components/settings/ProfileDialog'
-import { PROFILE_CAP_SPEC, fieldsOf, keyFieldOf, profileRowTitle } from '@/utils/profileSpec'
+import {
+  PROFILE_CAP_SPEC,
+  fieldsOf,
+  keyFieldOf,
+  profileRowTitle,
+  ttsVendorLabel,
+  ttsVendorNeedsVoice,
+  ttsVendorOf,
+  ttsVoiceExample,
+} from '@/utils/profileSpec'
 import type {
   ProfileCapability,
   ProfileView,
@@ -74,7 +83,7 @@ import { formatBytes } from '@/utils/formatBytes'
 /**
  * 面板上那几个全局字段（=主进程 GLOBAL_FLAT_KEYS 那一层）。
  * 第⑧步之后三档的凭据全部住进方案，面板不再持有它们：`getSettings` 那份脱敏视图里的
- * 地址／Key／模型不是「表单里还没保存的值」，而是「当前使用那一条的读数」，
+ * 厂商／地址／Key／模型不是「表单里还没保存的值」，而是「当前使用那一条的读数」，
  * 要显示要改动都从 `profiles` 那一份走，弹窗保存之后也不往这里回填。
  */
 interface SettingsValues {
@@ -83,7 +92,9 @@ interface SettingsValues {
   asrLanguage: string
   /**
    * 配音走哪一档，以及本地档用哪一款模型（连同它下面的默认音色编号）。
-   * 云端档的三项凭据（地址／Key／配音模型）不在这里：它们属于某一条方案，见 `PROFILE_CAP_SPEC.tts`。
+   * 云端档的四项凭据（厂商／地址／Key／配音模型）不在这里：它们属于某一条方案，见 `PROFILE_CAP_SPEC.tts`。
+   * 厂商这一格 1.1.1 起才进方案——它决定这次发的请求长什么样，所以跟地址一样是「这一套是哪家」的一部分，
+   * 不是本机偏好；磁盘上没这一项的老方案按 OpenAI 兼容显示，也按 OpenAI 兼容发请求。
    * 音色两档都不再给输入格——1.1.0 起它是「这一批听哪一个」，入口只有配音页那一格；
    * `ttsLocalVoice` 留在这一份里是因为它还是磁盘上的默认值，换本地模型时跟着归回第一个。
    */
@@ -873,6 +884,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 // 读已保存设置会测到另一档上去（表单没保存时尤其明显）
                 engine: values.ttsEngine,
                 localEngine: values.ttsLocalEngine,
+                // 厂商也带过去：同一家地址可以长得不一样，请求体更不一样。不带的话
+                // 「当前使用」那一条是 MiniMax、自检却按 OpenAI 兼容的端点去发，绿了也不作数
+                provider: fields.ttsProvider ?? '',
                 apiBase: fields.ttsApiBase ?? '',
                 apiKey: '',
                 model: fields.ttsModel ?? '',
@@ -1171,6 +1185,19 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const aiRow = currentRow('ai')
   const ttsRow = currentRow('tts')
 
+  /**
+   * 云端自检那句提示里要点的这家：厂商决定这次发的请求长什么样，也决定「空音色」是不是一个能出声的答案。
+   * 读磁盘上那一条而不是表单——弹窗里没点「保存」的厂商还没落盘，而真配音用的正是磁盘这一条。
+   */
+  const ttsVendor = ttsVendorLabel(ttsRow?.values.ttsProvider)
+  const ttsVoiceRequired = ttsVendorNeedsVoice(ttsRow?.values.ttsProvider)
+  /**
+   * 「地址和 Key 留空＝沿用校对那一套」这条回落只对 OpenAI 兼容那一档成立：
+   * MiniMax／百炼在校对那边通常没有对应网关，跟着回落就是把请求发到别人家去，得到一个 404/401。
+   * 回落本身不改（同一家用两档的人确实能省一次粘贴），改的是这句话不许再一概而论。
+   */
+  const ttsOpenaiCompatible = ttsVendorOf(ttsRow?.values.ttsProvider) === 'openai'
+
   if (!tab) return null
 
   /**
@@ -1430,7 +1457,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 </>
               )}
 
-              {/* 本地档不看地址、Key、模型这三样：填了也不生效，摆在能切到的地方就是让人往不生效的框里填 Key */}
+              {/* 本地档不看厂商、地址、Key、模型这四样：填了也不生效，摆在能切到的地方就是让人往不生效的框里填 Key */}
               {!ttsLocal && (
                 <ProfileList
                   capability="tts"
@@ -1475,7 +1502,13 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       '重启用的是已保存的那一档，表单里换了没保存不算。'
                     : !ttsRow
                       ? testBlockedHint('tts')
-                      : `按「当前使用」那一套（${profileRowTitle('tts', ttsRow, '没填模型')}）已保存的地址、模型和 Key 合成一句话（约 10 个字），确认这一套能出音频。音色跟磁盘上那一份走——1.1.0 起这一页没有音色格了，旧版存过就用它，没存过干脆不发这一项，不影响这次自检。本次只合成一句，按字符计费的接口上这是最小的一笔；弹窗里没点「保存」的那些字不算，地址和 Key 留空时沿用校对那一套。`}
+                      : `按「当前使用」那一套（「${ttsVendor}」 · ${profileRowTitle('tts', ttsRow, '没填模型')}）已保存的地址、模型和 Key 合成一句话（约 10 个字），确认这一套能出音频。音色跟磁盘上那一份走——1.1.0 起这一页没有音色格了，旧版存过就用它${
+                          ttsVoiceRequired
+                            ? `，「${ttsVendor}」不收空音色，所以磁盘上没存过时这一句会被当场拦下；先去配音页那一格填一个（例如 ${ttsVoiceExample(ttsRow.values.ttsProvider)}）再回来测`
+                            : '，没存过干脆不发这一项，不影响这次自检'
+                        }。本次只合成一句，按字符计费的接口上这是最小的一笔；弹窗里没点「保存」的那些字不算，地址和 Key 留空时沿用校对那一套${
+                          ttsOpenaiCompatible ? '' : `——「${ttsVendor}」在校对那边一般没有对应的网关，这两格空着多半就是 404/401，要在这一条里填全`
+                        }。`}
                 </span>
                 {testResults.tts && <TestResultView result={testResults.tts} />}
               </div>

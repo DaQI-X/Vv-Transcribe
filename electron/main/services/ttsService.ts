@@ -3,7 +3,8 @@
  *
  * 只做一件事：把一段文本换成一条音频落盘，并带回它的时长。换的方式有两档，
  * 对上层（ttsHandlers、配音页）是同一个契约 `{ filePath, bytes, duration }`：
- * - 云端档（默认）：`POST {apiBase}/v1/audio/speech`，OpenAI 兼容音频接口。
+ * - 云端档（默认）：打用户在「配音方案」里配好的那家网关。请求长什么样、音频在响应里怎么编码，
+ *   由方案上那个厂商书签决定（1.1.1，见 ttsVendor）；不选就是 OpenAI 兼容的 `/v1/audio/speech`。
  * - 本地档：本机 sidecar（见 localTtsEngine），不花钱、不联网，回 WAV 并自带精确采样数。
  *
  * 这个时长只给「试听完那句有多长」用；铺轴不认它。云端接口不返回时间信息，而 ffprobe 对 mp3 报的是
@@ -13,11 +14,11 @@
  * 没有 seed 可钉，缓存上一次的结论就是把误差累进时间轴。
  *
  * 四条踩过坑的口径写在这里：
- * - 配音的凭据（接口地址、Key、模型）整套住在「配音方案」里；地址与 Key 留空时沿用校对那套，
+ * - 配音的凭据（厂商、接口地址、Key、模型）整套住在「配音方案」里；地址与 Key 留空时沿用校对那套，
  *   但模型**绝不共用**（chat 模型调音频接口会被直接拒）。音色不在方案里（1.1.0 起）：
  *   它是「这一批怎么念」的问题，界面上每次调用可以覆盖，空着就干脆不发这一项。
- * - 各家兼容程度不一样，接口返回 200 但 body 是 JSON 错误的网关确实存在，所以内容类型必须验，
- *   否则落盘一个 .mp3 里面装着 `{"error":...}`，用户在播放器里只会看到「加载失败」。
+ * - 这个文件不认得任何一家的响应形状。200 里装 JSON、十六进制音频、签名地址要二次 GET 这些差别
+ *   全收在 ttsVendor 里——真实合成和「测试连接」走同一份，分叉过一次就是自检绿了配音挂了。
  * - 花费落在用户自己的 Key 上，所以任何一次调用前都得让他看清要调多少次。
  * - 配置校验必须跟着引擎档分叉：本地档根本没有 Key 和模型，拿云端那三条去问就是把用户拦在门外；
  *   反过来本地档真正会失败的是「音色不是编号」和「组件没下载」。判松判严都栽过（见 #220/#227）。
@@ -30,24 +31,44 @@ import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { probeFile, resolveFfmpegBinary } from './audioProcessor'
 import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './localTtsEngine'
+import {
+  buildSpeechRequest,
+  readSpeechAudio,
+  ttsVendorNeedsVoice,
+  TtsVendorError,
+  TTS_VENDOR_NAMES,
+  type TtsAudioResult,
+  type TtsVendorId,
+} from './ttsVendor'
 
 /** 主进程内部用的配音配置：明文 Key，只有主进程拿得到（见 settingsService 的脱敏视图） */
 export interface TTSConfig {
   /**
-   * 用哪一档。云端档要 Key 和模型两样（音色可以空），本地档一样都不要——所以后面那三个字段的含义
-   * 是按这一档变的，任何「不分档就取值」的写法都会把另一档的配置要求强加过来。
+   * 用哪一档。云端档要 Key 和模型两样（音色看不选的那一家），本地档一样都不要——
+   * 所以后面那几项的含义是按这一档变的，任何「不分档就取值」的写法都会把另一档的配置要求强加过来。
    */
   engine: 'cloud' | 'local'
+  /**
+   * 云端档走哪一家的接口形状（1.1.1，见 ttsVendor）。它属于「配音方案」那组凭据，
+   * 本地档不看这一项。磁盘上没有这一项的旧方案读出来是 `openai`，与 1.1.0 的行为一字不差。
+   */
+  vendor: TtsVendorId
   apiKey: string
   apiBase: string
   model: string
-  /** 云端档是服务商的音色名；本地档是 sid 编号的字符串写法（'0'、'40'） */
+  /**
+   * 云端档是服务商的音色名；本地档是 sid 编号的字符串写法（'0'、'40'）。
+   * 云端档里它能不能空由厂商决定：OpenAI 兼容可以（有些模型根本不收这一项），
+   * MiniMax 与阿里云百炼必填（拦下的地方是 ttsConfigProblem）。
+   */
   voice: string
   /** 本地档用哪个引擎（白名单见 localTtsEngine）；云端档忽略这一项 */
   localEngine: LocalTtsEngineId
   /**
-   * 倍速，OpenAI 标准 `speed` 的取值范围是 0.25–4.0。只有单次调用参数能带它（设置里没有这一项），
-   * 不填按 1 处理。两档都收这个值：本地 sidecar 自己夹到 0.25–4.0，界面与云端语义因此是一套。
+   * 倍速。OpenAI 兼容那一档标准写的是 0.25–4.0，MiniMax 与阿里云百炼各自是 0.5–2.0 的浮点，
+   * 界面因此只给 0.5–2 这几档（见 VOICE_SPEED_OPTIONS），落在三家都合法的区间里。
+   * 不填按 1 处理；1 时干脆不发这一项（各家对未知字段的行为不一致）。
+   * 两档都收这个值：本地 sidecar 自己夹到 0.25–4.0，界面与云端语义因此是一套。
    */
   speed?: number
 }
@@ -66,17 +87,6 @@ export interface SynthesizedClip {
 /** 一段文本给接口吃一次的上限：接口正常时中文长句也就几秒，60 秒不回就是端点或网络出问题了 */
 const SPEECH_TIMEOUT_MS = 60_000
 
-/** 错误正文只截这些字符进 toast：网关的 HTML 报错页整段甩给用户毫无意义 */
-const ERROR_BODY_LIMIT = 200
-
-/**
- * 把服务商回的错误正文压成一句：各家返回的 JSON 常带换行和缩进，原样贴进 toast 或失败列表
- * 会把最有用那半句挤到看不见。「测试连接」那条链路（connectionTestService）也是这个口径。
- */
-function errorSnippet(body: string): string {
-  return body.replace(/\s+/g, ' ').trim().slice(0, ERROR_BODY_LIMIT)
-}
-
 /**
  * 缺哪项说哪项。让请求带着空 model 发出去，用户收到的是一条看不懂的 400，
  * 而真实原因只是「配音模型还没填」。
@@ -93,9 +103,12 @@ export function ttsConfigProblem(config: TTSConfig): string | null {
   }
   if (!config.apiKey) return '未配置 API Key，请在「设置 → 配音配置」中填写（留空则沿用校对配置那把）'
   if (!config.model) return '未配置配音模型，请在「设置 → 配音配置」里点那一行的「编辑」，在弹窗里填「配音模型」并保存'
-  // 云端音色不在这儿拦：能不能填、填什么由服务商决定，各家字段名与取值都不一样（1.1.0 拍板）。
-  // 拦下等于替用户猜一份「这个模型该有音色」的清单；空着的调用由下面省略这个字段，
-  // 真不收音色的模型就照常出声，收了却填错的由接口自己的报错原话送到界面上。
+  if (ttsVendorNeedsVoice(config.vendor) && !config.voice) {
+    // 1.1.0 的口径是「音色不做强校验」，那句只对不收音色的模型成立。MiniMax 和阿里云百炼
+    // 把音色列成必填，空着发过去只会得到一句对面的原话（而且多半不说是哪一格），
+    // 所以在花钱之前先点名这一格；OpenAI 兼容那档继续留空可跑。
+    return `${TTS_VENDOR_NAMES[config.vendor]} 必须有音色才能配音。在配音页的「音色」那一格填一个音色 id（这一家的音色表以对方文档为准）`
+  }
   return null
 }
 
@@ -103,11 +116,16 @@ export function ttsConfigProblem(config: TTSConfig): string | null {
  * 日志里「这一趟是谁在念」要按档分叉：本地档没有云端模型名，照抄 `config.model` 只会留下一串
  * `model:""`，而 VITS 和 Kokoro 念出来的东西差别是用户报障时最需要先排掉的一条。引擎只在冷启动
  * 那一条里报档位，热着跑完的一批若不写 localEngine，app.log 里就查无此人。
+ *
+ * 云端档再带上厂商：模型名是各家自己的那套，日志里 `model:"cosyvoice-v2"` 只有配上 dashscope
+ * 才对得上号；而「路径拼错」和「Key 不对」这类失败，先要分清是哪一家的形状才能复盘。
  */
-function tierForLog(config: TTSConfig): { engine: 'cloud' | 'local'; model?: string; localEngine?: string } {
+function tierForLog(
+  config: TTSConfig
+): { engine: 'cloud' | 'local'; vendor?: string; model?: string; localEngine?: string } {
   return config.engine === 'local'
     ? { engine: 'local', localEngine: config.localEngine }
-    : { engine: 'cloud', model: config.model }
+    : { engine: 'cloud', vendor: config.vendor, model: config.model }
 }
 
 /** 临时目录名沿用 transcribe- 前缀：1.0.5 起的启动清扫按这个前缀删，崩溃与强杀遗留能被兜住 */
@@ -151,62 +169,44 @@ export async function synthesizeSpeech(
     return synthesizeLocally(trimmed, config.localEngine, Number(config.voice), config.speed ?? 1, tempDir)
   }
 
-  const url = `${config.apiBase}/v1/audio/speech`
-  // 倍速只在真的改过时才进请求体：兼容网关对未知字段的行为不一致，
-  // 默认值不带这个键，等于没改倍速的调用走的还是原来那份请求体。
-  const body: Record<string, unknown> = {
+  // 请求长什么样、音频从响应的哪一层里取，全在 ttsVendor 里按厂商分叉；这里只管超时、取消和落盘。
+  const request = buildSpeechRequest(config.vendor, {
+    apiBase: config.apiBase,
+    apiKey: config.apiKey,
     model: config.model,
-    input: trimmed,
-    response_format: 'mp3',
-  }
-  // 音色空着就整个字段不发：有些配音模型不收 voice，发一个空串过去会被当成「要一个叫空字符串的音色」。
-  // 和上面 speed 同一个写法——这一格没填＝不指定，而不是指定一个空值。
-  if (config.voice) body.voice = config.voice
-  if (config.speed && config.speed !== 1) body.speed = config.speed
+    voice: config.voice,
+    speed: config.speed ?? 1,
+    text: trimmed,
+  })
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), SPEECH_TIMEOUT_MS)
-  let bytes: Buffer
+  let audio: TtsAudioResult
   try {
-    const response = await fetch(url, {
+    const response = await fetch(request.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
+      headers: request.headers,
+      body: request.body,
       signal: controller.signal,
     })
-    if (!response.ok) {
-      const detail = errorSnippet(await response.text().catch(() => ''))
-      // 404 几乎只有两种原因：这家服务商根本没有这个端点，或者接口地址填错了层级。
-      // 说清楚，比让人对着 404 猜强。
-      const hint =
-        response.status === 404
-          ? '（这个服务商可能没有 OpenAI 标准的音频接口，或 API Base 少/多层路径）'
-          : response.status === 401
-            ? '（Key 不对或没有调用该模型的权限）'
-            : ''
-      throw new Error(`配音接口返回 ${response.status}${hint}${detail ? `：${detail}` : ''}`)
-    }
-    const contentType = response.headers.get('content-type') || ''
-    if (contentType.includes('json')) {
-      const detail = errorSnippet(await response.text().catch(() => ''))
-      throw new Error(`配音接口没返回音频，返回的是 JSON：${detail || '空 body'}`)
-    }
-    bytes = Buffer.from(await response.arrayBuffer())
+    // 同一个 signal 递进去：阿里云百炼拿地址要再发一次 GET，取消按钮在最后一跳上也不能失效
+    audio = await readSpeechAudio(config.vendor, response, controller.signal)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`配音请求 ${SPEECH_TIMEOUT_MS / 1000} 秒没响应，已中断`)
     }
-    if (err instanceof Error && err.message.startsWith('配音')) throw err
+    // 适配层的原话已经是「发生了什么 + 能改哪一格」，再套一层「请求没能发出去」就把它埋了
+    if (err instanceof TtsVendorError) throw err
     // fetch 本身抛的是 TypeError（DNS/断网/TLS），原样吐出来用户至少能认出是网络问题
     throw new Error(`配音请求没能发出去：${err instanceof Error ? err.message : String(err)}`)
   } finally {
     clearTimeout(timer)
   }
 
+  const bytes = audio.bytes
   if (bytes.length === 0) throw new Error('配音接口返回了 0 字节音频')
+  // 服务商报回来的计费口径（百炼按字数）只进日志：界面上那笔账按段数算，两者对不上号
+  if (audio.note) logger.debug('TTS', 'vendor returned a billing note', { note: audio.note, ...tierForLog(config) })
 
   await mkdir(tempDir, { recursive: true })
   const filePath = join(tempDir, `${randomUUID()}.mp3`)

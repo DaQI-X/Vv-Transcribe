@@ -185,7 +185,7 @@ export function toSegments(input: unknown): TTSSegmentInput[] {
 }
 
 export function registerTTSHandlers() {
-  // 接口地址、Key、模型任一不对，或音色被这家拒了，失败原因都落进 error 那一句给界面弹出来
+  // 厂商、接口地址、Key、模型任一不对，或音色被这家拒了，失败原因都落进 error 那一句给界面弹出来
   // （1.1.0 起音色不再是必填门槛，填错的由服务商回原话，见 ttsService 的错误正文截断）。
   // 失败那一句由 guard 落，只带通道名和 message；这里另记一条「这次按哪套方案跑的」——
   // 记的只有方案 id 和云端/本地这一档，Key、接口地址、文稿正文从来不入日志（入参不整份记）。

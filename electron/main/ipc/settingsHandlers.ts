@@ -258,8 +258,12 @@ export function registerSettingsHandlers() {
         // 所以表单传来的永远是空串。空串不能当成「不测音色」——真配音发的是设置里那一份全局值，
         // 自检就得按同一份发，否则测出来的合格证和实际跑的又不是一回事了。
         const needSavedVoice = !isLocalTTS && kind === 'tts' && !String((values as { voice?: unknown }).voice ?? '').trim()
+        // 厂商（1.1.1）同音色一个道理：这一格在方案弹窗里，配音页那颗按钮不带它。
+        // 不回落就会出现「按 OpenAI 兼容的形状测绿了、实际那一条方案选的是 MiniMax、配音撞 404」。
+        const needSavedProvider =
+          !isLocalTTS && kind === 'tts' && !String((values as { provider?: unknown }).provider ?? '').trim()
         let probe = values
-        if (needSavedKey || needSavedBase || needSavedVoice) {
+        if (needSavedKey || needSavedBase || needSavedVoice || needSavedProvider) {
           const view = await getSettingsView(selection)
           const saved = await loadSettings(selection)
           const effectiveKey =
@@ -286,6 +290,7 @@ export function registerSettingsHandlers() {
             apiKey: needSavedKey ? effectiveKey : values.apiKey,
             apiBase: needSavedBase ? saved.aiApiBase : values.apiBase,
             ...(needSavedVoice ? { voice: saved.ttsVoice } : {}),
+            ...(needSavedProvider ? { provider: saved.ttsProvider } : {}),
           }
         }
         if (kind === 'tts') return await testTTSConfig(probe as TTSTestValues)

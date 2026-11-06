@@ -628,13 +628,14 @@ describe('多方案的两道闸门', () => {
     const onDisk = await readJson(file())
     expect(onDisk).toMatchObject({ ttsEngine: 'local', ttsLocalEngine: 'kokoro', asrLocalModel: 'small' })
     expect(diskProfile(onDisk, 'tts', 'tts-a')).toMatchObject({ id: 'tts-a' })
-    // v3 的 tts 方案与 asr 同形：只剩地址 / Key / 模型三项（音色已经不在方案里了）
+    // v3 的 tts 方案只剩这家网关的四项：厂商 / 地址 / Key / 模型（音色已经不在方案里了）
     expect(Object.keys(diskProfile(onDisk, 'tts', 'tts-a')).sort()).toEqual([
       'apiBase',
       'apiKey',
       'id',
       'model',
       'name',
+      'provider',
     ])
 
     // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住，不靠内存里那一次升字段

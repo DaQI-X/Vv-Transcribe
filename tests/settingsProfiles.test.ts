@@ -544,10 +544,15 @@ describe('方案列表：一次给全的脱敏形状', () => {
     const view = await service.listProfiles()
     // 三档都只剩「这家网关的参数」（Key 走状态位）：模式 / 档位 / 语言 / 引擎是全局段，不在方案里
     // tts 也从 v3 起不再带音色——用户事先不知道模型支持哪些音色，那是这一批怎么选的问题
+    // 1.1.1 起 tts 多带一个「厂商」书签：它决定这次发的请求长什么样，所以是方案的一部分，不是全局偏好
     expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel'])
     expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['aiApiBase', 'aiModel', 'aiProvider'])
     expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
-    expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual(['ttsApiBase', 'ttsModel'])
+    expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual([
+      'ttsApiBase',
+      'ttsModel',
+      'ttsProvider',
+    ])
     // 连密钥的**键名**都不许出现：表单把这一份直接盖到自己身上，
     // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串
     for (const cap of ['asr', 'ai', 'tts'] as const) {

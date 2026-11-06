@@ -28,6 +28,7 @@ import { rename } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { normalizeLocalTtsEngine, type LocalTtsEngineId } from './localTtsEngine'
+import { normalizeTtsVendor, type TtsVendorId } from './ttsVendor'
 import {
   CORRUPT_SETTINGS_PREFIX,
   atomicWriteJson,
@@ -85,7 +86,10 @@ export interface AppSettings {
    * 分开是因为端点不同：`/v1/audio/speech` 收的是配音模型 id（OpenAI 形如 tts-1），拿 chat
    * 模型去调必然 400；而且只做对话的服务商根本没有这个端点，配音常常要指到另一家网关去，
    * 所以接口地址与 Key 也能单独填——留空表示沿用上面那套（见 getTTSConfig）。
+   * 1.1.1 起再加一项 provider：它决定这趟请求长成哪家的形状（路径 / 字段名 / 音频编码），
+   * 见 ttsVendor。老方案磁盘上没有这一项，读出来是空串，取值时按 OpenAI 兼容处理。
    */
+  ttsProvider: string
   ttsApiBase: string
   ttsApiKey: string
   ttsModel: string
@@ -204,6 +208,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   aiApiKey: '',
   aiApiBase: '',
   aiModel: '',
+  ttsProvider: 'openai',
   ttsApiBase: '',
   ttsApiKey: '',
   ttsModel: '',
@@ -1315,6 +1320,7 @@ export function normalizeLocalVoice(raw: string): string {
  */
 export async function getTTSConfig(profileId?: string | null): Promise<{
   engine: TtsEngineMode
+  vendor: TtsVendorId
   apiKey: string
   apiBase: string
   model: string
@@ -1325,6 +1331,9 @@ export async function getTTSConfig(profileId?: string | null): Promise<{
   const engine = normalizeTtsEngine(settings.ttsEngine)
   return {
     engine,
+    // 本地档不看这一项（那边连地址和 Key 都不参与），但它在两份配置里都算得出来，
+    // 投出来比「本地档时留个空」少一处「这个字段什么时候有意义」的分叉
+    vendor: normalizeTtsVendor(settings.ttsProvider),
     apiKey: settings.ttsApiKey || settings.aiApiKey,
     apiBase:
       normalizeApiBase(settings.ttsApiBase) ||

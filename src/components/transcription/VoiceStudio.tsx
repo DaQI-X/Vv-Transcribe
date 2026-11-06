@@ -7,12 +7,15 @@
  * - 右边只有一个状态位（待开始 / 合成中 / 完成），不并列摆两块进度。
  *
  * 这一页从上到下就三格：选方案（本地档＝选模型）→ 选音色 → 设倍速（1.1.0 收敛成这样）：
- * - 云端档那一格是「配音方案」下拉：一条方案＝接口地址 + Key + 配音模型这一组凭据，
+ * - 云端档那一格是「配音方案」下拉：一条方案＝厂商 + 接口地址 + Key + 配音模型这一组凭据（1.1.1
+ *   多了「厂商」这一项，它决定请求发往哪条路径、长什么样），
  *   所以「换模型」在这档里本来就是「换一套」，不再有第二个手输的模型格——下拉里那一行念的就是模型名，
  *   旁边再摆一个输入框说的是同一件事，用户只会以为是两件事。
  * - 本地档同一格换成「配音模型」下拉（白名单里那两档）。这是这一次调用的参数，不写回设置。
- * - 音色两档都留着，也都不做必填校验：本地能枚举（引擎报编号），云端能填什么由服务商决定，
- *   各家字段名与取值都不一样，应用不替你猜一份清单。留空＝不指定，请求里干脆不带这一项；
+ * - 音色两档都留着：本地能枚举（引擎报编号），云端能填什么由服务商决定，各家字段名与取值都不一样，
+ *   应用不替你猜一份清单。OpenAI 兼容留空＝不指定，请求里干脆不带这一项；
+ *   MiniMax 与百炼把音色当必填（1.1.1），留空会在点「开始配音」时被主进程当场拦下并点名这一家——
+ *   这里不猜一个默认音色，因为猜错了用户听到的是另一把嗓子，比报错更难发现。
  *   真被模型拒绝了，接口回的原话会出现在结果卡上。
  * - 「云端还是本地」这一档不在页面上给选择：它决定花不花钱、要不要拉起本机进程，
  *   是用户保存过的长期配置，只在「设置 → 配音配置」里改。
@@ -32,7 +35,12 @@ import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
 import { switchableProfiles, useProfileStore } from '@/stores/useProfileStore'
 import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
-import { profileRowTitle } from '@/utils/profileSpec'
+import {
+  profileRowTitle,
+  ttsVendorLabel,
+  ttsVendorNeedsVoice,
+  ttsVoiceExample,
+} from '@/utils/profileSpec'
 import { formatBytes } from '@/utils/formatBytes'
 import { formatTime } from '@/utils/formatTime'
 import {
@@ -175,6 +183,7 @@ function ResultCard() {
   const result = useVoiceStudioStore((s) => s.result)
   const source = useVoiceStudioStore((s) => s.source)
   const mode = useVoiceStudioStore((s) => s.mode)
+  const configProvider = useVoiceStudioStore((s) => s.configProvider)
   const saving = useVoiceStudioStore((s) => s.saving)
   const save = useVoiceStudioStore((s) => s.save)
   const clearResult = useVoiceStudioStore((s) => s.clearResult)
@@ -255,7 +264,11 @@ function ResultCard() {
           <p className="voice-result__scope">
             {mode === 'local'
               ? '本地这一档不看地址和 Key；引擎二进制、模型、音色编号三样里任何一样不对，都长这样。'
-              : '地址、Key、模型三样里任何一样不对都长这样；音色是可选的，填了而这个模型不认，也是这一句。'}
+              : `厂商、地址、Key、模型这四样里任何一样不对都长这样；${
+                  ttsVendorNeedsVoice(configProvider)
+                    ? `「${ttsVendorLabel(configProvider)}」还不收空音色——没填音色当场就拦下、不调接口，填了但这家不认这个音色也长这样。`
+                    : '音色是可选的，填了而这个模型不认，也是这一句。'
+                }`}
           </p>
         </>
       )}
@@ -298,6 +311,7 @@ export function VoiceStudio() {
   const mode = useVoiceStudioStore((s) => s.mode)
   const configModel = useVoiceStudioStore((s) => s.configModel)
   const configVoice = useVoiceStudioStore((s) => s.configVoice)
+  const configProvider = useVoiceStudioStore((s) => s.configProvider)
   const configEngine = useVoiceStudioStore((s) => s.configEngine)
   const speakers = useVoiceStudioStore((s) => s.speakers)
   const engineModelPresent = useVoiceStudioStore((s) => s.engineModelPresent)
@@ -336,6 +350,19 @@ export function VoiceStudio() {
   const selectedPresent = engineModelPresent[selectedEngine] !== false
   /** 这一档「用得起来才知道的坑」，空串＝没有 */
   const engineCaveat = localTtsEngineCaveat(selectedEngine)
+  /**
+   * 这一批会打到哪家（1.1.1）。这不是装饰：MiniMax 与百炼把音色当必填，
+   * 那句「留空＝不发这一项」对它们不成立，而这一格说错的症状是听不出来的——
+   * 界面写着 A、出声是 B，只有真去听才知道，所以界面必须自己说准。
+   */
+  const vendorLabel = ttsVendorLabel(configProvider)
+  const voiceRequired = ttsVendorNeedsVoice(configProvider)
+  /** 音色那格的占位：留空时真用哪个名字，取决于设置里存没存过（主进程那边是 `voice || base.voice`） */
+  const voicePlaceholder =
+    configVoice ||
+    (voiceRequired
+      ? `「${vendorLabel}」的音色必填，例如 ${ttsVoiceExample(configProvider)}`
+      : '留空＝不发这一项')
 
   return (
     <div className="voice-studio">
@@ -441,7 +468,7 @@ export function VoiceStudio() {
                   type="text"
                   value={voice}
                   onChange={(e) => setVoice(e.target.value)}
-                  placeholder={configVoice || '留空＝不发这一项'}
+                  placeholder={voicePlaceholder}
                   disabled={running}
                 />
               )}
@@ -472,21 +499,27 @@ export function VoiceStudio() {
                   '这一档的音色总数还没报上来，所以现在只列得出默认那一个。'
               : // 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 这一档」
                 (showProfileSelect
-                  ? '上面那格切的是「当前使用的配音方案」：地址、Key 和配音模型跟着整套换，音色不在方案里。下一次配音起效，正在跑的这一批还是原来那套。'
+                  ? '上面那格切的是「当前使用的配音方案」：厂商、地址、Key 和配音模型跟着整套换，音色不在方案里。下一次配音起效，正在跑的这一批还是原来那套。'
                   : '') +
-                  '这一档模型能念哪些音色由服务商决定，应用不替你猜，所以这一格手输——OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感上 onyx 偏沉、nova 偏亮），换网关时以对方给的名字为准。填错由接口回原话。' +
+                  // 必填这一档由主进程当场拦（ttsConfigProblem），所以界面上这句「会被拦下」是说得出口的；
+                  // 举例值只是占位，两家的系统音色表都写在对方文档里，应用不替你抄一份名单。
+                  (voiceRequired
+                    ? `这一套的厂商是「${vendorLabel}」，它要音色才出声，所以这一格不是可选项：填一个音色 id（例如 ${ttsVoiceExample(configProvider)}），名单以对方文档为准。填错由接口回原话。`
+                    : '这一档模型能念哪些音色由服务商决定，应用不替你猜，所以这一格手输——OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感上 onyx 偏沉、nova 偏亮），换网关时以对方给的名字为准。填错由接口回原话。') +
                   // 留空到底等于什么，取决于根上那一份 `ttsVoice` 有没有值（`withOverrides` 是 voice || base.voice）。
                   // 1.1.0 起这一页是唯一入口、它又不写回设置，所以旧版存下来的那个名字会一直当默认——
                   // 那句「留空＝不指定音色」在这时候就是说谎：留空照样把 alloy 发出去了。
                   (configVoice
                     ? `留空＝用设置里存着的那一份「${configVoice}」，要换就在这儿填一个名字（只作用于这一批，不写回设置）。`
-                    : '留空＝不指定音色，请求里干脆不发这一项，有的模型本来就不收这一项。')}
+                    : voiceRequired
+                      ? `留空＝点「开始配音」会被当场拦下，因为「${vendorLabel}」不收空音色。`
+                      : '留空＝不指定音色，请求里干脆不发这一项，有的模型本来就不收这一项。')}
           </p>
 
           {local && engineCaveat && <p className="voice-studio__hint">{engineCaveat}</p>}
 
           <div className="voice-studio__config">
-            {/* 本地档不提配音方案：那条下拉只在云端档出现，方案里那三项凭据（地址/Key/模型）
+            {/* 本地档不提配音方案：那条下拉只在云端档出现，方案里那四项凭据（厂商/地址/Key/模型）
                 这一档一个都不读，说出去就是「你以为在用的那套其实没参与」 */}
             {!local && !showProfileSelect && currentProfile && (
               <>
@@ -500,6 +533,10 @@ export function VoiceStudio() {
               <code>{localTtsEngineLabel(selectedEngine)}</code>
             ) : (
               <>
+                {/* 厂商也念出来：同一条网关地址后面接哪条路径、请求长什么样，都是它定的；
+                    只看模型名认不出这一批要打到哪家去 */}
+                厂商 <code>{vendorLabel}</code>
+                {' · '}
                 {/* 只有「当前使用那套的模型」这一份：页面上没有手输的覆盖，所以这里念的就是待会儿真发出去的那个 */}
                 模型 <code>{configModel || '未填写'}</code>
               </>
