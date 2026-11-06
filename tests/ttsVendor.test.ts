@@ -22,7 +22,9 @@ import {
 import {
   ttsVendorNeedsVoice as uiNeedsVoice,
   ttsVendorProbeVoice as uiProbeVoice,
+  ttsVoiceListUrl as uiVoiceListUrl,
 } from '../src/utils/profileSpec'
+import { ALLOWED_HOSTS } from '../electron/main/ipc/updateHandlers'
 
 const input: TtsSpeechInput = {
   apiBase: 'https://gateway.example.com',
@@ -365,5 +367,16 @@ describe('readSpeechAudio：共同的坏情况', () => {
     const message = (err as Error).message
     expect(message).not.toContain('\n')
     expect(message.length).toBeLessThan(300)
+  })
+})
+
+describe('音色列表链接：界面挂出去的 URL 必须在主进程白名单里', () => {
+  it('所有厂商的 voiceListUrl hostname 都出现在 ALLOWED_HOSTS 中（空串跳过）', () => {
+    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+      const url = uiVoiceListUrl(vendor)
+      if (!url) continue
+      const host = new URL(url).hostname
+      expect(ALLOWED_HOSTS).toContain(host)
+    }
   })
 })

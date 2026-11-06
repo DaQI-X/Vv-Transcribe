@@ -38,6 +38,7 @@ import {
   TriangleAlert,
   Mail,
   Copy,
+  BookOpen,
 } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
@@ -149,6 +150,9 @@ const LOCAL_MODEL_OPTIONS: { value: string; label: string }[] = [
 
 /** 只是给关于页显示和「复制」用；真正拼 mailto 的是主进程 app:contactDeveloper，改地址要同步改那边 */
 const CONTACT_EMAIL = 'hi@vvscribe.com'
+
+/** 使用文档在官网（vvscribe.com/docs），应用里不抄一份内容——抄了就会和线上那份过期不一致 */
+const DOCS_URL = 'https://vvscribe.com/docs'
 
 const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
@@ -1652,6 +1656,24 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 <span className="settings-form-hint">
                   设置（settings.json）、按需下载的配音引擎与组件都在这里。设置没能解析时，
                   原件会以 settings.json.corrupt-时间戳 的名字留在同一层，可以从那份文件里找回
+                </span>
+              </div>
+
+              <div className="settings-form-group">
+                <label className="settings-form-label">帮助文档</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenExternal(DOCS_URL)}
+                    className="settings-modal__dict-update-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  >
+                    <BookOpen size={12} />
+                    打开使用文档
+                  </button>
+                </div>
+                <span className="settings-form-hint">
+                  转写、校对、字幕配音的操作步骤与常见问题都写在那里，改内容只改线上那一份
                 </span>
               </div>
 

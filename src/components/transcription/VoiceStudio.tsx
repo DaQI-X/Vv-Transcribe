@@ -32,6 +32,8 @@
 import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
+import { getElectronAPI } from '@/hooks/useElectronAPI'
+import { toast } from '@/components/ui/Toast'
 import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
 import { switchableProfiles, useProfileStore } from '@/stores/useProfileStore'
 import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
@@ -40,6 +42,7 @@ import {
   ttsVendorLabel,
   ttsVendorNeedsVoice,
   ttsVoiceExample,
+  ttsVoiceListUrl,
 } from '@/utils/profileSpec'
 import { formatBytes } from '@/utils/formatBytes'
 import { formatTime } from '@/utils/formatTime'
@@ -357,6 +360,7 @@ export function VoiceStudio() {
    */
   const vendorLabel = ttsVendorLabel(configProvider)
   const voiceRequired = ttsVendorNeedsVoice(configProvider)
+  const voiceListUrl = ttsVoiceListUrl(configProvider)
   /**
    * 音色那格的占位：留空时真用哪个名字，看主进程那次回落（`withOverrides` 是 `voice || base.voice`，
    * 而 `base.voice` 只在「这一家收空音色」时才从设置里带过来，见 getTTSConfig）。
@@ -366,6 +370,14 @@ export function VoiceStudio() {
   const voicePlaceholder = voiceRequired
     ? `「${vendorLabel}」的音色必填，例如 ${ttsVoiceExample(configProvider)}`
     : configVoice || '留空＝不发这一项'
+
+  /** 打开厂商那份系统音色列表；链接由主进程白名单把关，被拦下要说原因，不能静默无反应 */
+  const openVoiceList = async () => {
+    const api = getElectronAPI()
+    if (!api) return
+    const result = await api.openExternal(voiceListUrl)
+    if (!result.success) toast.error(`打开链接失败：${result.error}`)
+  }
 
   return (
     <div className="voice-studio">
@@ -500,27 +512,32 @@ export function VoiceStudio() {
                 : // 只报数、不给出路：这一档的模型在不在盘上、能不能下载，这句话都猜不到，
                   // 写一条会被前置检查当场拦下的出路比不写更糟
                   '这一档的音色总数还没报上来，所以现在只列得出默认那一个。'
-              : // 两句拼成一根字符串：写成两行文本的话 JSX 会把中间的换行折成一个空格，中文就成了「都跟着换。 这一档」
-                (showProfileSelect
-                  ? '上面那格切的是「当前使用的配音方案」：厂商、地址、Key 和配音模型跟着整套换，音色不在方案里。下一次配音起效，正在跑的这一批还是原来那套。'
-                  : '') +
-                  // 必填这一档由主进程当场拦（ttsConfigProblem），所以界面上这句「会被拦下」是说得出口的；
-                  // 举例值只是占位，两家的系统音色表都写在对方文档里，应用不替你抄一份名单。
-                  (voiceRequired
-                    ? `这一套的厂商是「${vendorLabel}」，它要音色才出声，所以这一格不是可选项：填一个音色 id（例如 ${ttsVoiceExample(configProvider)}），名单以对方文档为准。填错由接口回原话。`
-                    : '这一档模型能念哪些音色由服务商决定，应用不替你猜，所以这一格手输——OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感上 onyx 偏沉、nova 偏亮），换网关时以对方给的名字为准。填错由接口回原话。') +
-                  // 留空等于什么，先问这一家收不收空音色，收的话才轮得到根上那份 `ttsVoice`。
-                  // 反过来写就是说谎：1.1.0 把音色从方案里摘出来时那一份旧名字（多半是 alloy）
-                  // 还留在设置根上，而必填那两家的 `base.voice` 现在是空串（getTTSConfig 按厂商
-                  // 落成空），所以「留空＝用设置里那一份 alloy」对 MiniMax／百炼已经不成立，
-                  // 界面上这一句要和「开始配音」当场拦下的那句（ttsConfigProblem）对得上。
-                  (voiceRequired
-                    ? `留空＝点「开始配音」会被当场拦下，因为「${vendorLabel}」不收空音色${
-                        configVoice ? `（设置里存过的那一份「${configVoice}」是别家的名字，这一家不认）` : ''
-                      }。`
+              : // 音色列表链接要内联在这段话里，所以云端这一支用 fragment；
+                // 同一个 fragment 里相邻的孩子之间不能留裸换行——JSX 会把它折成一个空格，
+                // 中文就成了「起效。 「MiniMax」」，所以每句各自包在一个 {} 里、同行接龙。
+                <>
+                  {showProfileSelect
+                    ? '上面那格换的是整套配音方案（厂商、地址、Key、模型），音色不在方案里，下一次配音才起效。'
+                    : ''}
+                  {voiceRequired
+                    ? `「${vendorLabel}」要音色才出声，这一格填一个音色 id（例如 ${ttsVoiceExample(configProvider)}）。`
+                    : '能念哪些音色由服务商决定，这一格手输：OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感 onyx 偏沉、nova 偏亮）。'}
+                  {voiceListUrl ? (
+                    <>名单见<button className="voice-studio__link" onClick={openVoiceList}>系统音色列表</button>。</>
+                  ) : (
+                    ''
+                  )}
+                  {/* 留空等于什么，先问这一家收不收空音色，收的话才轮得到根上那份 `ttsVoice`。
+                      反过来写就是说谎：1.1.0 把音色摘出方案后，必填那两家的 `base.voice` 是空串
+                      （getTTSConfig 按厂商落成空），而设置根上那份旧名字多半属于别家。
+                      界面上这句要和「开始配音」当场拦下的那句（ttsConfigProblem）对得上。 */}
+                  {voiceRequired
+                    ? `留空＝点「开始配音」会被当场拦下${configVoice ? `（设置里存过的「${configVoice}」是别家名字，这一家不认）` : ''}。`
                     : configVoice
-                      ? `留空＝用设置里存着的那一份「${configVoice}」，要换就在这儿填一个名字（只作用于这一批，不写回设置）。`
-                      : '留空＝不指定音色，请求里干脆不发这一项，有的模型本来就不收这一项。')}
+                      ? `留空＝用设置里存着的「${configVoice}」，要换就在这儿填一个（只作用于这一批，不写回设置）。`
+                      : '留空＝请求里不发这一项，有的模型本来就不收这一项。'}
+                  {'填错由接口回原话。'}
+                </>}
           </p>
 
           {local && engineCaveat && <p className="voice-studio__hint">{engineCaveat}</p>}

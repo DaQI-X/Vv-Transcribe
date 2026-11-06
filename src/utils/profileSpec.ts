@@ -115,6 +115,8 @@ const TTS_VENDOR_UI: Record<
     probeVoice: string
     apiBaseExample: string
     modelExample: string
+    /** 厂商提供的系统音色列表页 URL；空串＝这一家没有公开清单，界面上不挂链接 */
+    voiceListUrl: string
   }
 > = {
   openai: {
@@ -124,6 +126,7 @@ const TTS_VENDOR_UI: Record<
     probeVoice: '',
     apiBaseExample: 'https://api.openai.com',
     modelExample: 'tts-1',
+    voiceListUrl: '',
   },
   minimax: {
     label: 'MiniMax',
@@ -132,6 +135,7 @@ const TTS_VENDOR_UI: Record<
     probeVoice: 'male-qn-qingse',
     apiBaseExample: 'https://api.minimax.cn',
     modelExample: 'speech-2.8-hd',
+    voiceListUrl: 'https://platform.minimax.cn/docs/faq/system-voice-id',
   },
   dashscope: {
     label: '阿里云百炼（CosyVoice）',
@@ -142,6 +146,7 @@ const TTS_VENDOR_UI: Record<
     probeVoice: '',
     apiBaseExample: 'https://dashscope.aliyuncs.com',
     modelExample: 'cosyvoice-v3-flash',
+    voiceListUrl: 'https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list',
   },
 }
 
@@ -186,6 +191,11 @@ export function ttsApiBaseExample(raw: unknown): string {
 /** 配音模型那格的灰字举例（同上，只说形状，落盘的值仍以用户填的为准） */
 export function ttsModelExample(raw: unknown): string {
   return TTS_VENDOR_UI[ttsVendorOf(raw)].modelExample
+}
+
+/** 厂商提供的系统音色列表页 URL；空串＝这一家没有公开清单 */
+export function ttsVoiceListUrl(raw: unknown): string {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].voiceListUrl
 }
 
 /**
