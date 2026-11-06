@@ -20,11 +20,13 @@ import {
   composeVoiceTrack,
   getVoiceTrack,
   hasActiveTTSSynthesis,
+  listVendorVoices,
   previewSpeech,
   releaseBatchById,
   releasePreview,
   synthesizeSegments,
 } from '../services/ttsService'
+import { ttsVendorListsVoices, type VendorVoice } from '../services/ttsVendor'
 import {
   getLocalTtsDetail,
   isLocalTtsEngineRunning,
@@ -92,6 +94,20 @@ export interface LocalTtsStatusResult extends LocalTtsDetail {
    * 界面就不能说「去按需组件下载它」；null＝还没读过清单，只能把人导向检查清单的地方。
    */
   binaryInManifest: boolean | null
+}
+
+/**
+ * 音色名单那一条（`tts:voiceList`）的返回值。
+ *
+ * 三个状态刻意压成两个字段，因为界面对它们的处理只有两种：有候选就挂上去，没候选就照旧手输。
+ * - `ok: true` ＝ 这一家有名单接口、这一次也取到了；
+ * - `ok: false, error: null` ＝ 这一家（或本地档）压根没有可问的地方，不值得为它说一句话；
+ * - `ok: false, error: '…'` ＝ 问了但没问到，界面把这句原因换成一行灰字。
+ */
+export interface VoiceListResult {
+  ok: boolean
+  voices: VendorVoice[]
+  error: string | null
 }
 
 /**
@@ -402,6 +418,32 @@ export function registerTTSHandlers() {
     // 回 null 正好落回界面本来就有的第三种状态（「还没读到本机的组件状态」），
     // 三处调用点（设置页、配音页、配音前置校验）都已按 null 分支写过，无需改文案。
     () => null
+  )
+
+  /**
+   * 音色名单（1.1.2 #340）：配音页「音色」那一格输入时的候选来源。
+   *
+   * 只读已保存的方案，不接界面传的厂商——与「点保存才生效」同一条口径，
+   * 否则没保存的选择会让这一格去问另一家。
+   *
+   * 取不到名单**不是**配音坏了：那一格本来就支持手输，所以这一条的失败形状回的是
+   * `ok:false` 加一句原因，界面拿它换一行灰字，不弹红条、不拦任何操作。
+   */
+  ipcHandle(
+    'tts:voiceList',
+    async (_event, requestedProfile?: unknown): Promise<VoiceListResult> => {
+      const config = await getTTSConfig(trimArg(requestedProfile) || undefined)
+      // 本地档那一格是编号下拉（引擎自己报数），云端里也只有 MiniMax 有这条接口。
+      // 两种「没有候选可给」都回 ok:false + error:null——界面照旧手输，一个字都不用多说
+      if (config.engine !== 'cloud' || !ttsVendorListsVoices(config.vendor)) {
+        return { ok: false, voices: [], error: null }
+      }
+      const voices = await listVendorVoices(config)
+      return { ok: true, voices, error: null }
+    },
+    // 抛到这里就是「问过了但没问到」（Key 空、网络、对方回错误码）。voices 给空数组不是谎：
+    // error 非空时界面念的是这句原因，不会把空数组读成「这家一个音色都没有」
+    (message) => ({ ok: false, voices: [], error: message })
   )
 
   /**

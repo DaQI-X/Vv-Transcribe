@@ -12,8 +12,10 @@
  *   所以「换模型」在这档里本来就是「换一套」，不再有第二个手输的模型格——下拉里那一行念的就是模型名，
  *   旁边再摆一个输入框说的是同一件事，用户只会以为是两件事。
  * - 本地档同一格换成「配音模型」下拉（白名单里那两档）。这是这一次调用的参数，不写回设置。
- * - 音色两档都留着：本地能枚举（引擎报编号），云端能填什么由服务商决定，各家字段名与取值都不一样，
- *   应用不替你猜一份清单。OpenAI 兼容留空＝不指定，请求里干脆不带这一项；
+ * - 音色两档都留着：本地能枚举（引擎报编号），云端能填什么由服务商决定，各家字段名与取值都不一样。
+ *   云端这一格是「手输 + 边打边筛」（#340）：厂商自己给「列音色」接口时（四家里只有 MiniMax 给），
+ *   进这一页就用用户那把 Key 现取一份挂成 <datalist>，自己复刻过的音色也在里面；取不到或这家没这条接口
+ *   就退回纯手输，配一句文档链接的出路。OpenAI 兼容留空＝不指定，请求里干脆不带这一项；
  *   MiniMax 与百炼把音色当必填（1.1.1），留空会在点「开始配音」时被主进程当场拦下并点名这一家——
  *   这里不猜一个默认音色，因为猜错了用户听到的是另一把嗓子，比报错更难发现。
  *   真被模型拒绝了，接口回的原话会出现在结果卡上。
@@ -318,6 +320,8 @@ export function VoiceStudio() {
   const configEngine = useVoiceStudioStore((s) => s.configEngine)
   const speakers = useVoiceStudioStore((s) => s.speakers)
   const engineModelPresent = useVoiceStudioStore((s) => s.engineModelPresent)
+  const vendorVoices = useVoiceStudioStore((s) => s.vendorVoices)
+  const vendorVoicesError = useVoiceStudioStore((s) => s.vendorVoicesError)
   const profiles = useProfileStore((s) => s.slice.tts.profiles)
   const profileId = useProfileStore((s) => s.slice.tts.profileId)
   const setProfile = useVoiceStudioStore((s) => s.setProfile)
@@ -370,6 +374,17 @@ export function VoiceStudio() {
   const voicePlaceholder = voiceRequired
     ? `「${vendorLabel}」的音色必填，例如 ${ttsVoiceExample(configProvider)}`
     : configVoice || '留空＝不发这一项'
+
+  /**
+   * 音色那格的候选（#340）：只在厂商自己给「列音色」这条接口时才有东西，是刚才拿用户那把 Key
+   * 现取的，所以自己复刻过的也在里面、也不会过期。**没有候选不等于这家没音色**——四家里只有
+   * MiniMax 给这条接口，另三家是刻意不接的（理由记在 ttsVendor.ts）。
+   * 去重按 id：同一条音色可能同时出现在系统名单和复刻名单里，重复的 <option> 会让候选列表长出两行一样的。
+   */
+  const vendorVoiceOptions = vendorVoices.filter(
+    (item, index) => vendorVoices.findIndex((other) => other.id === item.id) === index
+  )
+  const hasVendorVoices = vendorVoiceOptions.length > 0
 
   /** 打开厂商那份系统音色列表；链接由主进程白名单把关，被拦下要说原因，不能静默无反应 */
   const openVoiceList = async () => {
@@ -485,6 +500,10 @@ export function VoiceStudio() {
                   onChange={(e) => setVoice(e.target.value)}
                   placeholder={voicePlaceholder}
                   disabled={running}
+                  // 用原生 <datalist> 而不是自己写一个下拉：它给的就是「边打边筛 + 键盘上下选」，
+                  // 而候选是厂商现取来的、可能几百条，自己那套要处理定位、溢出、失焦、Esc，
+                  // 换来的还是一个更差的输入框。没有候选时这个属性不写，输入框行为一字不变。
+                  list={hasVendorVoices ? 'voice-studio-vendor-voices' : undefined}
                 />
               )}
             </label>
@@ -505,6 +524,19 @@ export function VoiceStudio() {
             </label>
           </div>
 
+          {!local && hasVendorVoices && (
+            <datalist id="voice-studio-vendor-voices">
+              {vendorVoiceOptions.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {/* <option> 的文本是候选行右边那列说明：填进输入框的只有 value，所以这里放名字，
+                      复刻过的额外标一下——用户账号里的复刻音色和厂商系统音色在这一格里长得一样，
+                      不标就分不出哪个是自己那把嗓子 */}
+                  {item.source === 'clone' ? `${item.name}（自己复刻）` : item.name}
+                </option>
+              ))}
+            </datalist>
+          )}
+
           <p className="voice-studio__hint">
             {local
               ? speakers > 0
@@ -522,10 +554,26 @@ export function VoiceStudio() {
                   {voiceRequired
                     ? `「${vendorLabel}」要音色才出声，这一格填一个音色 id（例如 ${ttsVoiceExample(configProvider)}）。`
                     : '能念哪些音色由服务商决定，这一格手输：OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感 onyx 偏沉、nova 偏亮）。'}
-                  {voiceListUrl ? (
-                    <>名单见<button className="voice-studio__link" onClick={openVoiceList}>系统音色列表</button>。</>
+                  {/* 名单这一句按「取到了什么」三分支，一句都不多说：
+                      取到了 → 说清候选是哪来的（现取的，所以复刻音色也在），这时候再挂文档链接是重复；
+                      问了没问到 → 把原因原话摆出来，出路就是那份文档链接；
+                      这家根本没这条接口 → 保持原样，只挂文档链接（没有链接的连提示都不给，1.1.1 的口径）。
+                      反过来写「这家没有音色名单」是句谎：四家里只有 MiniMax 给这条接口。 */}
+                  {hasVendorVoices ? (
+                    `这一格边打边筛：${vendorVoiceOptions.length} 个音色是刚从「${vendorLabel}」取的，标着「自己复刻」的是你账号里那些。`
                   ) : (
-                    ''
+                    <>
+                      {/* 原因那句多半是接口原话（尾巴上有没有标点不由这里定），
+                          直接接下一句会读成「…这一格是空的名单见系统音色列表」，所以先收一个句号 */}
+                      {vendorVoicesError
+                        ? `音色名单这次没取到：${vendorVoicesError.replace(/[。.！!？?]$/, '')}。`
+                        : ''}
+                      {voiceListUrl ? (
+                        <>名单见<button className="voice-studio__link" onClick={openVoiceList}>系统音色列表</button>。</>
+                      ) : (
+                        ''
+                      )}
+                    </>
                   )}
                   {/* 留空等于什么，先问这一家收不收空音色，收的话才轮得到根上那份 `ttsVoice`。
                       反过来写就是说谎：1.1.0 把音色摘出方案后，必填那两家的 `base.voice` 是空串

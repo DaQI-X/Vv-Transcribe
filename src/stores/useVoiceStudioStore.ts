@@ -29,6 +29,17 @@ export type VoiceSource = 'text' | 'subtitle'
 export type VoicePhase = 'idle' | 'running' | 'done'
 
 /**
+ * 「音色」那一格的候选（1.1.2 #340，`tts:voiceList` 回的那一份）。
+ * source 是为了在候选里说清出处：厂商内置的那一批，和这个账号自己复刻出来的那一批，
+ * 混在一张表里却分不清，用户就会以为复刻音色是厂商提供的公共音色。
+ */
+export interface VendorVoiceOption {
+  id: string
+  name: string
+  source: 'system' | 'clone'
+}
+
+/**
  * 倍速只给固定档位：接口字段是 0.25–4.0 的连续值，但让用户手打 8 只会得到一条废音轨，
  * 而这些档是不是被服务商照单实现由接口说了算（界面把这句写在旁边，不替服务商承诺）。
  */
@@ -71,6 +82,14 @@ interface VoiceStudioState {
    * 否则用户在别处下载完或手工挪走目录之后，这里会一直按旧账拦人或放人。
    */
   engineModelPresent: Record<string, boolean>
+  /**
+   * 云端档「音色」那一格的候选（1.1.2 #340）。只有那家有列表接口的厂商（现在是 MiniMax）会给东西，
+   * 其余三家与本地档一律空数组——所以空数组的意思是「没有候选可给」，**不是**「这家一个音色都没有」，
+   * 界面对它的处理就是照旧手输，一个字都不用多说。
+   */
+  vendorVoices: VendorVoiceOption[]
+  /** 非空＝这家有列表接口、但这一次没问到（Key 空、网络、对方回错误码）。界面换成一行灰字，不弹红条 */
+  vendorVoicesError: string | null
 
   phase: VoicePhase
   /** 这一批实际提交出去的段，进行中按段号回显文本用；用户中途改输入不影响它 */
@@ -91,6 +110,7 @@ interface VoiceStudioState {
   setEngine: (engine: string) => void
   setSpeed: (speed: number) => void
   loadConfig: () => Promise<void>
+  refreshVendorVoices: () => Promise<void>
   setProfile: (profileId: string) => Promise<void>
   previewOne: () => Promise<void>
   buildQueue: () => VoiceSegment[]
@@ -188,6 +208,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   configEngine: LOCAL_TTS_DEFAULT_ENGINE,
   speakers: 0,
   engineModelPresent: {},
+  vendorVoices: [],
+  vendorVoicesError: null,
 
   phase: 'idle',
   queue: [],
@@ -254,10 +276,36 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       set({ mode, configModel: '', configVoice: '', configProvider: '', configEngine: requested })
     }
     if (mode === 'local') await refreshLocalVoiceState(get().engine || requested)
+    else await get().refreshVendorVoices()
     // 方案列表和设置是两回事：设置读不出（null）不代表列表读不出，反过来也一样。
     // 列表那份归 useProfileStore（三档共用，见那个文件头），换完方案必须跟着重读一次，
     // 否则下拉里挂的还是切之前的「当前使用」。
     await useProfileStore.getState().load()
+  },
+
+  /**
+   * 重取「音色」那一格的候选（#340）。挂在 `loadConfig` 上而不是自己起一个 effect：
+   * 进页面与换方案都会走到 loadConfig，这两处正好是需要重取的两个时机，
+   * 而 effect 得自己盯住 mode/profileId 两个依赖，漏一个就会挂着上一套的候选。
+   *
+   * 这一条从不弹 toast、也从不拦任何操作：候选只是便利，取不到那一格就是原来的手输框。
+   */
+  refreshVendorVoices: async () => {
+    const api = getElectronAPI()
+    if (!api) return
+    const { mode } = get()
+    if (mode !== 'cloud') {
+      set({ vendorVoices: [], vendorVoicesError: null })
+      return
+    }
+    const result = await api.listVoices()
+    // ok:false + error:null＝这一家没有可问的地方，静默清掉上一套留下的候选：
+    // 换到不收名单的那家还挂着 MiniMax 的音色，正是 #327 那种「界面写着 A、发出去是 B」
+    if (!result?.ok) {
+      set({ vendorVoices: [], vendorVoicesError: result?.error ?? null })
+      return
+    }
+    set({ vendorVoices: result.voices ?? [], vendorVoicesError: null })
   },
 
   /**

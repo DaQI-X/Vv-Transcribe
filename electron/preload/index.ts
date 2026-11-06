@@ -148,6 +148,9 @@ const api = {
     ipcRenderer.invoke('tts:localStatus', engine, profileId),
   restartLocalVoiceEngine: () => ipcRenderer.invoke('tts:localRestart'),
   stopLocalVoiceEngine: () => ipcRenderer.invoke('tts:localStop'),
+  // 音色名单（1.1.2 #340）：只有云端档里那家有列表接口的厂商会给候选，取不到就照旧手输，
+  // 所以这一条从不影响配音本身。profileId 与其余通道同义：不传＝当前默认那套
+  listVoices: (profileId?: string) => ipcRenderer.invoke('tts:voiceList', profileId),
   // 一批要跑几分钟（每段一次网络请求，串行），invoke 只给最后结果；段号得推回来界面才不会像卡死
   onVoiceProgress: (callback: (data: VoiceProgressEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, data: VoiceProgressEvent) => callback(data)

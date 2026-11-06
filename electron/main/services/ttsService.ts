@@ -33,13 +33,17 @@ import { probeFile, resolveFfmpegBinary } from './audioProcessor'
 import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './localTtsEngine'
 import {
   buildSpeechRequest,
+  buildVoiceListRequest,
   readSpeechAudio,
+  readVoiceList,
+  ttsVendorListsVoices,
   ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
   TtsVendorError,
   TTS_VENDOR_NAMES,
   type TtsAudioResult,
   type TtsVendorId,
+  type VendorVoice,
 } from './ttsVendor'
 
 /** 主进程内部用的配音配置：明文 Key，只有主进程拿得到（见 settingsService 的脱敏视图） */
@@ -258,6 +262,45 @@ export async function previewSpeech(text: string, config: TTSConfig): Promise<Sy
 /** 显式释放（配音页点「清空」时）；没留目录时什么都不做 */
 export async function releasePreview(): Promise<void> {
   await releasePreviewDir()
+}
+
+/**
+ * 取音色名单那一次的超时。它只是给输入框补候选，所以比一次合成（60 秒）短得多：
+ * 名单取不到就落回手输，让用户为一个可选的便利等一分钟是本末倒置。
+ */
+const VOICE_LIST_TIMEOUT_MS = 15_000
+
+/**
+ * 取「这一把 Key 现在能用哪些音色」（1.1.2 #340）。
+ *
+ * 只有 MiniMax 一家有这条接口（见 `ttsVendorListsVoices` 那段说明），其余三家在这里就返回空、
+ * **不发一个字节**——不是「试了一下没成」，是这一家压根没有可问的地方，界面据此照旧手输。
+ * 所以这一条不是配音链路的一部分：它失败时配音照样能跑，调用方也别把它当可用性判据。
+ */
+export async function listVendorVoices(config: TTSConfig): Promise<VendorVoice[]> {
+  if (!ttsVendorListsVoices(config.vendor)) return []
+  if (!config.apiKey.trim()) {
+    throw new Error(`${TTS_VENDOR_NAMES[config.vendor]} 的音色名单要用配置里那把 Key 才取得到，现在这一格是空的`)
+  }
+  const request = buildVoiceListRequest(config.vendor, { apiBase: config.apiBase, apiKey: config.apiKey })
+  let response: Response
+  try {
+    response = await fetch(request.url, {
+      method: 'POST',
+      headers: request.headers,
+      body: request.body,
+      signal: AbortSignal.timeout(VOICE_LIST_TIMEOUT_MS),
+    })
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new Error(`取音色名单 ${VOICE_LIST_TIMEOUT_MS / 1000} 秒没响应，已中断`)
+    }
+    throw new Error(`取音色名单的请求没能发出去：${err instanceof Error ? err.message : String(err)}`)
+  }
+  const voices = await readVoiceList(config.vendor, request, response)
+  // 名单里是音色 id 与名字，不带 Key；地址只记到域名那层，与其余 TTS 日志同一口径
+  logger.info('TTS', 'vendor voice list fetched', { vendor: config.vendor, count: voices.length })
+  return voices
 }
 
 /** 渲染层传下来的段落形状：时间轴只有渲染层有，主进程不存第二份（与 proofread:local 同一口径） */

@@ -606,6 +606,17 @@ export interface ElectronAPI {
    * 有一批配音正在逐段合成时主进程会拒绝，因为这里停了剩下的段落会全失败。
    */
   stopLocalVoiceEngine: () => Promise<{ ok: boolean; stopped: boolean; error: string | null }>
+  /**
+   * 音色名单（1.1.2 #340）：配音页「音色」那一格输入时的候选，只有云端档里那家有列表接口的
+   * 厂商（现在是 MiniMax）会给东西，其余三家与本地档一律 ok:false + error:null。
+   * error 有值＝问了但没问到（Key 空、网络、对方回错误码），界面把它换成一行灰字：
+   * 名单只是便利，取不到照旧手输，不弹红条、不拦配音。
+   */
+  listVoices: (profileId?: string) => Promise<{
+    ok: boolean
+    voices: Array<{ id: string; name: string; source: 'system' | 'clone' }>
+    error: string | null
+  }>
 
   /**
    * 按需组件：只读磁盘在场情况与占用体积，不联网。打开「关于与更新」先吃这一份，

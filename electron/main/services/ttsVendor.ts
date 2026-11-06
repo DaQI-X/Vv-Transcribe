@@ -509,3 +509,111 @@ function asObject(value: unknown): Record<string, unknown> {
     ? (value as Record<string, unknown>)
     : {}
 }
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+/**
+ * 「音色名单能不能问接口要」（1.1.2 #340）。四家里只有 MiniMax 给这一条，其余三家**刻意不接**：
+ *
+ * - **MiniMax**：`POST /v1/get_voice`，用的就是配音那把 Key，能一次列出系统音色与这个账号复刻出来的音色；
+ * - **百炼**：`voice-enrollment` 的 `list_voice` 只列**自己复刻的那些**，CosyVoice 那一大张系统音色表
+ *   只有文档页。拿它当候选等于在界面上说「你能选的就这几个」——比不给候选更误导，所以不接；
+ * - **豆包**：拿配音这把 Key 只能查**某一个** speaker 的训练状态；真正的清单在控制台那侧的 OpenAPI，
+ *   要的是 AK/SK 另一套凭据，与这一格填的东西不是一回事；
+ * - **OpenAI 兼容**：规范里没有「列音色」这一条（内置那几个只写在散文里），而兼容网关各自加不加更没法假定。
+ *
+ * 不接的那三家照旧手输 + 挂厂商文档链接（`voiceListUrl`，#333），不做「假装能匹配」的半张表。
+ */
+const VENDOR_VOICE_LIST_PATH: Partial<Record<TtsVendorId, string>> = {
+  minimax: '/v1/get_voice',
+}
+
+/** 这一家的音色名单能不能从接口取；界面按它决定那一格长不长得候选 */
+export function ttsVendorListsVoices(vendor: TtsVendorId): boolean {
+  return !!VENDOR_VOICE_LIST_PATH[vendor]
+}
+
+/** 一条候选音色。界面上要能说清出处，所以系统音色与自己复刻的分开标 */
+export interface VendorVoice {
+  /** 递给接口的那一个 id（MiniMax 是 `voice_id`，形如 male-qn-qingse） */
+  id: string
+  /** 给人看的名字，空串＝对方没给这一项 */
+  name: string
+  /** system＝厂商内置，clone＝这个账号自己复刻的 */
+  source: 'system' | 'clone'
+}
+
+/**
+ * 拼「列音色」这一次请求。头部仍由这里给全（同一把 Bearer），
+ * 地址仍走 `appendApiPath`——那一条规则全应用只有一份，这里不许再拼一层。
+ */
+export function buildVoiceListRequest(
+  vendor: TtsVendorId,
+  input: { apiBase: string; apiKey: string }
+): TtsVendorRequest {
+  const path = VENDOR_VOICE_LIST_PATH[vendor]
+  if (!path) vendorError(`${TTS_VENDOR_NAMES[vendor]} 没有「列出音色」这一条接口，音色只能手输`)
+  // voice_type=all 一次把系统音色、复刻音色、生成音色都拿回来：界面要的是「这一把 Key 能用的全部」，
+  // 分三次问既慢又会在中途失败时给出半张表（半张表比空表更难认出错）
+  return {
+    url: appendApiPath(input.apiBase, path),
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${input.apiKey}`,
+    },
+    body: JSON.stringify({ voice_type: 'all' }),
+  }
+}
+
+/**
+ * 读回音色名单。与 `readSpeechAudio` 同一套口径：这一家的错误会带着 HTTP 200 回来，
+ * `base_resp.status_code` 不看就等于把失败读成「这家一个音色都没有」。
+ *
+ * 拿不到名单不是致命错——界面会落回纯手输（本来就只有手输）。所以这里的措辞是给日志和
+ * 那句灰字提示用的，别写成让用户以为配音坏了的话。
+ */
+export async function readVoiceList(
+  vendor: TtsVendorId,
+  request: TtsVendorRequest,
+  response: Response
+): Promise<VendorVoice[]> {
+  const name = TTS_VENDOR_NAMES[vendor]
+  if (!response.ok) {
+    const raw = await textOf(response)
+    vendorError(
+      `${name} 取音色名单失败：HTTP ${String(response.status)}（POST ${request.url}）${
+        raw ? `：${errorSnippet(raw)}` : ''
+      }`
+    )
+  }
+  const raw = await textOf(response)
+  const json = parseJsonBody(raw)
+  if (!json) vendorError(notJsonMessage(name, request.url, raw).replace('没读出音频', '没读出音色名单'))
+
+  const baseResp = asObject(json.base_resp)
+  const statusCode = Number(baseResp.status_code ?? 0)
+  if (statusCode !== 0) {
+    const message = String(baseResp.status_msg ?? '').trim()
+    vendorError(
+      `${name} 取音色名单回了错误码 ${String(statusCode)}${message ? `：${message}` : '（没有附带说明）'}`
+    )
+  }
+
+  const voices: VendorVoice[] = []
+  const push = (rows: unknown, source: VendorVoice['source']) => {
+    for (const row of asArray(rows)) {
+      const item = asObject(row)
+      const id = String(item.voice_id ?? '').trim()
+      if (!id) continue
+      voices.push({ id, name: String(item.voice_name ?? '').trim(), source })
+    }
+  }
+  push(json.system_voice, 'system')
+  // voice_cloning 是这一把 Key 复刻出来的音色，voice_generation 是「音色生成」那条线的产物，
+  // 两者都是这个账号自己的资产，界面上归到同一类「复刻」里说
+  push(json.voice_cloning, 'clone')
+  push(json.voice_generation, 'clone')
+  return voices
+}

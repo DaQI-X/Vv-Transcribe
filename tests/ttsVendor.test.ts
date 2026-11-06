@@ -11,9 +11,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildSpeechRequest,
+  buildVoiceListRequest,
   normalizeTtsVendor,
   readSpeechAudio,
+  readVoiceList,
   TtsVendorError,
+  ttsVendorListsVoices,
   ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
   ttsVendorProbeVoice,
@@ -612,5 +615,124 @@ describe('音色列表链接：界面挂出去的 URL 必须在主进程白名�
       const host = new URL(url).hostname
       expect(ALLOWED_HOSTS).toContain(host)
     }
+  })
+})
+
+describe('音色候选名单（#340）：只有厂商自己给这条接口时才有', () => {
+  /** 与 `reqOf` 同一口径：断言响应那一半时要拿「真发出去的那条 URL」，报错才点得准地址 */
+  const listReq = (apiBase = 'https://api.minimax.cn') =>
+    buildVoiceListRequest('minimax', { apiBase, apiKey: 'sk-test' })
+
+  /**
+   * 失败那几趟取错误对象。写成 `.catch((e) => e as Error)` 时 TS 会把成功类型并进联合
+   * （`VendorVoice[] | Error`），后面每一句 `.message` 都报假错——这一层本来就要断言「必抛」。
+   */
+  const rejected = async (promise: Promise<unknown>): Promise<Error> => {
+    try {
+      await promise
+    } catch (err) {
+      return err as Error
+    }
+    throw new Error('这一趟本该失败，却正常返回了')
+  }
+
+  it('四家里只有 MiniMax 给「列音色」，另三家不是漏了而是刻意不接', () => {
+    expect(ttsVendorListsVoices('minimax')).toBe(true)
+    for (const vendor of ['openai', 'dashscope', 'volc'] as const) {
+      expect(ttsVendorListsVoices(vendor)).toBe(false)
+    }
+  })
+
+  it('没有这条接口的三家：拼请求就当场说清「只能手输」，不是回一个空表', () => {
+    // 空表在界面上读起来是「这家一个音色都没有」——那是句谎，而且会让用户以为自己 Key 填错了
+    for (const vendor of ['openai', 'dashscope', 'volc'] as const) {
+      const build = () => buildVoiceListRequest(vendor, { apiBase: 'https://h.example.com', apiKey: 'k' })
+      expect(build).toThrow(TtsVendorError)
+      expect(build).toThrow(/没有「列出音色」这一条接口/)
+    }
+  })
+
+  it('请求形状：一次问全（voice_type=all），认证与配音同一把 Bearer', () => {
+    const request = listReq()
+    expect(request.url).toBe('https://api.minimax.cn/v1/get_voice')
+    expect(request.headers.Authorization).toBe('Bearer sk-test')
+    expect(JSON.parse(request.body)).toEqual({ voice_type: 'all' })
+  })
+
+  it('用户照文档粘完整端点也认：地址仍走 appendApiPath，不接第二层', () => {
+    expect(listReq('https://api.minimax.cn/v1/get_voice').url).toBe(
+      'https://api.minimax.cn/v1/get_voice'
+    )
+  })
+
+  it('系统音色归 system，复刻与生成的都归 clone；没有 voice_id 的行丢掉', async () => {
+    const voices = await readVoiceList(
+      'minimax',
+      listReq(),
+      json(200, {
+        system_voice: [
+          { voice_id: 'male-qn-qingse', voice_name: '青涩青年' },
+          { voice_name: '这一行没有 id' },
+        ],
+        voice_cloning: [{ voice_id: 'clone-1', voice_name: '我自己' }],
+        voice_generation: [{ voice_id: 'gen-1' }],
+        base_resp: { status_code: 0, status_msg: 'success' },
+      })
+    )
+    expect(voices).toEqual([
+      { id: 'male-qn-qingse', name: '青涩青年', source: 'system' },
+      { id: 'clone-1', name: '我自己', source: 'clone' },
+      // 对方没给名字就是空串，界面上那列说明会空着——编一个名字比空着更糟
+      { id: 'gen-1', name: '', source: 'clone' },
+    ])
+  })
+
+  it('一个音色都没有时回空表（这是真话，不是失败）', async () => {
+    await expect(readVoiceList('minimax', listReq(), json(200, { base_resp: { status_code: 0 } }))).resolves.toEqual(
+      []
+    )
+  })
+
+  it('HTTP 200 但 base_resp 报了错：这是失败，不是「这家没音色」', async () => {
+    // MiniMax 的老口径：业务错误照样 200 回来，只看状态码就是把 1008「余额不足」读成空名单
+    const err = await rejected(
+      readVoiceList(
+        'minimax',
+        listReq(),
+        json(200, { system_voice: [], base_resp: { status_code: 1008, status_msg: 'insufficient balance' } })
+      )
+    )
+    expect(err).toBeInstanceOf(TtsVendorError)
+    expect(err.message).toContain('错误码 1008')
+    expect(err.message).toContain('insufficient balance')
+  })
+
+  it('非 2xx：状态码与打出去的那条地址都在这一句里', async () => {
+    const err = await rejected(
+      readVoiceList(
+        'minimax',
+        listReq(),
+        new Response('{"base_resp":{"status_msg":"invalid api key"}}', {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    )
+    expect(err.message).toContain('HTTP 401')
+    expect(err.message).toContain('POST https://api.minimax.cn/v1/get_voice')
+    expect(err.message).toContain('invalid api key')
+  })
+
+  it('回了一份 HTML：说的是地址层级填错，而不是「没读出音色名单」这么一句干巴巴的话', async () => {
+    const err = await rejected(
+      readVoiceList(
+        'minimax',
+        listReq(),
+        new Response('<html>404 Not Found</html>', { status: 200, headers: { 'content-type': 'text/html' } })
+      )
+    )
+    expect(err.message).toContain('回的不是 JSON')
+    expect(err.message).toContain('没读出音色名单')
+    expect(err.message).not.toContain('没读出音频')
   })
 })

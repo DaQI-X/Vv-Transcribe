@@ -15,7 +15,7 @@ import {
 } from '../electron/main/services/settingsService'
 import { buildAsrRequest } from '../electron/main/services/asr/asrVendor'
 import { buildIflytekResult, buildIflytekUpload } from '../electron/main/services/asr/iflytekAsr'
-import { buildSpeechRequest } from '../electron/main/services/ttsVendor'
+import { buildSpeechRequest, buildVoiceListRequest } from '../electron/main/services/ttsVendor'
 import {
   DEFAULT_LOCAL_TTS_ENGINE,
   LOCAL_TTS_ENGINES,
@@ -107,6 +107,15 @@ describe('normalizeApiBase', () => {
         }).url
       ).toBe(pasted)
     }
+
+    // 配音页取音色候选那条（#340）：也是真发出去的一趟，用户照 MiniMax 文档粘
+    // `https://api.minimax.cn/v1/get_voice` 时必须同样认下
+    const voiceListPasted = buildVoiceListRequest('minimax', { apiBase, apiKey: 'k' }).url
+    expect(voiceListPasted).toBe(`${apiBase}/v1/get_voice`)
+    expect(normalizeApiBase(voiceListPasted)).toBe(apiBase)
+    expect(
+      buildVoiceListRequest('minimax', { apiBase: normalizeApiBase(voiceListPasted), apiKey: 'k' }).url
+    ).toBe(voiceListPasted)
 
     // 讯飞那两趟的路径不在适配层的固定形状里（每趟现算签名），但尾巴表照样要认下它们：
     // 用户照文档粘的正是 `.../v2/upload` 与 `.../v2/getResult` 这两条。
