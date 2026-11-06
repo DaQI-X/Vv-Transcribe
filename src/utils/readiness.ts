@@ -7,7 +7,7 @@ import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { hasInAppDownload, missingBinaryHint, missingModelHint } from '@/utils/localTtsEngines'
-import { PROFILE_CAP_SPEC } from '@/utils/profileSpec'
+import { PROFILE_CAP_SPEC, ttsVendorNeedsModel } from '@/utils/profileSpec'
 import type { ProfileCapability } from '@/types/settingsProfile'
 
 export interface ReadinessBlock {
@@ -145,7 +145,8 @@ export async function hasCorrectionModel(): Promise<boolean> {
 
 /**
  * 字幕配音的前置校验：先按「配音引擎」这一档分叉，再查该档真正需要的东西。
- * 云端档查 Key 和配音模型；本地档只查组件在不在场和音色是不是一个编号——
+ * 云端档查 Key 和配音模型（模型这一问 1.1.2 起还看厂商：豆包那一档空着才是对的）；
+ * 本地档只查组件在不在场和音色是不是一个编号——
  * 拿云端那两样去问本地档，就会把已经能干活的用户拦在门外（#220/#227 的教训是判松判严都栽过）。
  * 单独查配音模型是必要的——音频接口吃的是配音模型 id，拿 chat 模型去调必然被拒，
  * 而那时用户已经点了「开始配音」，烧掉的是他自己 Key 上的调用额度。
@@ -215,7 +216,8 @@ export async function checkVoiceReady(overrides: VoiceOverrides = {}): Promise<R
       api,
       'tts',
       '配音引擎是「云端接口」，',
-      '接口地址、API Key 和配音模型',
+      // 豆包那一档不收模型（见下面那一条），这句「把哪几格填好」也得跟着少一样
+      ttsVendorNeedsModel(settings?.ttsProvider) ? '接口地址、API Key 和配音模型' : '接口地址和 API Key',
       '；也可以在「校对配置」里填一把 Key 供两边共用，或把「配音引擎」换成「本地配音」'
     )
     return {
@@ -228,7 +230,9 @@ export async function checkVoiceReady(overrides: VoiceOverrides = {}): Promise<R
   // 只查配音模型这一样，且按「当前生效的那一份」问（口径与主进程 getTTSConfig 一致）：
   // 它从 1.1.0 起住在方案里，页面上没有那一格可填，所以不存在「界面填全了、设置还空着」的分歧。
   // 音色不在这里查——空着是合法调用（见 ttsConfigProblem 那段）。
-  if (!str(settings?.ttsModel)) {
+  // 模型这一问也得跟着厂商走：豆包那一档空着才是对的（原厂写 req_params.model 只给复刻音色用），
+  // 在这儿一刀切就是把一个配对了的人拦在门外，而主进程那边根本不拦——判严判松都栽过（#220/#227）。
+  if (ttsVendorNeedsModel(settings?.ttsProvider) && !str(settings?.ttsModel)) {
     return {
       message:
         '字幕配音还缺「配音模型」：在「设置 → 配音配置」里点当前那一行的「编辑」，在弹窗里填模型 id 并点「保存」。填错模型的代价是每次调用都白烧一次额度',

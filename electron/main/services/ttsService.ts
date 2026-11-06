@@ -34,6 +34,7 @@ import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './lo
 import {
   buildSpeechRequest,
   readSpeechAudio,
+  ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
   TtsVendorError,
   TTS_VENDOR_NAMES,
@@ -57,9 +58,15 @@ export interface TTSConfig {
   apiBase: string
   model: string
   /**
+   * 配音方案的资源编号（1.1.2，#342 豆包）：豆包拿请求头 `X-Api-Resource-Id` 说「这一版配音服务」，
+   * 标准音色与复刻音色是两条不同的编号。其余几家在请求里不看这一项，空串就是不发。
+   * 它和 model 都不算密钥，所以走的是与 `ttsModel` 同一套明文配置通道。
+   */
+  resourceId: string
+  /**
    * 云端档是服务商的音色名；本地档是 sid 编号的字符串写法（'0'、'40'）。
    * 云端档里它能不能空由厂商决定：OpenAI 兼容可以（有些模型根本不收这一项），
-   * MiniMax 与阿里云百炼必填（拦下的地方是 ttsConfigProblem）。
+   * MiniMax、阿里云百炼与豆包必填（拦下的地方是 ttsConfigProblem）。
    */
   voice: string
   /** 本地档用哪个引擎（白名单见 localTtsEngine）；云端档忽略这一项 */
@@ -102,9 +109,11 @@ export function ttsConfigProblem(config: TTSConfig): string | null {
     return null
   }
   if (!config.apiKey) return '未配置 API Key，请在「设置 → 配音配置」中填写（留空则沿用校对配置那把）'
-  if (!config.model) return '未配置配音模型，请在「设置 → 配音配置」里点那一行的「编辑」，在弹窗里填「配音模型」并保存'
+  if (ttsVendorNeedsModel(config.vendor) && !config.model) {
+    return '未配置配音模型，请在「设置 → 配音配置」里点那一行的「编辑」，在弹窗里填「配音模型」并保存'
+  }
   if (ttsVendorNeedsVoice(config.vendor) && !config.voice) {
-    // 1.1.0 的口径是「音色不做强校验」，那句只对不收音色的模型成立。MiniMax 和阿里云百炼
+    // 1.1.0 的口径是「音色不做强校验」，那句只对不收音色的模型成立。MiniMax、阿里云百炼和豆包
     // 把音色列成必填，空着发过去只会得到一句对面的原话（而且多半不说是哪一格），
     // 所以在花钱之前先点名这一格；OpenAI 兼容那档继续留空可跑。
     return `${TTS_VENDOR_NAMES[config.vendor]} 必须有音色才能配音。在配音页的「音色」那一格填一个音色 id（这一家的音色表以对方文档为准）`
@@ -175,6 +184,7 @@ export async function synthesizeSpeech(
     apiKey: config.apiKey,
     model: config.model,
     voice: config.voice,
+    resourceId: config.resourceId,
     speed: config.speed ?? 1,
     text: trimmed,
   })

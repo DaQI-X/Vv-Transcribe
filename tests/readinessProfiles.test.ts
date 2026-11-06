@@ -166,6 +166,17 @@ describe('checkVoiceReady 的云端方案分支', () => {
     expect(blocked?.message).not.toContain('保存设置')
   })
 
+  it('豆包那一档模型留空不拦人：主进程 ttsConfigProblem 也不拦，两边得是同一个答案', async () => {
+    // 原厂写 `req_params.model`「仅当 speaker 为声音复刻 2.0 的音色时需指定」，系统音色留空才是对的，
+    // 填了反倒可能吃一个 45000001 InvalidModel。渲染层在这儿一刀切，就是把一个配对了的人拦在门外，
+    // 而主进程那边放行——判松判严都栽过（#220/#227），所以这一条钉的是「同一份表说了算」
+    api.getSettings.mockResolvedValue(
+      noVoiceKey({ ttsKeyStatus: 'encrypted', ttsProvider: 'volc', ttsModel: '', ttsVoice: 'zh_female_vv_uranus_bigtts' })
+    )
+
+    expect(await checkVoiceReady({})).toBeNull()
+  })
+
   it('音色空着不拦人：有的模型不收这一项，这一格只给选项、不做强校验', async () => {
     api.getSettings.mockResolvedValue(noVoiceKey({ ttsKeyStatus: 'encrypted', ttsModel: 'tts-1', ttsVoice: '' }))
 

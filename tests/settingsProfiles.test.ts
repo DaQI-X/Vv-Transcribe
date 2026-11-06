@@ -331,6 +331,8 @@ describe('取值按 id 挑方案', () => {
     expect((await service.getASRConfig('asr-y')).model).toBe('m-y')
     const view = await service.listProfiles()
     // asrVendor 是 1.1.1 新认的厂商书签：老方案里没有，投出来是空串（界面按 OpenAI 兼容显示）
+    // 转写这一档没有资源编号那一格：收它的只有豆包转写，而豆包转写本版不接（理由见
+    // electron/main/services/asr/asrVendor.ts 抬头）；配音那一档有，见 tts 那几条断言
     expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel', 'asrVendor'])
   })
 
@@ -547,17 +549,18 @@ describe('方案列表：一次给全的脱敏形状', () => {
     // tts 也从 v3 起不再带音色——用户事先不知道模型支持哪些音色，那是这一批怎么选的问题
     // 1.1.1 起 tts 多带一个「厂商」书签：它决定这次发的请求长什么样，所以是方案的一部分，不是全局偏好
     // asr 同一格叫 asrVendor 而不是 asrProvider：后者是「去不去云端」，一个名字不能同时说两件事
-    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual([
-      'asrApiBase',
-      'asrModel',
-      'asrVendor',
-    ])
+    // 1.1.2 起 tts 再多一格资源编号：只有豆包收（X-Api-Resource-Id），另三家不看这一项。
+    // 它不是密钥（SECRET_FIELDS 只列三个 *ApiKey），按明文留在方案里；
+    // 键名不以 ApiKey 结尾，所以下面那条「密钥的键名都不许出现」仍然成立。
+    // 转写那一档没有这一格：收它的只有豆包转写，而豆包转写本版不接（理由见 asr/asrVendor.ts 抬头）
+    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel', 'asrVendor'])
     expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['aiApiBase', 'aiModel', 'aiProvider'])
     expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
     expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual([
       'ttsApiBase',
       'ttsModel',
       'ttsProvider',
+      'ttsResourceId',
     ])
     // 连密钥的**键名**都不许出现：表单把这一份直接盖到自己身上，
     // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串

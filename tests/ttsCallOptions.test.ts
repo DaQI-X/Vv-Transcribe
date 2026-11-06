@@ -20,6 +20,7 @@ const base: TTSConfig = {
   apiBase: 'https://gateway.example.com',
   model: 'tts-1',
   voice: 'alloy',
+  resourceId: '',
   localEngine: KOKORO,
 }
 

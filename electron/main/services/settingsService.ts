@@ -104,6 +104,14 @@ export interface AppSettings {
   ttsApiKey: string
   ttsModel: string
   /**
+   * 那一家「账号买的是哪一版服务」的编号（1.1.2，#342 豆包配音）。它不是模型名也不是密钥：
+   * 豆包 v3 把它写在请求头 `X-Api-Resource-Id`（标准音色与复刻音色是两条不同的编号），
+   * 而模型格已经装了 `req_params.model`，一格说两件事会让同一格在两家之间换意思。
+   * 只有豆包读它，其余厂商在请求里不看这一项；界面上按厂商出现，不是豆包时那一格根本不画。
+   * 转写那一档没有同一格：收它的只有豆包转写，而豆包转写本版不接（理由见 `asr/asrVendor.ts` 抬头）。
+   */
+  ttsResourceId: string
+  /**
    * 云端档的音色名。1.1.0 起它不在方案里——那是「这一批怎么念」的问题，不是「这家网关有什么」的问题；
    * 现在也没有任何界面写它：配音页那一格是单次覆盖，这一份存的是旧版留下的默认音色，
    * 界面没选时按它走，它本身也空着就干脆不发 voice 这一项（有的模型不收）。
@@ -223,6 +231,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   ttsApiBase: '',
   ttsApiKey: '',
   ttsModel: '',
+  // 空串＝不发这一项；豆包那一支自己落回文档里的固定值（见 ttsVendor 的默认资源编号）
+  ttsResourceId: '',
   ttsVoice: '',
   ttsEngine: 'cloud',
   // 空串＝还没选过，取值时落回中文默认档（见 normalizeLocalTtsEngine）
@@ -1263,9 +1273,11 @@ export async function setDefaultProfile(
 const APPENDED_ENDPOINT_PATHS: readonly string[] = [
   '/v1/audio/transcriptions',
   '/v1/speech_to_text',
+  '/api/v3/auc/bigmodel/recognize/flash',
   '/v1/audio/speech',
   '/v1/t2a_v2',
   '/api/v1/services/audio/tts/speechsynthesizer',
+  '/api/v3/tts/unidirectional',
   '/v1/chat/completions',
 ]
 
@@ -1372,6 +1384,7 @@ export async function getTTSConfig(profileId?: string | null): Promise<{
   apiKey: string
   apiBase: string
   model: string
+  resourceId: string
   voice: string
   localEngine: LocalTtsEngineId
 }> {
@@ -1389,9 +1402,12 @@ export async function getTTSConfig(profileId?: string | null): Promise<{
       normalizeApiBase(settings.aiApiBase) ||
       'https://api.openai.com',
     model: settings.ttsModel,
+    // 本地档不看它，投出来和 vendor 同一个理由：少一处「这一项什么时候有意义」的分叉。
+    // 空串留给适配层决定发不发（只有豆包读它，见 ttsVendor）
+    resourceId: settings.ttsResourceId,
     // 根上那一份 `ttsVoice` 是 1.1.0 把音色从方案里摘出来时留下的位置，界面上已经没有格子能改它
     // （改的是配音页那一格，不落盘）。所以它只剩两种来源：旧方案迁过来的那一次，和空串。
-    // 把它当默认音色递给 OpenAI 兼容是原本的意思；递给 MiniMax 或百炼就是拿一家的音色名
+    // 把它当默认音色递给 OpenAI 兼容是原本的意思；递给 MiniMax／百炼／豆包就是拿一家的音色名
     // 去问另一家——界面已经写了「这一家不收空音色」，落回一个外来音色等于替用户把那句话绕过去。
     voice:
       engine === 'local'

@@ -1,27 +1,34 @@
 /**
- * 云端配音厂商适配层的测试（1.1.1，#224）。
+ * 云端配音厂商适配层的测试（1.1.1，#224 → #342 加豆包）。
  *
  * 这一层是「同一份配置在真实配音里能用、在自检里也必须能用」的唯一保证，所以两边都测：
- * - 请求体：三家要的字段名和嵌套位置各不相同，改错一个键名不会有任何编译错误，
+ * - 请求体：四家要的字段名和嵌套位置各不相同，改错一个键名不会有任何编译错误，
  *   只会在用户点「开始配音」之后换回一句对方网关的 400。这里把形状按文档钉住。
- * - 响应：MiniMax 的音频是十六进制、可能带着 HTTP 200 报错；百炼给的是一个要再取一次的地址。
- *   这两条都不是「裸字节流」，按 OpenAI 那一档的写法直接落盘就是一个装着 JSON 的 .mp3。
+ * - 响应：MiniMax 的音频是十六进制、可能带着 HTTP 200 报错；百炼给的是一个要再取一次的地址；
+ *   豆包发的是一行一帧的 NDJSON，音频在每帧的 base64 里，而结论可能写在任何一帧的 code 上。
+ *   这三条都不是「裸字节流」，按 OpenAI 那一档的写法直接落盘就是一个装着 JSON 的 .mp3。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildSpeechRequest,
   normalizeTtsVendor,
   readSpeechAudio,
+  TtsVendorError,
+  ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
   ttsVendorProbeVoice,
-  TtsVendorError,
+  ttsVendorWantsResourceId,
+  TTS_VENDOR_RESOURCE_ID,
   type TtsSpeechInput,
+  type TtsVendorId,
   type TtsVendorRequest,
 } from '../electron/main/services/ttsVendor'
 // 渲染层那张厂商表（界面文案读它）：与上面这张对账，见下面那个 describe
 import {
+  ttsVendorNeedsModel as uiNeedsModel,
   ttsVendorNeedsVoice as uiNeedsVoice,
   ttsVendorProbeVoice as uiProbeVoice,
+  ttsVendorWantsResourceId as uiWantsResourceId,
   ttsVoiceListUrl as uiVoiceListUrl,
 } from '../src/utils/profileSpec'
 import { ALLOWED_HOSTS } from '../electron/main/ipc/updateHandlers'
@@ -31,6 +38,7 @@ const input: TtsSpeechInput = {
   apiKey: 'sk-test',
   model: 'the-model',
   voice: 'the-voice',
+  resourceId: '',
   speed: 1,
   text: '念这一句',
 }
@@ -68,23 +76,57 @@ afterEach(() => {
 })
 
 describe('normalizeTtsVendor', () => {
-  it('三个认识的名字原样收下，大小写与首尾空白不影响', () => {
+  it('四个认识的名字原样收下，大小写与首尾空白不影响', () => {
     expect(normalizeTtsVendor('openai')).toBe('openai')
     expect(normalizeTtsVendor(' MiniMax ')).toBe('minimax')
     expect(normalizeTtsVendor('DASHSCOPE')).toBe('dashscope')
+    expect(normalizeTtsVendor('volc')).toBe('volc')
   })
 
   it('空串、缺失、认不出的值一律落回 OpenAI 兼容：1.1.0 及更早建出来的方案磁盘上没有这一项', () => {
     // 42 不是假想：settings.json 是用户能手改的文件，这一格坏了也不能让配音整条链路抛错
+    // 'volcengine' 也在其中：豆包在界面上的 id 是 volc，而对方公司叫 Volcengine——
+    // 用户手改时写出全名的概率不低，认成"不认识"落回默认档比猜一家网关安全
     for (const raw of ['', '   ', undefined, null, 'volcengine', '讯飞', 42, {}, []]) {
       expect(normalizeTtsVendor(raw)).toBe('openai')
     }
   })
 
-  it('只有 MiniMax 与百炼把音色列为必填', () => {
+  it('除 OpenAI 兼容以外三家都把音色列为必填', () => {
     expect(ttsVendorNeedsVoice('openai')).toBe(false)
     expect(ttsVendorNeedsVoice('minimax')).toBe(true)
     expect(ttsVendorNeedsVoice('dashscope')).toBe(true)
+    expect(ttsVendorNeedsVoice('volc')).toBe(true)
+  })
+
+  it('模型必填性上豆包是例外：它的 req_params.model 只给复刻音色用，系统音色填了反被回 InvalidModel', () => {
+    expect(ttsVendorNeedsModel('openai')).toBe(true)
+    expect(ttsVendorNeedsModel('minimax')).toBe(true)
+    expect(ttsVendorNeedsModel('dashscope')).toBe(true)
+    expect(ttsVendorNeedsModel('volc')).toBe(false)
+  })
+})
+
+describe('资源编号那一格画不画', () => {
+  it('只有豆包收它（X-Api-Resource-Id），另三家是 null 而不是空串', () => {
+    // null 与空串的差别是界面上的：null＝这一格不出现，空串＝出现但留空发这个值。
+    // 写成空串就会在 OpenAI 那一档下面挂一格没人读的地方
+    expect(TTS_VENDOR_RESOURCE_ID.openai).toBeNull()
+    expect(TTS_VENDOR_RESOURCE_ID.minimax).toBeNull()
+    expect(TTS_VENDOR_RESOURCE_ID.dashscope).toBeNull()
+    expect(TTS_VENDOR_RESOURCE_ID.volc).toBe('seed-tts-2.0')
+    expect(ttsVendorWantsResourceId('openai')).toBe(false)
+    expect(ttsVendorWantsResourceId('volc')).toBe(true)
+    // 1.1.0 及更早建出来的方案磁盘上没有厂商那一项，读出来是空串——那一格也不该出现
+    expect(ttsVendorWantsResourceId(normalizeTtsVendor(''))).toBe(false)
+  })
+
+  it('对账：厂商表里出现的每一家，界面那张表也得认得', () => {
+    // 少一家的症状是「弹窗里那一格不出现，但请求照发一个用户没填过的值」——比报错更难发现
+    for (const vendor of Object.keys(TTS_VENDOR_RESOURCE_ID) as TtsVendorId[]) {
+      expect(normalizeTtsVendor(vendor)).toBe(vendor)
+      expect(uiWantsResourceId(vendor)).toBe(ttsVendorWantsResourceId(vendor))
+    }
   })
 })
 
@@ -100,16 +142,25 @@ describe('ttsVendorProbeVoice：「测试连接」在界面没带音色时补的
     expect(ttsVendorProbeVoice('dashscope')).toBe('')
   })
 
+  it('豆包给的是官方 2.0 音色表的第一行：本机没 Key，这是「先照规范设计、之后有 Key 再验」的那一类', () => {
+    // 和留空比，它的代价小得多：留空＝那颗按钮对这一家永远不可用；
+    // 万一这个音色不在用户账号的权限里，对方回的仍是「音色与资源编号不匹配」——还是一句真诊断
+    // 它必须和 seed-tts-2.0 那个资源编号成对（1.0 的音色配 2.0 的资源号就是那句 mismatched）
+    expect(ttsVendorProbeVoice('volc')).toBe('zh_female_vv_uranus_bigtts')
+    expect(TTS_VENDOR_RESOURCE_ID.volc).toBe('seed-tts-2.0')
+  })
+
   it('对账：界面那张表（提示文案与灰字举例读它）和主进程这张表得说同一个值', () => {
     // 两处分开写的代价是「设置页写着自检会用 A 音色，实际发的是 B」——那颗按钮的结论没法解释
-    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+    for (const vendor of ['openai', 'minimax', 'dashscope', 'volc'] as const) {
       expect(uiProbeVoice(vendor)).toBe(ttsVendorProbeVoice(vendor))
       expect(uiNeedsVoice(vendor)).toBe(ttsVendorNeedsVoice(vendor))
+      expect(uiNeedsModel(vendor)).toBe(ttsVendorNeedsModel(vendor))
     }
   })
 })
 
-describe('buildSpeechRequest：三家的请求形状', () => {
+describe('buildSpeechRequest：四家的请求形状', () => {
   it('OpenAI 兼容：/v1/audio/speech，文本在 input，格式在 response_format', () => {
     const { request, body } = bodyOf('openai')
     expect(request.url).toBe('https://gateway.example.com/v1/audio/speech')
@@ -142,18 +193,91 @@ describe('buildSpeechRequest：三家的请求形状', () => {
     expect(body.parameters).toBeUndefined()
   })
 
-  it('倍速是 1 时三家都不带这一项：兼容网关对未知字段的行为不一致', () => {
+  it('倍速是 1 时四家都不带这一项：兼容网关对未知字段的行为不一致', () => {
     expect(bodyOf('openai').body).not.toHaveProperty('speed')
     expect(bodyOf('minimax').body.voice_setting).not.toHaveProperty('speed')
     expect(bodyOf('dashscope').body.input).not.toHaveProperty('rate')
+    // 这一家的 audio_params 恒在（format/sample_rate 是它自己的默认值，写出来是为了让
+    // 「落成 .mp3」这件事看得见），条件性的只有 speech_rate 这一项
+    expect(bodyOf('volc').body.req_params).toMatchObject({
+      audio_params: { format: 'mp3', sample_rate: 24000 },
+    })
+    expect(bodyOf('volc').body.req_params).not.toHaveProperty('audio_params.speech_rate')
     // 0 是「没设过」而不是「静音播放」，与 speed=1 同一个处理
     expect(bodyOf('openai', { speed: 0 }).body).not.toHaveProperty('speed')
   })
 
-  it('音色空着时不发空值，但这一项该由前置校验拦下（另两家必填）', () => {
+  it('音色空着时不发空值，但这一项该由前置校验拦下（另三家必填）', () => {
     expect(bodyOf('openai', { voice: '' }).body).not.toHaveProperty('voice')
     expect(bodyOf('minimax', { voice: '' }).body.voice_setting).toEqual({})
     expect(bodyOf('dashscope', { voice: '' }).body.input).not.toHaveProperty('voice')
+    expect(bodyOf('volc', { voice: '' }).body.req_params).not.toHaveProperty('speaker')
+  })
+
+  it('豆包：鉴权换成 X-Api-Key，没有 Bearer，音频格式与采样率写在 audio_params 里', () => {
+    const { request, body } = bodyOf('volc')
+    expect(request.url).toBe('https://gateway.example.com/api/v3/tts/unidirectional')
+    expect(request.headers['X-Api-Key']).toBe('sk-test')
+    expect(request.headers.Authorization).toBeUndefined()
+    expect(request.headers['X-Api-Resource-Id']).toBe('seed-tts-2.0')
+    // 原厂表格标「必选，推荐随机 UUID」，而它自己的 cURL 示例里没带这一条——照着协议补上
+    expect(request.headers['X-Api-Request-Id']).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    )
+    // 配音这一腿没有分帧发送，X-Api-Sequence 是转写那一侧才有的东西
+    expect(request.headers['X-Api-Sequence']).toBeUndefined()
+    expect(body).toEqual({
+      req_params: {
+        text: '念这一句',
+        speaker: 'the-voice',
+        model: 'the-model',
+        audio_params: { format: 'mp3', sample_rate: 24000 },
+      },
+    })
+    // 这一家的 model 挂在 req_params 里而不是顶层；顶层挂一个 model 是另外三家的写法
+    expect(body.model).toBeUndefined()
+  })
+
+  it('豆包的倍速不是倍数而是一个百分比增量：界面选 1.5 倍发的是 50，不是 1.5', () => {
+    // 原厂给的三个锚点是 0＝原速、100＝2 倍、-50＝0.5 倍。直接把倍数发过去是 1.5% 的提速，
+    // 而用户听出来的差别只在「好像没变」，最难归因到这一格
+    expect(bodyOf('volc', { speed: 1.5 }).body.req_params).toMatchObject({
+      audio_params: { speech_rate: 50 },
+    })
+    expect(bodyOf('volc', { speed: 2 }).body.req_params).toMatchObject({
+      audio_params: { speech_rate: 100 },
+    })
+    expect(bodyOf('volc', { speed: 0.5 }).body.req_params).toMatchObject({
+      audio_params: { speech_rate: -50 },
+    })
+    // 1.1 这种非整换算成整数（10），对方收的是整数，小数会被截断成看不见的误差
+    expect(bodyOf('volc', { speed: 1.1 }).body.req_params).toMatchObject({
+      audio_params: { speech_rate: 10 },
+    })
+  })
+
+  it('豆包：模型那格填了才带（复刻音色才需要），资源编号填了覆盖默认档', () => {
+    expect(bodyOf('volc', { model: '' }).body.req_params).not.toHaveProperty('model')
+    expect(bodyOf('volc', { model: '  ' }).body.req_params).not.toHaveProperty('model')
+    expect(bodyOf('volc', { model: 'seed-tts-2.0-expressive' }).body.req_params).toMatchObject({
+      model: 'seed-tts-2.0-expressive',
+    })
+    expect(buildSpeechRequest('volc', { ...input, resourceId: 'seed-icl-2.0' }).headers[
+      'X-Api-Resource-Id'
+    ]).toBe('seed-icl-2.0')
+    expect(buildSpeechRequest('volc', { ...input, resourceId: '  seed-icl-2.0  ' }).headers[
+      'X-Api-Resource-Id'
+    ]).toBe('seed-icl-2.0')
+  })
+
+  it('不收资源编号那三家：那一格填了什么也不发（请求头里没有这一项）', () => {
+    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+      expect(
+        buildSpeechRequest(vendor, { ...input, resourceId: 'seed-tts-2.0' }).headers[
+          'X-Api-Resource-Id'
+        ]
+      ).toBeUndefined()
+    }
   })
 })
 
@@ -175,6 +299,16 @@ describe('buildSpeechRequest：地址接路径', () => {
     expect(bodyOf('minimax', { apiBase: 'https://h.example.com/apiv1' }).request.url).toBe(
       'https://h.example.com/apiv1/v1/t2a_v2'
     )
+  })
+
+  it('豆包：粘到 /api 那层折叠一次，粘整条端点则照原话打（不再接第二层）', () => {
+    // 原厂文档给的是 wss/https 两条完整端点，粘贴过来的人多半连 /api/v3/tts/unidirectional 一起复制
+    expect(bodyOf('volc', { apiBase: 'https://h.example.com/api' }).request.url).toBe(
+      'https://h.example.com/api/v3/tts/unidirectional'
+    )
+    expect(
+      bodyOf('volc', { apiBase: 'https://h.example.com/api/v3/tts/unidirectional' }).request.url
+    ).toBe('https://h.example.com/api/v3/tts/unidirectional')
   })
 })
 
@@ -327,6 +461,106 @@ describe('readSpeechAudio：阿里云百炼', () => {
   })
 })
 
+/**
+ * 豆包的回包是一行一帧的 JSON（原厂自己的 Python 示例用 iter_lines 逐行 parse），
+ * 所以这里造的是「多行文本」而不是一份 JSON——按整体 parse 会得到一句「回的不是 JSON」。
+ */
+function volcLines(frames: unknown[]): Response {
+  return new Response(frames.map((frame) => JSON.stringify(frame)).join('\n'), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+/** 一帧音频：data 是 base64，结束帧的 code 是 20000000 */
+function b64(bytes: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { code: 0, message: 'success', data: Buffer.alloc(bytes, 9).toString('base64'), ...extra }
+}
+
+const VOLC_END = { code: 20000000, message: 'SUCCESS', data: null }
+
+describe('readSpeechAudio：豆包', () => {
+  it('逐帧的 base64 拼成整段音频；按裸字节流落盘会得到一坨 NDJSON 文本', async () => {
+    const got = await readSpeechAudio(
+      'volc',
+      reqOf('volc'),
+      volcLines([b64(4), b64(6), VOLC_END])
+    )
+    expect([...got.bytes]).toEqual(new Array(10).fill(9))
+  })
+
+  it('计费字数从 usage.text_words 翻成一句 note（界面不显示，日志要）', async () => {
+    const got = await readSpeechAudio(
+      'volc',
+      reqOf('volc'),
+      volcLines([b64(3, { usage: { text_words: 12 } }), VOLC_END])
+    )
+    expect(got.note).toBe('回执 text_words=12')
+  })
+
+  it('看到结束帧就停：它后面的东西不再当音频读', async () => {
+    const got = await readSpeechAudio(
+      'volc',
+      reqOf('volc'),
+      volcLines([b64(2), VOLC_END, b64(100)])
+    )
+    expect(got.bytes).toHaveLength(2)
+  })
+
+  it('code 为 0 是「这一段音频」而不是「整体失败」——不能把非零一概当错误，也不能只看最后一帧', async () => {
+    // 结束帧的 code 是 20000000，比 0 大得多；按「code != 0 就失败」写，每一段配音都会红
+    await expect(readSpeechAudio('volc', reqOf('volc'), volcLines([b64(1), VOLC_END]))).resolves
+      .toBeTruthy()
+  })
+
+  it('错误帧：45000001 要说清「配音模型那一格只对复刻音色有用」，光念对方原话用户不知道动哪一格', async () => {
+    await expect(
+      readSpeechAudio(
+        'volc',
+        reqOf('volc'),
+        volcLines([{ code: 45000001, message: 'InvalidModel', data: null }])
+      )
+    ).rejects.toThrow(/错误码 45000001：InvalidModel[\s\S]*复刻音色/)
+  })
+
+  it('「音色与资源编号不匹配」那一条必须点名两格分别在哪：对方原话同时提到两样东西', async () => {
+    // 界面上资源编号在设置弹窗、音色在配音页，不点出来人只会来回改这两格
+    const message = await readSpeechAudio(
+      'volc',
+      reqOf('volc'),
+      volcLines([
+        {
+          code: 45000003,
+          message: 'resource ID is mismatched with speaker related resource',
+          data: null,
+        },
+      ])
+    ).catch((e: unknown) => (e as Error).message)
+    expect(message).toContain('这一句说的是「这个资源编号下没有这个音色」')
+    expect(message).toContain('seed-icl-2.0')
+  })
+
+  it('认不出的错误码把对方原话递出去，不替用户猜原因', async () => {
+    await expect(
+      readSpeechAudio('volc', reqOf('volc'), volcLines([{ code: 45999999, message: 'weird' }]))
+    ).rejects.toThrow(/错误码 45999999：weird/)
+  })
+
+  it('全是结束帧而一个音频字节都没有：说的是「音色与资源编号」那条最可能的路，不是「没读到」', async () => {
+    await expect(
+      readSpeechAudio('volc', reqOf('volc'), volcLines([{ code: 0, data: '' }, VOLC_END]))
+    ).rejects.toThrow(/回了成功但一个音频字节都没给/)
+  })
+
+  it('回包整体拆不出 JSON 时点名打了哪一条地址：这一家的正常回包是一行一帧，出现这句多半是地址指错了层', async () => {
+    const response = new Response('<html>502</html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    })
+    await expect(readSpeechAudio('volc', reqOf('volc'), response)).rejects.toThrow(/拆不出 JSON/)
+  })
+})
+
 describe('readSpeechAudio：共同的坏情况', () => {
   it('一家 JSON 接口回了一份 HTML，说的是「地址填错了层级」而不是「没读出音频」', async () => {
     const response = new Response('<html><body>502 Bad Gateway</body></html>', {
@@ -372,7 +606,7 @@ describe('readSpeechAudio：共同的坏情况', () => {
 
 describe('音色列表链接：界面挂出去的 URL 必须在主进程白名单里', () => {
   it('所有厂商的 voiceListUrl hostname 都出现在 ALLOWED_HOSTS 中（空串跳过）', () => {
-    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+    for (const vendor of ['openai', 'minimax', 'dashscope', 'volc'] as const) {
       const url = uiVoiceListUrl(vendor)
       if (!url) continue
       const host = new URL(url).hostname

@@ -32,9 +32,11 @@ import {
   buildSpeechRequest,
   normalizeTtsVendor,
   readSpeechAudio,
+  ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
   ttsVendorProbeVoice,
   TTS_VENDOR_NAMES,
+  TTS_VENDOR_RESOURCE_ID,
   type TtsAudioResult,
 } from './ttsVendor'
 import {
@@ -42,6 +44,8 @@ import {
   ASR_VENDOR_NAMES,
   buildAsrRequest,
   normalizeAsrVendor,
+  readAsrResponse,
+  type AsrReadResult,
 } from './asr/asrVendor'
 import { engineBinaryInManifest } from './componentService'
 import { AI_CHAT_PATH, DEFAULT_PROMPT } from './ai/openaiCompatible'
@@ -89,7 +93,7 @@ export interface TTSTestValues {
   /** 本地档要用哪个引擎（如 sherpa-onnx-vits-zh-ll / kokoro-multi-lang-v1_1），同样来自表单当前值 */
   localEngine?: string
   /**
-   * 云端档走哪一家（'openai' | 'minimax' | 'dashscope'），决定这次自检发的请求是什么形状。
+   * 云端档走哪一家（'openai' | 'minimax' | 'dashscope' | 'volc'），决定这次自检发的请求是什么形状。
    * 表单里带了这一格就按它测；没带时（配音页那颗按钮只带地址/Key/模型）由 settingsHandlers
    * 回落成设置里保存的那一份——测的必须是干活时那一家，理由与下面音色那一项相同。
    */
@@ -98,12 +102,17 @@ export interface TTSTestValues {
   apiKey: string
   model: string
   /**
+   * 资源编号（1.1.2，#342）：那一格只在豆包时画得出来（`TTS_VENDOR_RESOURCE_ID` 里不是 null 的一家）。
+   * 豆包拿它选「哪一版配音服务」，标准音色与复刻音色是两条不同的编号，所以它既不是模型也不是密钥。
+   */
+  resourceId?: string
+  /**
    * 云端＝服务商的音色名，本地＝音色编号。
    * 本地档跟着表单走：表单换引擎时把编号归回第一个，这一档测的就是换完那档的第一个说话人；
    * 表单没带（空串）按真配音同一口径落回推荐档 0，不拦人——1.1.0 起设置页没有这一格，空串才是常态。
    * 云端档面板上没有这一格（1.1.0 起音色不在方案里），传来的空串由 settingsHandlers 回落成
    * 设置里那一份全局值。两边都空时：OpenAI 兼容那档干脆不发这一项（有些模型不收音色），
-   * MiniMax 与阿里云百炼那两档必填，空着就当场判「还测不了」（1.1.1）。
+   * MiniMax、阿里云百炼与豆包那三家必填，空着就当场判「还测不了」（1.1.1 起按厂商分叉）。
    */
   voice: string
 }
@@ -286,16 +295,20 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
 
   const vendor = normalizeAsrVendor(values.vendor)
   const model = values.model.trim() || ASR_VENDOR_DEFAULT_MODEL[vendor]
-  // 路径与字段名问同一层：这里只要自己拼一次，「自检报可用、一转写就 404」就回来了
+  const usedDefault = !values.model.trim()
+  // 路径与头部（含凭据）全问同一层：这里只要自己拼一次，
+  // 「自检报可用、一转写就 404」就回来了（#220/#227）
+  const probeAudio = buildSilentWav()
   const shape = buildAsrRequest(vendor, {
     apiBase: base,
+    apiKey: values.apiKey.trim(),
     model: values.model,
     // 不带语言：这一格在设置页是全局那一项，不在方案表单里，表单里没有的值不该替用户猜一份发出去
     language: '',
   })
 
   const form = new FormData()
-  form.append('file', new Blob([buildSilentWav()], { type: 'audio/wav' }), 'vv-probe.wav')
+  form.append('file', new Blob([probeAudio], { type: 'audio/wav' }), 'vv-probe.wav')
   for (const [key, value] of Object.entries(shape.fields)) {
     form.append(key, value)
   }
@@ -305,9 +318,9 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
   try {
     response = await fetch(shape.url, {
       method: 'POST',
-      // 展开适配层给的额外头部（MiniMax 的语言走头部）：这里不列白名单，
-      // 否则「自检少发一条头、真转写发了」又成了两处形状对不上的老毛病
-      headers: { Authorization: `Bearer ${values.apiKey.trim()}`, ...shape.headers },
+      // 整份头部（含鉴权）都由适配层给，这里不补 Bearer：
+      // 自己补一次就是「自检发一份头、真转写发另一份」，正是这一路在躲的分歧
+      headers: shape.headers,
       body: form,
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     })
@@ -318,20 +331,34 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
   const latencyMs = Date.now() - started
   if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''), shape.url)
 
-  let body: Record<string, unknown>
+  const originNote = usedDefault
+    ? `（模型留空，本次用的是${ASR_VENDOR_NAMES[vendor]}的默认值 ${model}）`
+    : ''
+
+  let read: AsrReadResult
   try {
-    body = (await response.json()) as Record<string, unknown>
-  } catch {
-    return {
-      level: 'fail',
-      title: '返回的不是 JSON',
-      message: `接口 200 但响应体无法解析成 JSON，这个地址大概率不是 ${ASR_VENDOR_NAMES[vendor]} 的转写接口`,
+    read = await readAsrResponse(response)
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      return {
+        level: 'fail',
+        title: '返回的不是 JSON',
+        message: `接口 200 但响应体无法解析成 JSON，这个地址大概率不是 ${ASR_VENDOR_NAMES[vendor]} 的转写接口`,
+      }
     }
+    const message = err instanceof Error ? err.message : String(err)
+    logger.warn('ConnTest', 'cloud asr probe failed', { vendor, model, message })
+    return { level: 'fail', title: '云端转写没成功', message }
   }
 
-  logger.info('ConnTest', 'cloud asr probe done', { vendor, model, latencyMs, keys: Object.keys(body) })
+  logger.info('ConnTest', 'cloud asr probe done', {
+    vendor,
+    model,
+    latencyMs,
+    segments: read.segments.length,
+  })
 
-  if (typeof body.text !== 'string') {
+  if (read.text === null) {
     return {
       level: 'fail',
       title: '响应结构不对',
@@ -339,13 +366,9 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
     }
   }
 
-  const usedDefault = !values.model.trim()
-  const originNote = usedDefault
-    ? `（模型留空，本次用的是${ASR_VENDOR_NAMES[vendor]}的默认值 ${model}）`
-    : ''
   // 静音样本本来就转不出字，segments 是空数组不代表不支持分段；字段在不在才是判据
-  if (!Array.isArray(body.segments)) {
-    // 但 MiniMax 这条对「判据」是例外，而且是原厂行为：没听出字时它干脆不给 segments 这一项
+  if (!read.hasSegments) {
+    // MiniMax 这条对「判据」是例外，而且是原厂行为：没听出字时它干脆不给 segments 这一项
     // （实测返回的键只有 text / duration / n_speakers / trace_id）。真给音频时它给的是秒级
     // start/end（实测过），所以这里报「不支持分段、建议换 whisper-1」是把一句对的判断
     // 说成了错的建议——用户照提示换服务，而问题本来不存在。
@@ -554,15 +577,28 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
 
   // 模型不替用户猜，空着就是没配；音色看不选的那一家（下面按 vendorNeedsVoice 分叉）。
   const model = values.model.trim()
-  // 界面那格空着时补一个「实测能用」的音色：必填那几家在设置这一页没有音色格（1.1.0 摘掉的），
+  // 界面那格空着时补一个音色：必填那几家在设置这一页没有音色格（1.1.0 摘掉的），
   // 不补就是这颗按钮对它们永远红，而提示让人去配音页填、那一格的值又不落盘——回来再点还是红。
-  // 补的是这一家的系统音色（ttsVendorProbeVoice 只收实测过的那一个），跟用户自己填的那个不是一回事，
-  // 所以结论里要点名；猜不出来的家（百炼）留空，让下面那句 fail 说「这页测不了，去配音页试听」。
+  // 补的是这一家的系统音色（`ttsVendorProbeVoice` 只收「有出处」的那一个：MiniMax 是本机真 Key
+  // 实测过的，豆包是官方 2.0 音色表的第一行、按 #224 拍板先照规范设计后验——两者都得和
+  // `seed-tts-2.0` 那个资源编号成对，1.0 的音色配 2.0 的编号换回的是一句看不出哪一格错的 mismatched），
+  // 跟用户自己填的那个不是一回事，所以结论里要点名；一个出处都没有的家（百炼）留空，
+  // 让下面那句 fail 说「这页测不了，去配音页试听」——猜一个 id 等于替用户发明一个值。
   const probeVoice = ttsVendorProbeVoice(vendor)
   const voice = values.voice.trim()
   const usedVoice = voice || probeVoice
   const voiceSubstituted = !voice && !!probeVoice
-  if (!model) {
+  // 资源编号那一格只有豆包画得出来（`TTS_VENDOR_RESOURCE_ID` 里不是 null 的一家）。
+  // 留空时发出去的是文档里那一条，结论必须点名——不然用户以为「空着＝不发」，
+  // 而标准音色配错资源编号（拿 1.0 的音色配 2.0 的编号）恰恰是这一家最常见的失败形状。
+  const formResourceId = (values.resourceId ?? '').trim()
+  const defaultResourceId = TTS_VENDOR_RESOURCE_ID[vendor] ?? ''
+  const usedResourceId = formResourceId || defaultResourceId
+  const resourceSubstituted = !formResourceId && !!defaultResourceId
+  const resourceNote = resourceSubstituted
+    ? `（资源编号「${defaultResourceId}」是这一家的文档默认值，那一格留空时应用发的是它）`
+    : ''
+  if (ttsVendorNeedsModel(vendor) && !model) {
     return {
       level: 'fail',
       title: '还测不了',
@@ -575,7 +611,7 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
       level: 'fail',
       title: '这一页测不了这一家',
       message: `${TTS_VENDOR_NAMES[vendor]} 必须有音色才出声，而设置这一页没有音色格，` +
-        `应用也不替你猜一个没实测过的音色 id。要验这一套的地址、Key 和模型，` +
+        `应用也不替你猜一个没有出处的音色 id。要验这一套的地址、Key 和模型，` +
         '去字幕配音页的「音色」那一格填一个（以对方文档为准）再点「试听」——那一次用的就是这套方案',
     }
   }
@@ -585,6 +621,7 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     apiKey: values.apiKey.trim(),
     model,
     voice: usedVoice,
+    resourceId: formResourceId,
     speed: 1,
     text: TTS_PROBE_TEXT,
   })
@@ -616,7 +653,9 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     return {
       level: 'fail',
       title: '配音接口没出声',
-      message: message + (voiceSubstituted ? `（本次的音色「${probeVoice}」是应用补的，不是你填的那一个）` : ''),
+      message: message +
+        (voiceSubstituted ? `（本次的音色「${probeVoice}」是应用补的，不是你填的那一个）` : '') +
+        resourceNote,
     }
   }
 
@@ -626,22 +665,32 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
       level: 'fail',
       title: '接口没返回音频',
       message: `耗时 ${formatLatency(latencyMs)}，body 是 0 字节。模型名或音色 id 很可能不被这家支持，以服务商文档为准` +
-        (voiceSubstituted ? `（音色「${probeVoice}」是应用补的，这一格在设置里没有入口，不用去配音页找它改）` : ''),
+        (voiceSubstituted ? `（音色「${probeVoice}」是应用补的，这一格在设置里没有入口，不用去配音页找它改）` : '') +
+        resourceNote,
     }
   }
 
-  logger.info('ConnTest', 'tts probe done', { vendor, model, voice: usedVoice, latencyMs, bytes })
+  logger.info('ConnTest', 'tts probe done', {
+    vendor,
+    model,
+    voice: usedVoice,
+    resourceId: usedResourceId,
+    latencyMs,
+    bytes,
+  })
   return {
     level: 'pass',
     title: '配音接口可用',
-    // 没带音色时不能写成「tts-1 · 」：那一串看着像音色被吃了，而这一档本来就没指定音色
-    message: `耗时 ${formatLatency(latencyMs)}，用「${model}${usedVoice ? ` · ${usedVoice}` : '（未指定音色）'}」` +
+    // 没带音色时不能写成「tts-1 · 」：那一串看着像音色被吃了，而这一档本来就没指定音色。
+    // 豆包同理不收模型（见 ttsVendorNeedsModel），空模型也不能念成「用「 · 音色」」
+    message: `耗时 ${formatLatency(latencyMs)}，用「${model || '未指定模型'}${usedVoice ? ` · ${usedVoice}` : '（未指定音色）'}」` +
       `合成出 ${audioSize(bytes)}${audio.note ? `（${audio.note}）` : ''}。` +
       // 补来的音色只证明「这一家认这个 id、这条端点能出声」，不证明用户自己填的那个听得到——
       // 那句要到配音页点「试听」才算，别说成「这一套全都通了」
       (voiceSubstituted
         ? `这次用的是${TTS_VENDOR_NAMES[vendor]}的系统音色「${probeVoice}」（实测能用那一个），设置这一页没有音色格；`
         : '') +
+      resourceNote +
       '本次只合成一句，按字符计费的接口上这是最小的一笔',
   }
 }

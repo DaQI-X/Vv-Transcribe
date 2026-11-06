@@ -72,13 +72,18 @@ describe('normalizeApiBase', () => {
     const apiBase = 'https://gateway.example.com'
 
     for (const vendor of ['openai', 'minimax'] as const) {
-      const input = { apiBase, model: 'm', language: '' }
+      const input = {
+        apiBase,
+        apiKey: 'k',
+        model: 'm',
+        language: '',
+      }
       const pasted = buildAsrRequest(vendor, input).url
       expect(normalizeApiBase(pasted)).not.toBe(pasted)
       expect(buildAsrRequest(vendor, { ...input, apiBase: normalizeApiBase(pasted) }).url).toBe(pasted)
     }
 
-    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+    for (const vendor of ['openai', 'minimax', 'dashscope', 'volc'] as const) {
       const pasted = buildSpeechRequest(vendor, {
         apiBase,
         apiKey: 'k',
@@ -86,6 +91,7 @@ describe('normalizeApiBase', () => {
         text: 't',
         voice: '',
         speed: 1,
+        resourceId: '',
       }).url
       expect(normalizeApiBase(pasted)).not.toBe(pasted)
       expect(
@@ -96,6 +102,7 @@ describe('normalizeApiBase', () => {
           text: 't',
           voice: '',
           speed: 1,
+          resourceId: '',
         }).url
       ).toBe(pasted)
     }

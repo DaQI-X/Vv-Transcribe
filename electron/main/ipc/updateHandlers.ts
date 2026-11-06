@@ -32,6 +32,10 @@ export const ALLOWED_HOSTS = [
   'www.vvscribe.com',
   'platform.minimax.cn',
   'help.aliyun.com',
+  // 豆包的系统音色列表页（profileSpec 那张表挂出去的链接）。下面那道校验按精确 hostname 比，
+  // 所以带不带 www 两种写法都要列——和上面 github 那两条同一个理由
+  'www.volcengine.com',
+  'volcengine.com',
 ]
 
 /** 与官网 nuxt.config.ts 的 contactEmail 同一个地址 */

@@ -6,7 +6,7 @@
  */
 import type { ASRProvider, ASRSegment, ASRProgress } from './types'
 import { toSimplified } from './simplifyChinese'
-import { asrFileProblem, buildAsrRequest } from './asrVendor'
+import { asrFileProblem, buildAsrRequest, readAsrResponse } from './asrVendor'
 
 interface CloudASRConfig {
   apiKey: string
@@ -14,19 +14,6 @@ interface CloudASRConfig {
   model: string
   /** 厂商书签（`asrVendor` 归一化后的值）；留空按 OpenAI 兼容发 */
   vendor?: string
-}
-
-interface OpenAISegment {
-  start: number
-  end: number
-  text: string
-  avg_logprob?: number
-}
-
-interface OpenAIResponse {
-  segments?: OpenAISegment[]
-  text?: string
-  duration?: number
 }
 
 export class CloudASRProvider implements ASRProvider {
@@ -72,35 +59,34 @@ export class CloudASRProvider implements ASRProvider {
       .then((meta) => meta.duration)
       .catch(() => undefined)
 
-    // 一家的字段名与路径都在这一个调用里问出来，两个调用点（这里 + 测试连接）不许各拼一遍
-    const shape = buildAsrRequest(this.config.vendor, {
-      apiBase: this.config.apiBase,
-      model: this.config.model,
-      language: options.language ?? '',
-    })
-
-    // 上限拦在发出去之前：MiniMax 的 500 秒对一整段媒体是常态而非例外，
-    // 让它自己回一句对方原话，用户在进度条跑完之前什么也看不到
+    // 上限拦在拼请求之前：MiniMax 的 500 秒对一整段媒体是常态而非例外，
+    // 先拼再拦等于白拼一次表单、白读一份音频，才在进度条上告诉用户这段不收
     const fileProblem = asrFileProblem(this.config.vendor, { bytes: audioBuffer.length, seconds })
     if (fileProblem) throw new Error(fileProblem)
 
-    const formData = new FormData()
-    const blob = new Blob([audioBuffer])
-    formData.append('file', blob, fileName)
+    // 一家的字段名与头部（含鉴权）都在这一个调用里问出来，两个调用点（这里 + 测试连接）不许各拼一遍
+    const shape = buildAsrRequest(this.config.vendor, {
+      apiBase: this.config.apiBase,
+      apiKey: this.config.apiKey,
+      model: this.config.model,
+      // 界面选的那一项每次都会带过来；不带就是让服务商按自动检测跑（各家语言放在哪一层见 asrVendor）
+      language: options.language ?? '',
+    })
+
+    const form = new FormData()
+    form.append('file', new Blob([audioBuffer]), fileName)
     for (const [key, value] of Object.entries(shape.fields)) {
-      formData.append(key, value)
+      form.append(key, value)
     }
 
     options.onProgress?.({ percent: 10 })
 
     const response = await fetch(shape.url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        // 这一家要放在头部的项（例如 MiniMax 的语言）由适配层给，这里不猜
-        ...shape.headers,
-      },
-      body: formData,
+      // 鉴权与这一家的协议头全在 shape.headers 里，这里不补 Bearer：
+      // 补一次就是「自检发一份头、真转写发另一份」，而那条分歧正是 #220/#227 记的东西
+      headers: shape.headers,
+      body: form,
       signal: this.abortController.signal,
     })
 
@@ -115,20 +101,20 @@ export class CloudASRProvider implements ASRProvider {
 
     options.onProgress?.({ percent: 80 })
 
-    const result = (await response.json()) as OpenAIResponse
+    const read = await readAsrResponse(response)
 
-    const segments: ASRSegment[] = (result.segments ?? []).map((seg) => ({
+    const segments: ASRSegment[] = read.segments.map((seg) => ({
       startTime: seg.start,
       endTime: seg.end,
       text: toSimplified(seg.text.trim(), options.language),
-      confidence: seg.avg_logprob != null ? Math.min(1, Math.max(0, 1 + seg.avg_logprob * 0.1)) : undefined,
+      confidence: seg.confidence,
     }))
 
-    if (segments.length === 0 && result.text) {
+    if (segments.length === 0 && read.text) {
       segments.push({
         startTime: 0,
-        endTime: result.duration ?? 0,
-        text: toSimplified(result.text.trim(), options.language),
+        endTime: read.duration,
+        text: toSimplified(read.text.trim(), options.language),
       })
     }
 

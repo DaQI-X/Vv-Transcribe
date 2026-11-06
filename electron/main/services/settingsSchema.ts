@@ -118,7 +118,7 @@ export interface SettingsStore {
  *   读起来像已经漏了。宁可名字不一致，也不要一个键在同一份文件里说两件事。
  *   它和 tts 那一项一样**被主进程读取**（`asrVendor.buildAsrRequest` 按它选路径与字段名）；
  *   老方案里没有这一项，读出来是空串，取值时按 OpenAI 兼容处理，所以不需要一次迁移。
- * - tts 四项：厂商 / 地址 / Key / 模型。**音色从 v3 起不在方案里**：它和「本地档位」「转写语言」一样，
+ * - tts 五项：厂商 / 地址 / Key / 模型 / 资源 ID。**音色从 v3 起不在方案里**：它和「本地档位」「转写语言」一样，
  *   是这一批怎么选的问题，不是这家网关的参数。理由写在 v2→v3 那条迁移上——用户事先并不知道
  *   某个模型支持哪些音色，各家网关的字段名与取值也不一样，把它钉死在方案里等于替用户猜一份清单。
  *   「走本地还是云端」「本地引擎」「本地音色编号」本来就不属于方案。
@@ -128,6 +128,15 @@ export interface SettingsStore {
  * - ai 四项：地址 / Key / 模型 + provider。provider 不是凭据，但它是「这套地址和 Key 是哪家」
  *   的书签——界面上按它预填地址与模型，换一套凭据就得换这个书签。它也不被主进程读取
  *   （取配置只看地址和 Key），所以留在方案里不改变任何行为。
+ *
+ * `resourceId`（**只有 tts 这一档**，1.1.2 起）是只有一家用得着的那一格：豆包配音的接口把
+ * 「这个账号买的是哪一版服务」写在请求头里（`X-Api-Resource-Id`，形如 `seed-tts-2.0`），
+ * 而它既不是模型名也不是密钥——拿模型格去装它，那一格就在两家之间说两件事
+ * （1.1.2 拍板：模型格继续填模型，资源 ID 单开一格）。
+ * 它不是 secret，所以走明文格而不是 safeStorage 那条通道。界面上那一格按厂商出现（`visibleWhen`），
+ * 另几家发出去的是空、由适配层决定干脆不发这一项；老方案磁盘上没有这一项，读出来是空串，
+ * 行为与 1.1.1 一字不差——因此同样不需要一次迁移。
+ * 转写那一档没有这一格：收它的只有豆包转写，而豆包转写本版不接（理由见 `asr/asrVendor.ts` 抬头）。
  */
 export const CAPABILITY_FIELDS: Record<
   ProfileCapability,
@@ -150,6 +159,7 @@ export const CAPABILITY_FIELDS: Record<
     ['ttsApiBase', 'apiBase'],
     ['ttsApiKey', 'apiKey'],
     ['ttsModel', 'model'],
+    ['ttsResourceId', 'resourceId'],
   ],
 }
 

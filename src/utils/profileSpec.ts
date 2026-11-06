@@ -38,7 +38,20 @@ export interface ProfileFieldSpec {
    */
   placeholderFrom?: (fields: Record<string, string>) => string
   hint?: string
+  /**
+   * 同一句话在不同厂商下不是同一件事实时才用（配音模型：三家必填、豆包不收）。
+   * 与 `placeholderFrom` 同一个约束：只说界面，不写值。
+   */
+  hintFrom?: (fields: Record<string, string>) => string
   options?: ProfileFieldOption[]
+  /**
+   * 这一格在什么条件下才出现。收的是整份 draft.fields，所以判据可以跟着「厂商」那一格走。
+   *
+   * 用它的理由是「看不见＝改不了」的反面：**这一家根本没有这一项**时，摆一格出来只会让人
+   * 往一个没人读的格子里填值（填了还不落盘，因为请求形状里压根没有这一项）。
+   * 判据与主进程那两张 `*_VENDOR_RESOURCE_ID` 表同源，`tests/*Vendor.test.ts` 各有对账。
+   */
+  visibleWhen?: (fields: Record<string, string>) => boolean
   /** 选中某项时连带填入的其他格：换服务商就是换一家网关，地址与默认模型跟着换 */
   fills?: Record<string, Record<string, string>>
   /**
@@ -110,36 +123,45 @@ const TTS_VENDOR_UI: Record<
   {
     label: string
     voiceRequired: boolean
+    /** 这一家不收空模型（与主进程 VENDOR_SHAPES.modelRequired 同一份，见 tests/ttsVendor.test.ts 的对账） */
+    modelRequired: boolean
     voiceExample: string
-    /** 「测试连接」在界面没带音色时补的那一个，空串＝这一家没有实测过的值可补（与主进程 VENDOR_SHAPES 同一份，见 tests/ttsVendor.test.ts 的对账） */
+    /** 「测试连接」在界面没带音色时补的那一个，空串＝这一家一个有出处的值都没有、那颗按钮不硬测（与主进程 VENDOR_SHAPES 同一份，见 tests/ttsVendor.test.ts 的对账） */
     probeVoice: string
     apiBaseExample: string
     modelExample: string
     /** 厂商提供的系统音色列表页 URL；空串＝这一家没有公开清单，界面上不挂链接 */
     voiceListUrl: string
+    /** 「资源编号」那格的灰字举例；空串＝这一家没有这一项，那一格整个不出现 */
+    resourceIdExample: string
   }
 > = {
   openai: {
     label: 'OpenAI 兼容接口',
     voiceRequired: false,
+    modelRequired: true,
     voiceExample: 'alloy',
     probeVoice: '',
     apiBaseExample: 'https://api.openai.com',
     modelExample: 'tts-1',
     voiceListUrl: '',
+    resourceIdExample: '',
   },
   minimax: {
     label: 'MiniMax',
     voiceRequired: true,
+    modelRequired: true,
     voiceExample: 'male-qn-qingse',
     probeVoice: 'male-qn-qingse',
     apiBaseExample: 'https://api.minimax.cn',
     modelExample: 'speech-2.8-hd',
     voiceListUrl: 'https://platform.minimax.cn/docs/faq/system-voice-id',
+    resourceIdExample: '',
   },
   dashscope: {
     label: '阿里云百炼（CosyVoice）',
     voiceRequired: true,
+    modelRequired: true,
     voiceExample: 'longanyang',
     // 这个举例值没发过一次真请求（本机没有百炼的 Key），所以自检不能拿它当默认值——
     // 界面上那句话因此要说「这一页测不了这一家」，而不是替用户点一次注定被拒的合成
@@ -147,6 +169,25 @@ const TTS_VENDOR_UI: Record<
     apiBaseExample: 'https://dashscope.aliyuncs.com',
     modelExample: 'cosyvoice-v3-flash',
     voiceListUrl: 'https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list',
+    resourceIdExample: '',
+  },
+  // 豆包这一档同样**没本机实测过**（手上没有豆包语音的 Key），按 #224 拍板先照原厂规范设计、后验。
+  // probeVoice 用的是官方 2.0 音色表里的 vivi 2.0（`zh_female_vv_uranus_bigtts`），
+  // 它和 resourceIdExample 那个 `seed-tts-2.0` 得成对：拿 1.0 的音色配 2.0 的资源号，
+  // 对方回的是一句同时提到音色和资源号的「mismatched」，用户看不出自己哪一格错了
+  volc: {
+    label: '豆包（火山引擎）',
+    voiceRequired: true,
+    // 唯一不收模型的一家：原厂写 `req_params.model`「仅当 speaker 为复刻音色时需指定」，
+    // 给系统音色发过去回的是 45000001 InvalidModel
+    modelRequired: false,
+    voiceExample: 'zh_female_vv_uranus_bigtts',
+    probeVoice: 'zh_female_vv_uranus_bigtts',
+    apiBaseExample: 'https://openspeech.bytedance.com',
+    // 灰字写的是「复刻音色才填」那一条，而不是替系统音色猜一个 model 名
+    modelExample: 'seed-tts-2.0-standard',
+    voiceListUrl: 'https://www.volcengine.com/docs/6561/1257544',
+    resourceIdExample: 'seed-tts-2.0',
   },
 }
 
@@ -167,6 +208,21 @@ export function ttsVendorLabel(raw: unknown): string {
 /** 这一家收不收音色：收的话「留空＝不发这一项」那句话就是谎话，得换成必填口径 */
 export function ttsVendorNeedsVoice(raw: unknown): boolean {
   return TTS_VENDOR_UI[ttsVendorOf(raw)].voiceRequired
+}
+
+/** 这一家不收空模型：豆包那一家反过来——它的「配音模型」只给复刻音色用，说「留空就不启动」是谎话 */
+export function ttsVendorNeedsModel(raw: unknown): boolean {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].modelRequired
+}
+
+/** 「资源编号」那一格画不画（与主进程 `TTS_VENDOR_RESOURCE_ID` 同源，tests/ttsVendor.test.ts 对账） */
+export function ttsVendorWantsResourceId(raw: unknown): boolean {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].resourceIdExample !== ''
+}
+
+/** 资源编号那格的灰字举例，也就是这一家留空时发出去的那个值 */
+export function ttsResourceIdExample(raw: unknown): string {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].resourceIdExample
 }
 
 /**
@@ -203,15 +259,15 @@ export function ttsVoiceListUrl(raw: unknown): string {
  * 灰字举什么例」，请求形状由主进程 `asr/asrVendor.ts` 说了算；两边不同步的症状仍是
  * 「提示写得松、请求照样被正确拦下」，而不是发坏请求。
  *
- * 只有两家：阿里百炼的录音文件识别**本版没接**。它不收本机音频，要先有一个公网可访问的音频 URL，
- * 再走「提交任务 → 轮询任务 → 下载结果 JSON」那条异步链路，而官方给「本机文件换临时 URL」的
- * 那条通道自己写着「请勿用于生产环境」（48 小时过期、上传凭证 100 QPS 不可扩容）。
- * 与其在下拉里挂一个「选了大概率失败」的选项，不如先不列它——这一格不许说做不到的小事。
+ * 豆包与阿里百炼的转写**本版都不接**，两家卡在同一个地方：它们不收本机音频，
+ * 要先有一个公网可访问的音频 URL，再走「提交任务 → 轮询任务 → 下载结果 JSON」那条异步链路
+ * （豆包在架那一版的 `audio.url` 是必填项，文档里已经没有把音频塞进请求体的写法）。
+ * 而官方给「本机文件换临时 URL」的那条通道自己写着「请勿用于生产环境」（48 小时过期、上传凭证
+ * 100 QPS 不可扩容）。与其在下拉里挂一个「选了大概率失败」的选项，不如先不列它——
+ * 这一格不许说做不到的小事。豆包的**配音**照旧收（它那条链路一次 POST 就给音频），
+ * 所以下拉里在配音那一档看得到豆包、在这一档看不到，不是漏了。
  */
-const ASR_VENDOR_UI: Record<
-  string,
-  { label: string; apiBaseExample: string; modelExample: string }
-> = {
+const ASR_VENDOR_UI: Record<string, { label: string; apiBaseExample: string; modelExample: string }> = {
   openai: {
     label: 'OpenAI 兼容接口',
     apiBaseExample: 'https://api.openai.com',
@@ -258,7 +314,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 界面就是一格空白，而主进程那边正按它发请求
         fallback: 'openai',
         hint:
-          '决定这次转写的请求长什么样。换一家的下面三格（接口地址、API Key、模型）会一起清空，不替你猜值——灰字只是举例。这一版可选的是 OpenAI 兼容与 MiniMax；阿里云百炼的转写没收（它只吃公网音频地址，还要走任务轮询），校对里那家「通义千问」管的是文字，转写接不上。',
+          '决定这次转写的请求长什么样。换一家的下面几格（接口地址、API Key、模型）会一起清空，不替你猜值——灰字只是举例。这一版可选的是 OpenAI 兼容与 MiniMax；豆包和阿里云百炼的转写都没收，它们只吃「公网可访问的音频地址」，本机文件换不到一个能递给对方的地址（官方那条换临时地址的通道自己写着「请勿用于生产环境」）。豆包的配音是收的，在配音那一档里。校对里那家「通义千问」管的是文字，转写接不上。',
         options: [
           { value: 'openai', label: 'OpenAI 兼容接口' },
           { value: 'minimax', label: 'MiniMax' },
@@ -284,7 +340,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
       },
     ],
     introNew:
-      '填这四格建一条云端转写方案：先选厂商，再按对方文档填地址、Key 和模型（选厂商会把这三格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '建一条云端转写方案：先选厂商，再按对方文档填接口地址、Key 和模型（选厂商会把这几格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
       '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
@@ -356,23 +412,24 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 所以这一格必须显示成它，而不是留一格空白让用户以为「没选」
         fallback: 'openai',
         hint:
-          '决定这次配音的请求长什么样。换一家的下面三格（接口地址、API Key、配音模型）会一起清空，不替你猜值——这一家的地址和模型名只有对方文档说了算，猜错的地址要等请求失败才说话，空格子当场就拦得住。灰字只是举例。',
+          '决定这次配音的请求长什么样。换一家的下面几格（接口地址、API Key、配音模型，豆包还多一格资源编号）会一起清空，不替你猜值——这一家的地址和模型名只有对方文档说了算，猜错的地址要等请求失败才说话，空格子当场就拦得住。灰字只是举例。',
         options: [
           { value: 'openai', label: 'OpenAI 兼容接口' },
           { value: 'minimax', label: 'MiniMax' },
           { value: 'dashscope', label: '阿里云百炼（CosyVoice）' },
+          { value: 'volc', label: '豆包（火山引擎）' },
         ],
-        clears: ['ttsApiBase', 'ttsApiKey', 'ttsModel'],
+        clears: ['ttsApiBase', 'ttsApiKey', 'ttsModel', 'ttsResourceId'],
       },
       {
         key: 'ttsApiBase',
         label: 'API Base URL',
         kind: 'text',
-        // 举例跟着上面的厂商：三家的网关根各不相同，挂一个 api.openai.com 在 MiniMax 那一档下面
+        // 举例跟着上面的厂商：四家的网关根各不相同，挂一个 api.openai.com 在 MiniMax 那一档下面
         // 就是让界面说一句和下拉相反的话
         placeholderFrom: (fields) => ttsApiBaseExample(fields.ttsProvider),
         hint:
-          '填到域名根为止就行，不用带版本号：后面的路径按上面的「厂商」接（OpenAI 兼容接 /v1/audio/speech，MiniMax 接 /v1/t2a_v2，百炼接 /api/v1/services/audio/tts/SpeechSynthesizer）；照对方文档粘整条端点也认，此时打的就是你填的这一条。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。',
+          '填到域名根为止就行，不用带版本号：后面的路径按上面的「厂商」接（OpenAI 兼容接 /v1/audio/speech，MiniMax 接 /v1/t2a_v2，百炼接 /api/v1/services/audio/tts/SpeechSynthesizer，豆包接 /api/v3/tts/unidirectional）；照对方文档粘整条端点也认，此时打的就是你填的这一条。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。',
       },
       { key: 'ttsApiKey', label: 'API Key', kind: 'key' },
       {
@@ -380,18 +437,31 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         label: '配音模型',
         kind: 'text',
         placeholderFrom: (fields) => ttsModelExample(fields.ttsProvider),
-        hint:
-          '这一家音频接口的模型 id，和校对模型是两回事——把校对模型填在这里会得到一句「模型不存在」。各家型号以对方文档为准（MiniMax 形如 speech-2.8-hd，百炼形如 cosyvoice-v3-flash）。留空时配音不会启动。',
+        // 这一句在豆包那一档是假话：它的 req_params.model 只给复刻音色用，系统音色留空才是对的
+        hintFrom: (fields) =>
+          ttsVendorNeedsModel(fields.ttsProvider)
+            ? '这一家音频接口的模型 id，和校对模型是两回事——把校对模型填在这里会得到一句「模型不存在」。各家型号以对方文档为准（MiniMax 形如 speech-2.8-hd，百炼形如 cosyvoice-v3-flash）。留空时配音不会启动。'
+            : '豆包只有「声音复刻」的音色才需要模型名，用系统音色时留空即可——填了反而可能被回一句 InvalidModel。复刻音色形如 seed-tts-2.0-standard。',
+      },
+      {
+        key: 'ttsResourceId',
+        label: '资源编号',
+        kind: 'text',
+        // 只有豆包收这一项（X-Api-Resource-Id）：另三家请求里没有这一层，摆一格等于让人往没人读的地方填值
+        visibleWhen: (fields) => ttsVendorWantsResourceId(fields.ttsProvider),
+        placeholderFrom: (fields) => ttsResourceIdExample(fields.ttsProvider),
+        hintFrom: (fields) =>
+          `豆包用它选「哪一版配音服务」，得和配音页那个音色同一版才对得上。留空按 ${ttsResourceIdExample(fields.ttsProvider)} 发；系统音色配 seed-tts-2.0，复刻音色配 seed-icl-2.0。`,
       },
       // 音色不在这一档（1.1.0）：一条方案＝厂商 + 地址 + Key + 模型这组凭据，而「这个模型能念哪些音色」
       // 由服务商说了算、各家字段还不一样，绑进方案就成了「你以为这套自带了 alloy」。它在配音页那一格。
     ],
     introNew:
-      '填这四格建一条云端配音方案：先选厂商，再按对方文档填地址、Key 和配音模型（选厂商会把这三格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '建一条云端配音方案：先选厂商，再按对方文档填接口地址、Key 和配音模型（选厂商会把这几格清空，不替你猜值；选了豆包会多出一格资源编号，且配音模型那格可以留空）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
       '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和配音模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
-    credSummary: '厂商、地址、配音模型',
+    credSummary: '厂商、地址、配音模型（豆包还有资源编号）',
     panelNote:
       '弹窗里的「保存」当场写盘，「删除」也是当场、撤不回来；右下角那颗「保存设置」只管上面的配音引擎。',
     keyHintNew: '填一把，跟着「保存」一起存进这一条；不填＝配音沿用「校对配置」里那把 Key',

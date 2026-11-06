@@ -131,6 +131,11 @@ export function ProfileDialog({
           </span>
 
           {spec.fields.map((field) => {
+            // 这一格在这一家根本不存在（资源编号只有豆包收）时不画：摆一格出来只会让人往一个
+            // 没人读的地方填值，而填了的东西照样落盘——下次换成别家，那一格还挂着个来路不明的值
+            if (field.visibleWhen && !field.visibleWhen(draft.fields)) return null
+            // 同一句话在不同厂商下不是同一件事实（配音模型的必填性），判据在表里，这里只管念
+            const hint = field.hintFrom?.(draft.fields) ?? field.hint
             if (field.kind === 'key') {
               return (
                 <div className="settings-form-group" key={field.key}>
@@ -170,7 +175,7 @@ export function ProfileDialog({
                       </option>
                     ))}
                   </select>
-                  {field.hint && <span className="settings-form-hint">{field.hint}</span>}
+                  {hint && <span className="settings-form-hint">{hint}</span>}
                 </div>
               )
             }
@@ -184,7 +189,7 @@ export function ProfileDialog({
                   placeholder={field.placeholderFrom?.(draft.fields) ?? field.placeholder}
                   onChange={(e) => onFieldChange(field.key, e.target.value)}
                 />
-                {field.hint && <span className="settings-form-hint">{field.hint}</span>}
+                {hint && <span className="settings-form-hint">{hint}</span>}
               </div>
             )
           })}

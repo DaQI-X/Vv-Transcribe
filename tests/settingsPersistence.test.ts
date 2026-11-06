@@ -540,15 +540,10 @@ describe('多方案的两道闸门', () => {
     const onDisk = await readJson(file())
     expect(onDisk).toMatchObject({ asrProvider: 'cloud', asrLocalModel: 'small', asrLanguage: 'en' })
     for (const profile of diskProfiles(onDisk).asr) {
-      // 1.1.1 起多一个 vendor：它是「这套地址和 Key 是哪家」的书签，主进程按它选请求形状
-      expect(Object.keys(profile).sort()).toEqual([
-        'apiBase',
-        'apiKey',
-        'id',
-        'model',
-        'name',
-        'vendor',
-      ])
+      // 1.1.1 起多一个 vendor：它是「这套地址和 Key 是哪家」的书签，主进程按它选请求形状。
+      // 转写这一档没有资源编号那一格（收它的只有豆包转写，而豆包转写本版不接，理由见
+      // electron/main/services/asr/asrVendor.ts 抬头）；配音那一档有，见下面 tts 那条断言
+      expect(Object.keys(profile).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name', 'vendor'])
     }
     // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住
     await loadInto(dir)
@@ -636,7 +631,7 @@ describe('多方案的两道闸门', () => {
     const onDisk = await readJson(file())
     expect(onDisk).toMatchObject({ ttsEngine: 'local', ttsLocalEngine: 'kokoro', asrLocalModel: 'small' })
     expect(diskProfile(onDisk, 'tts', 'tts-a')).toMatchObject({ id: 'tts-a' })
-    // v3 的 tts 方案只剩这家网关的四项：厂商 / 地址 / Key / 模型（音色已经不在方案里了）
+    // v3 的 tts 方案只剩这家网关的几项：厂商 / 地址 / Key / 模型 / 资源编号（音色已经不在方案里了）
     expect(Object.keys(diskProfile(onDisk, 'tts', 'tts-a')).sort()).toEqual([
       'apiBase',
       'apiKey',
@@ -644,6 +639,7 @@ describe('多方案的两道闸门', () => {
       'model',
       'name',
       'provider',
+      'resourceId',
     ])
 
     // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住，不靠内存里那一次升字段
