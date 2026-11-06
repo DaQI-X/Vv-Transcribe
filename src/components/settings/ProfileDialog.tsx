@@ -19,7 +19,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { ApiKeyField } from '@/components/settings/ApiKeyField'
-import { PROFILE_CAP_SPEC, type ProfileFieldSpec } from '@/utils/profileSpec'
+import { PROFILE_CAP_SPEC, keyFieldOf, type ProfileFieldSpec } from '@/utils/profileSpec'
 import type { ProfileCapability } from '@/types/settingsProfile'
 import type { KeyStatus } from '@/utils/readiness'
 
@@ -79,12 +79,24 @@ export function ProfileDialog({
   /**
    * 改一格。下拉带着 `fills` 时连带盖掉其他格：换服务商就是换一家网关，
    * 地址与默认模型留着上一家的，存下去那条就指向一个不存在的组合。
+   *
+   * 带着 `clears` 时反过来——把那几格**清空**（配音的「厂商」走这条，1.1.1 拍板）。
+   * 理由不是审美：我们替用户填的地址和模型名一旦过时，界面上它就长得像用户自己填的，
+   * 点保存就落盘，而错误的地址要等请求失败才说话（空格子当场会被拦下）。
+   * 密钥那格也在 clears 里，但它不能走 `onFieldChange`（值不在 fields 里），
+   * 也不能走 `onClearKey`（那是「把磁盘上这把 Key 抹掉」的明确动作，不该由换厂商替用户做）：
+   * 只把手上还没存的那串字清掉，磁盘上已存的还是「留空＝不改」那套口径。
    */
   const changeField = (field: ProfileFieldSpec, value: string) => {
     onFieldChange(field.key, value)
     const fills = field.fills?.[value]
     if (fills) {
       for (const [key, filled] of Object.entries(fills)) onFieldChange(key, filled)
+    }
+    const keyField = keyFieldOf(draft.capability)
+    for (const key of field.clears ?? []) {
+      if (key === keyField) onApiKeyChange('')
+      else onFieldChange(key, '')
     }
   }
 
@@ -169,7 +181,7 @@ export function ProfileDialog({
                   className="settings-form-input"
                   value={draft.fields[field.key] ?? ''}
                   disabled={busy}
-                  placeholder={field.placeholder}
+                  placeholder={field.placeholderFrom?.(draft.fields) ?? field.placeholder}
                   onChange={(e) => onFieldChange(field.key, e.target.value)}
                 />
                 {field.hint && <span className="settings-form-hint">{field.hint}</span>}

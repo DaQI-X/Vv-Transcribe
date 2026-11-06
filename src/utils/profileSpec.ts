@@ -7,7 +7,7 @@
  *
  * 键名用的是跨 IPC 那套扁平名（asrApiBase / aiProvider / ttsModel …），与主进程
  * `settingsSchema.CAPABILITY_FIELDS` 一一对应：「这一档进方案的到底是哪几项」只有那一张表说了算，
- * 这里补的只是界面才需要的东西（标题、占位、说明、下拉的连带预填）。
+ * 这里补的只是界面才需要的东西（标题、占位、说明、下拉连带填什么或清空什么）。
  * 所以给某一档加字段时，两张表都要动，而少动那张的后果是「方案里有这项、界面上看不见」——
  * 看不见就等于改不了，比报错更难发现。
  */
@@ -32,10 +32,22 @@ export interface ProfileFieldSpec {
   /** key＝密钥那格（走 ApiKeyField，值不落进 fields）；select＝下拉 */
   kind: 'text' | 'key' | 'select'
   placeholder?: string
+  /**
+   * 灰字举例跟着别的格换算时才用（配音那两格跟着「厂商」变）。
+   * 只影响 placeholder，永远不往 draft 里写值——预填的问题是它会被当成用户填的存下去。
+   */
+  placeholderFrom?: (fields: Record<string, string>) => string
   hint?: string
   options?: ProfileFieldOption[]
-  /** 选中某项时连带填入的其他格：换服务商＝换一家网关，地址与默认模型跟着换 */
+  /** 选中某项时连带填入的其他格：换服务商就是换一家网关，地址与默认模型跟着换 */
   fills?: Record<string, Record<string, string>>
+  /**
+   * 选中某项时连带**清空**的其他格（含密钥那格，弹窗按 `keyFieldOf` 认出来）。
+   * 和 `fills` 是相反的决定：这一家的地址、Key、模型名只有对方文档说了算，
+   * 我们填进去的每一个值都可能被用户当成「已经配好了」直接点保存，
+   * 而猜错的地址比空格子难发现——空格子会被当场拦下，猜错的地址要跑到失败才说话。
+   */
+  clears?: string[]
   /**
    * 下拉在磁盘上没这一项时该显示哪个选项。
    * 只有「一份配置读出空串、而它的真实含义是某一档」时才用得上（配音厂商就是这种）：
@@ -89,17 +101,41 @@ const AI_PROVIDER_PRESETS: Record<string, { aiApiBase: string; aiModel: string }
  * 而不是放一个坏请求出去——拦与不拦的权力始终在 `ttsConfigProblem` 那边。
  * 名字与 `TTS_VENDOR_NAMES` 对齐（用户不认 `minimax` 这种 id），加一家两处都要动。
  *
- * `TTS_VENDOR_PRESETS` 里特意没有 openai 那一项：兼容接口是「一族」而不是一个厂商，很多人手上
- * 是自建网关或海外中转，点一下就把地址冲成 api.openai.com，等于把刚能用的那套弄坏。
- * 音色那两格举例只作提示用，不是清单——两家的系统音色表都写在对方文档里，应用不替你抄一份。
+ * 后面那四个 `*Example` 只做灰字举例与句子里的「形如」，**永不写进方案**（1.1.1 拍板：换厂商时
+ * 地址/Key/模型清空而不是预填）。三样都以对方文档为当前口径，我们的作用是把形状念出来，
+ * 不是替各家保一份最新清单——清单会过期，用户照着过期清单填出来的东西照样失败，但责任看起来在我们。
  */
 const TTS_VENDOR_UI: Record<
   string,
-  { label: string; voiceRequired: boolean; voiceExample: string }
+  {
+    label: string
+    voiceRequired: boolean
+    voiceExample: string
+    apiBaseExample: string
+    modelExample: string
+  }
 > = {
-  openai: { label: 'OpenAI 兼容接口', voiceRequired: false, voiceExample: 'alloy' },
-  minimax: { label: 'MiniMax', voiceRequired: true, voiceExample: 'male-qn-qingse' },
-  dashscope: { label: '阿里云百炼（CosyVoice）', voiceRequired: true, voiceExample: 'longanyang' },
+  openai: {
+    label: 'OpenAI 兼容接口',
+    voiceRequired: false,
+    voiceExample: 'alloy',
+    apiBaseExample: 'https://api.openai.com',
+    modelExample: 'tts-1',
+  },
+  minimax: {
+    label: 'MiniMax',
+    voiceRequired: true,
+    voiceExample: 'male-qn-qingse',
+    apiBaseExample: 'https://api.minimax.cn',
+    modelExample: 'speech-2.8-hd',
+  },
+  dashscope: {
+    label: '阿里云百炼（CosyVoice）',
+    voiceRequired: true,
+    voiceExample: 'longanyang',
+    apiBaseExample: 'https://dashscope.aliyuncs.com',
+    modelExample: 'cosyvoice-v3-flash',
+  },
 }
 
 /**
@@ -126,13 +162,14 @@ export function ttsVoiceExample(raw: unknown): string {
   return TTS_VENDOR_UI[ttsVendorOf(raw)].voiceExample
 }
 
-/**
- * 选中一家时连带填入的地址与模型（地址只填到域名根为止，后面的路径由主进程按厂商接）。
- * 模型名取自各家文档的当前示例：MiniMax 是 speech-2.8-hd 这一族，百炼是 cosyvoice-v3 这一族。
- */
-const TTS_VENDOR_PRESETS: Record<string, { ttsApiBase: string; ttsModel: string }> = {
-  minimax: { ttsApiBase: 'https://api.minimax.cn', ttsModel: 'speech-2.8-hd' },
-  dashscope: { ttsApiBase: 'https://dashscope.aliyuncs.com', ttsModel: 'cosyvoice-v3-flash' },
+/** 地址那格的灰字举例：跟着「厂商」那一格变，所以选中 MiniMax 时不会再挂着 api.openai.com */
+export function ttsApiBaseExample(raw: unknown): string {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].apiBaseExample
+}
+
+/** 配音模型那格的灰字举例（同上，只说形状，落盘的值仍以用户填的为准） */
+export function ttsModelExample(raw: unknown): string {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].modelExample
 }
 
 export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
@@ -231,20 +268,21 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 所以这一格必须显示成它，而不是留一格空白让用户以为「没选」
         fallback: 'openai',
         hint:
-          '决定这次配音的请求长什么样。选 MiniMax／百炼会自动填入下面的接口地址和模型名（还能改回去）；选 OpenAI 兼容不动你已填的地址——那一档是一族接口，不是一个厂商。',
+          '决定这次配音的请求长什么样。换一家的下面三格（接口地址、API Key、配音模型）会一起清空，不替你猜值——这一家的地址和模型名只有对方文档说了算，猜错的地址要等请求失败才说话，空格子当场就拦得住。灰字只是举例。',
         options: [
           { value: 'openai', label: 'OpenAI 兼容接口' },
           { value: 'minimax', label: 'MiniMax' },
           { value: 'dashscope', label: '阿里云百炼（CosyVoice）' },
         ],
-        fills: TTS_VENDOR_PRESETS,
+        clears: ['ttsApiBase', 'ttsApiKey', 'ttsModel'],
       },
       {
         key: 'ttsApiBase',
         label: 'API Base URL',
         kind: 'text',
-        // 占位举例跟着下拉的默认那一项（OpenAI 兼容）：另两家一选中就自动填上真地址，用不着举例
-        placeholder: 'https://api.openai.com',
+        // 举例跟着上面的厂商：三家的网关根各不相同，挂一个 api.openai.com 在 MiniMax 那一档下面
+        // 就是让界面说一句和下拉相反的话
+        placeholderFrom: (fields) => ttsApiBaseExample(fields.ttsProvider),
         hint:
           '只填到域名根为止，不用带版本号：后面的路径按上面的「厂商」接（OpenAI 兼容接 /v1/audio/speech，MiniMax 接 /v1/t2a_v2，百炼接 /api/v1/services/audio/tts/SpeechSynthesizer）。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。',
       },
@@ -253,7 +291,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         key: 'ttsModel',
         label: '配音模型',
         kind: 'text',
-        placeholder: 'tts-1',
+        placeholderFrom: (fields) => ttsModelExample(fields.ttsProvider),
         hint:
           '这一家音频接口的模型 id，和校对模型是两回事——把校对模型填在这里会得到一句「模型不存在」。各家型号以对方文档为准（MiniMax 形如 speech-2.8-hd，百炼形如 cosyvoice-v3-flash）。留空时配音不会启动。',
       },
@@ -261,7 +299,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
       // 由服务商说了算、各家字段还不一样，绑进方案就成了「你以为这套自带了 alloy」。它在配音页那一格。
     ],
     introNew:
-      '填这四格建一条云端配音方案：先选厂商，接口地址与模型会自动填成这一家的常用值。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '填这四格建一条云端配音方案：先选厂商，再按对方文档填地址、Key 和配音模型（选厂商会把这三格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
       '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和配音模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
