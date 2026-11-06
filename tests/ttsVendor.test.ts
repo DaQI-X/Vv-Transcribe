@@ -16,6 +16,7 @@ import {
   ttsVendorProbeVoice,
   TtsVendorError,
   type TtsSpeechInput,
+  type TtsVendorRequest,
 } from '../electron/main/services/ttsVendor'
 // 渲染层那张厂商表（界面文案读它）：与上面这张对账，见下面那个 describe
 import {
@@ -36,6 +37,14 @@ const input: TtsSpeechInput = {
 function bodyOf(vendor: Parameters<typeof buildSpeechRequest>[0], over: Partial<TtsSpeechInput> = {}) {
   const request = buildSpeechRequest(vendor, { ...input, ...over })
   return { request, body: JSON.parse(request.body) as Record<string, unknown> }
+}
+
+/**
+ * 响应那半边要的第二个参数：`readSpeechAudio` 现在得知道「刚发出去的是哪一条 URL」才能在报错里点名。
+ * 用真请求构造而不是造一个假地址——地址怎么接的本身就是这一层要钉住的东西。
+ */
+function reqOf(vendor: Parameters<typeof buildSpeechRequest>[0]): TtsVendorRequest {
+  return buildSpeechRequest(vendor, input)
 }
 
 function json(status: number, payload: unknown, contentType = 'application/json'): Response {
@@ -169,60 +178,71 @@ describe('buildSpeechRequest：地址接路径', () => {
 
 describe('readSpeechAudio：OpenAI 兼容档', () => {
   it('裸字节流原样收下', async () => {
-    const got = await readSpeechAudio('openai', audio(16))
+    const got = await readSpeechAudio('openai', reqOf('openai'), audio(16))
     expect(got.bytes).toHaveLength(16)
     expect(got.note).toBeUndefined()
   })
 
   it('200 但 body 是 JSON 的网关要拦，否则落盘一个装着错误正文的 .mp3', async () => {
-    await expect(readSpeechAudio('openai', json(200, { error: { message: 'nope' } }))).rejects.toThrow(
-      /没返回音频，返回的是 JSON/
-    )
+    await expect(
+      readSpeechAudio('openai', reqOf('openai'), json(200, { error: { message: 'nope' } }))
+    ).rejects.toThrow(/没返回音频，返回的是 JSON/)
   })
 
-  it('非 2xx：状态码、401/404 的解释和对方原话都要在这一句里', async () => {
+  it('非 2xx：状态码、打出去的那条地址、401 的解释和对方原话都要在这一句里', async () => {
     const response = new Response('{"error":"bad key"}', {
       status: 401,
       headers: { 'content-type': 'application/json' },
     })
-    await expect(readSpeechAudio('openai', response)).rejects.toThrow(
-      /配音接口返回 401（OpenAI 兼容接口 的 Key 不对.*）：\{"error":"bad key"\}/
+    const message = await readSpeechAudio('openai', reqOf('openai'), response).catch(
+      (e: unknown) => (e as Error).message
     )
+    expect(message).toContain('配音接口返回 401（POST https://gateway.example.com/v1/audio/speech）')
+    expect(message).toContain('OpenAI 兼容接口 的 Key 不对')
+    expect(message).toContain('{"error":"bad key"}')
   })
 
-  it('404 的解释按厂商分叉：OpenAI 是「这家没这个端点」，另两家是「地址填多了层级」', async () => {
+  it('404 的解释按厂商分叉：OpenAI 是「这家没这个端点」，另两家是「地址层级的事」', async () => {
     const notFound = (vendor: 'openai' | 'minimax') =>
-      readSpeechAudio(vendor, new Response('', { status: 404 }))
+      readSpeechAudio(vendor, reqOf(vendor), new Response('', { status: 404 }))
     await expect(notFound('openai')).rejects.toThrow(/OpenAI 标准的音频接口/)
-    await expect(notFound('minimax')).rejects.toThrow(/只该填到域名根为止/)
+    await expect(notFound('minimax')).rejects.toThrow(/接口路径由应用接上/)
   })
 })
 
 describe('readSpeechAudio：MiniMax', () => {
   it('音频是十六进制字符串——按 base64 解会得到一坨长度对得上的垃圾', async () => {
-    const got = await readSpeechAudio('minimax', json(200, { data: { audio: '49443300' } }))
+    const got = await readSpeechAudio('minimax', reqOf('minimax'), json(200, { data: { audio: '49443300' } }))
     expect([...got.bytes]).toEqual([0x49, 0x44, 0x33, 0x00])
   })
 
   it('错误可以带着 HTTP 200 回来：不看 base_resp 就是把失败读成成功', async () => {
     await expect(
-      readSpeechAudio('minimax', json(200, { base_resp: { status_code: 1004, status_msg: 'invalid key' } }))
+      readSpeechAudio(
+        'minimax',
+        reqOf('minimax'),
+        json(200, { base_resp: { status_code: 1004, status_msg: 'invalid key' } })
+      )
     ).rejects.toThrow(/MiniMax 回了错误码 1004：invalid key/)
   })
 
   it('base_resp 是 0 时不影响成功路径', async () => {
-    const got = await readSpeechAudio('minimax', json(200, { base_resp: { status_code: 0 }, data: { audio: 'ff' } }))
+    const got = await readSpeechAudio(
+      'minimax',
+      reqOf('minimax'),
+      json(200, { base_resp: { status_code: 0 }, data: { audio: 'ff' } })
+    )
     expect(got.bytes.length).toBe(1)
   })
 
   it('回成功但音频为空、或者不是十六进制，都要单独说一句', async () => {
-    await expect(readSpeechAudio('minimax', json(200, { data: { audio: '' } }))).rejects.toThrow(
-      /回了成功但音频是空的/
-    )
+    await expect(
+      readSpeechAudio('minimax', reqOf('minimax'), json(200, { data: { audio: '' } }))
+    ).rejects.toThrow(/回了成功但音频是空的/)
     // Buffer.from(..., 'hex') 对非法字符是「遇到第一个非十六进制字符就停」，能解出零字节
-    await expect(readSpeechAudio('minimax', json(200, { data: { audio: 'zz' } }))).rejects.toThrow(
-      /解不出一个字节/
-    )
+    await expect(
+      readSpeechAudio('minimax', reqOf('minimax'), json(200, { data: { audio: 'zz' } }))
+    ).rejects.toThrow(/解不出一个字节/)
   })
 })
 
@@ -232,6 +252,7 @@ describe('readSpeechAudio：阿里云百炼', () => {
     vi.stubGlobal('fetch', second)
     const got = await readSpeechAudio(
       'dashscope',
+      reqOf('dashscope'),
       json(200, {
         output: { audio: { data: '', url: 'https://oss.example.com/a.mp3?sig=1' } },
         usage: { characters: 15 },
@@ -248,6 +269,7 @@ describe('readSpeechAudio：阿里云百炼', () => {
     const controller = new AbortController()
     await readSpeechAudio(
       'dashscope',
+      reqOf('dashscope'),
       json(200, { output: { audio: { url: 'https://oss.example.com/a.mp3' } } }),
       controller.signal
     )
@@ -259,6 +281,7 @@ describe('readSpeechAudio：阿里云百炼', () => {
     vi.stubGlobal('fetch', second)
     const got = await readSpeechAudio(
       'dashscope',
+      reqOf('dashscope'),
       json(200, { output: { audio: { data: Buffer.from('abc').toString('base64'), url: 'https://x/y' } } })
     )
     expect(got.bytes.toString()).toBe('abc')
@@ -267,14 +290,22 @@ describe('readSpeechAudio：阿里云百炼', () => {
 
   it('200 但既没地址也没内联数据：把 code/message 带出来，别只说「没给音频」', async () => {
     await expect(
-      readSpeechAudio('dashscope', json(200, { code: 'Throttling', message: '额度不够', output: {} }))
+      readSpeechAudio(
+        'dashscope',
+        reqOf('dashscope'),
+        json(200, { code: 'Throttling', message: '额度不够', output: {} })
+      )
     ).rejects.toThrow(/没给音频地址（Throttling）：额度不够/)
   })
 
   it('地址取回来不是 2xx，要说明那个地址只有 24 小时有效', async () => {
     vi.stubGlobal('fetch', async () => new Response('gone', { status: 403 }))
     await expect(
-      readSpeechAudio('dashscope', json(200, { output: { audio: { url: 'https://oss.example.com/a.mp3' } } }))
+      readSpeechAudio(
+        'dashscope',
+        reqOf('dashscope'),
+        json(200, { output: { audio: { url: 'https://oss.example.com/a.mp3' } } })
+      )
     ).rejects.toThrow(/取回来是 403（这个地址只在 24 小时内有效/)
   })
 
@@ -285,7 +316,11 @@ describe('readSpeechAudio：阿里云百炼', () => {
       throw err
     })
     await expect(
-      readSpeechAudio('dashscope', json(200, { output: { audio: { url: 'https://oss.example.com/a.mp3' } } }))
+      readSpeechAudio(
+        'dashscope',
+        reqOf('dashscope'),
+        json(200, { output: { audio: { url: 'https://oss.example.com/a.mp3' } } })
+      )
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
 })
@@ -296,11 +331,27 @@ describe('readSpeechAudio：共同的坏情况', () => {
       status: 200,
       headers: { 'content-type': 'text/html' },
     })
-    await expect(readSpeechAudio('minimax', response)).rejects.toThrow(/回的不是 JSON.*502 Bad Gateway/)
+    await expect(readSpeechAudio('minimax', reqOf('minimax'), response)).rejects.toThrow(
+      /回的不是 JSON.*502 Bad Gateway/
+    )
+  })
+
+  it('报错点名最终打出去的那条地址：用户照文档填的原话就是念出来的那一条，不是应用接完路径之后的', async () => {
+    // 这条尾巴我们还不认识（表里没登记、也接不上要接的那一条），按原话打；
+    // 报错若不点名地址，用户看到的就只是「404」，无从判断是自己填深了还是应用接错了
+    const typed = 'https://gw.example.com/v1/speech-synth'
+    const message = await readSpeechAudio(
+      'minimax',
+      buildSpeechRequest('minimax', { ...input, apiBase: typed }),
+      new Response('', { status: 404 })
+    ).catch((e: unknown) => (e as Error).message)
+    expect(message).toContain(`POST ${typed}）`)
   })
 
   it('适配层的失败一律带 TtsVendorError 类型：调用方靠它决定「原样贴给用户」还是「再包一层」', async () => {
-    const err = await readSpeechAudio('openai', new Response('', { status: 500 })).catch((e: unknown) => e)
+    const err = await readSpeechAudio('openai', reqOf('openai'), new Response('', { status: 500 })).catch(
+      (e: unknown) => e
+    )
     expect(err).toBeInstanceOf(TtsVendorError)
   })
 
@@ -308,6 +359,7 @@ describe('readSpeechAudio：共同的坏情况', () => {
     const long = `<pre>${'x'.repeat(400)}</pre>`
     const err = await readSpeechAudio(
       'openai',
+      reqOf('openai'),
       new Response(long, { status: 400, headers: { 'content-type': 'text/html' } })
     ).catch((e: unknown) => e)
     const message = (err as Error).message

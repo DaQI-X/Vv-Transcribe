@@ -8,6 +8,7 @@
  * 3. Prompt 强化：强调语音识别同音字错误，附带已修正线索
  */
 import type { AIProvider, DifferenceItem, ExplanationResult, ReferenceIssue } from './types'
+import { appendApiPath } from '../apiPath'
 import {
   applyASRErrorCorrections,
   buildDictionaryContext,
@@ -19,6 +20,13 @@ interface OpenAICompatibleConfig {
   apiBase: string
   model: string
 }
+
+/**
+ * 校对这一腿走的接口路径。
+ * 它和「测试连接」共用这一个常量——自检拼自己那一份的时候，就是「测试说可用、一转写就 404」那类分叉。
+ * 地址那格怎么变成 URL 见 `apiPath.appendApiPath`，全应用只有一处。
+ */
+export const AI_CHAT_PATH = '/v1/chat/completions'
 
 /** 校对用的基础 prompt。「测试连接」要复用同一个契约，否则测的就不是干活时发的那份请求 */
 export const DEFAULT_PROMPT = `你是一个专业的中文文本校对助手。以下是一段语音识别生成的文本。
@@ -115,7 +123,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     const timeoutId = setTimeout(() => controller.abort(), 60000)
 
     try {
-      const response = await fetch(`${this.config.apiBase}/v1/chat/completions`, {
+      const response = await fetch(appendApiPath(this.config.apiBase, AI_CHAT_PATH), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -192,7 +200,7 @@ ${dictContext}`
     const timeoutId = setTimeout(() => controller.abort(), 60000)
 
     try {
-      const response = await fetch(`${this.config.apiBase}/v1/chat/completions`, {
+      const response = await fetch(appendApiPath(this.config.apiBase, AI_CHAT_PATH), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -283,7 +291,7 @@ ${dictContext}`
     const timeoutId = setTimeout(() => controller.abort(), 60000)
 
     try {
-      const response = await fetch(`${this.config.apiBase}/v1/chat/completions`, {
+      const response = await fetch(appendApiPath(this.config.apiBase, AI_CHAT_PATH), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

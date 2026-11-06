@@ -44,7 +44,8 @@ import {
   normalizeAsrVendor,
 } from './asr/asrVendor'
 import { engineBinaryInManifest } from './componentService'
-import { DEFAULT_PROMPT } from './ai/openaiCompatible'
+import { AI_CHAT_PATH, DEFAULT_PROMPT } from './ai/openaiCompatible'
+import { appendApiPath } from './apiPath'
 // 相对路径而非 @/ 别名：主进程这条 build 链（vite.config.ts 里 electron 那两项）没有配别名，
 // 用 @/ 会在打包时才炸，tsc 却是过的
 import { formatBytes } from '../../../src/utils/formatBytes'
@@ -121,8 +122,10 @@ const STATUS_HINTS: Record<number, string> = {
   401: '鉴权失败：API Key 无效、已过期，或该服务不只接受 Bearer 方式',
   403: 'API Key 有效，但没有访问这个模型/接口的权限',
   // 404 的两种成因要分开说：地址填深了（粘了完整端点）和模型名不存在。
-  // 旧那句「检查是否填成站点根地址」把方向写反了——根地址才是对的，这次 404 就是这么来的
-  404: '接口或模型不存在：API Base 那格只该填到域名根为止（形如 https://服务商域名），接口路径由应用自己接上；也可能是模型名不存在',
+  // 旧那句「检查是否填成站点根地址」把方向写反了——根地址才是对的，这次 404 就是这么来的。
+  // 1.1.1 起「已经是这条端点」的地址按原话打、不再二次接路径（见 apiPath.appendApiPath），
+  // 所以这句不能只说「只该填到根」；最终地址由 httpFail 念出来，对照对方文档即可
+  404: '接口或模型不存在：API Base 那格填到域名根为止就行（形如 https://服务商域名），接口路径由应用自己接上；照对方文档粘完整端点也认；也可能是模型名不存在',
   405: '这个地址不接受 POST，可能填成了网页地址而不是 API 地址',
   408: '服务端处理超时',
   413: '请求体过大（本次只发了 1 秒静音音频，正常不该命中）',
@@ -382,7 +385,7 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
   const originNote = usedDefault ? '（模型留空，本次用的是默认值 gpt-4o-mini）' : ''
 
   const started = Date.now()
-  const chatUrl = `${base}/v1/chat/completions`
+  const chatUrl = appendApiPath(base, AI_CHAT_PATH)
   let response: Response
   try {
     response = await fetch(chatUrl, {
@@ -604,7 +607,7 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
   const latencyMs = Date.now() - started
   let audio: TtsAudioResult
   try {
-    audio = await readSpeechAudio(vendor, response, signal)
+    audio = await readSpeechAudio(vendor, request, response, signal)
   } catch (err) {
     // 适配层那句已经是「发生了什么 + 能改哪一格」，原样贴出来，不再翻成通用文案
     const message = err instanceof Error ? err.message : String(err)

@@ -190,7 +190,7 @@ export async function synthesizeSpeech(
       signal: controller.signal,
     })
     // 同一个 signal 递进去：阿里云百炼拿地址要再发一次 GET，取消按钮在最后一跳上也不能失效
-    audio = await readSpeechAudio(config.vendor, response, controller.signal)
+    audio = await readSpeechAudio(config.vendor, request, response, controller.signal)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`配音请求 ${SPEECH_TIMEOUT_MS / 1000} 秒没响应，已中断`)

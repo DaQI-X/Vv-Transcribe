@@ -17,6 +17,7 @@
  * - 音色这一项各家都收，但必填性不一样：OpenAI 兼容可以整个不发这一项，另两家必填。
  *   必填不由这里拦（拦在这儿就等于替用户猜一份音色清单），它是 `ttsConfigProblem` 那条校验的事。
  */
+import { appendApiPath } from './apiPath'
 
 /** 界面上「厂商」那格的取值；`openai` 同时是「留空/不认识」的落点 */
 export type TtsVendorId = 'openai' | 'minimax' | 'dashscope'
@@ -83,7 +84,7 @@ const AUDIO_FORMAT = 'mp3'
  * MiniMax 把它嵌在 `voice_setting` 里，DashScope 嵌在 `parameters` 里，OpenAI 在顶层。
  */
 interface VendorShape {
-  /** 从归一化后的 apiBase 之后接的路径，带满整段（拼法见 joinApiPath） */
+  /** 从归一化后的 apiBase 之后接的路径，带满整段（拼法见 apiPath.appendApiPath） */
   path: string
   /** 这一家的音色是不是必填（只用于错误提示的措辞，见 ttsConfigProblem） */
   voiceRequired: boolean
@@ -117,19 +118,9 @@ export function ttsVendorProbeVoice(vendor: TtsVendorId): string {
 }
 
 /**
- * 这一家要走的接口路径拼在归一化后的地址后面。
- *
- * `normalizeApiBase` 会把末尾的 `/v1` 剥掉（那是为 OpenAI 兼容地址准备的口径），于是照着阿里云文档
- * 粘进来的 `https://xxx/api/v1` 会变成 `https://xxx/api`，再接我们的路径就成了 `/api/api/v1/...`——
- * 用户拿到一句 404，而他填的明明是对方的原话。这里认这一次重复。
- */
-function joinApiPath(apiBase: string, path: string): string {
-  return apiBase.endsWith('/api') && path.startsWith('/api/') ? `${apiBase}${path.slice(4)}` : `${apiBase}${path}`
-}
-
-/**
  * 拼出这一家的一次请求。三家都走 `Authorization: Bearer`，
  * 火山/讯飞那种要额外头部或现场签名的形状本轮不接（#224 拍板②：只做「一把 Bearer 就能打」的）。
+ * 地址那格怎么变成 URL 见 `apiPath.appendApiPath`——那一条规则全应用只有一份，别在这里再走一层拼接。
  */
 export function buildSpeechRequest(vendor: TtsVendorId, input: TtsSpeechInput): TtsVendorRequest {
   const headers = {
@@ -147,7 +138,7 @@ export function buildSpeechRequest(vendor: TtsVendorId, input: TtsSpeechInput): 
     if (input.voice) voiceSetting.voice_id = input.voice
     if (speed !== undefined) voiceSetting.speed = speed
     return {
-      url: joinApiPath(input.apiBase, VENDOR_SHAPES.minimax.path),
+      url: appendApiPath(input.apiBase, VENDOR_SHAPES.minimax.path),
       headers,
       body: JSON.stringify({
         model: input.model,
@@ -171,7 +162,7 @@ export function buildSpeechRequest(vendor: TtsVendorId, input: TtsSpeechInput): 
     if (input.voice) dashscopeInput.voice = input.voice
     if (speed !== undefined) dashscopeInput.rate = speed
     return {
-      url: joinApiPath(input.apiBase, VENDOR_SHAPES.dashscope.path),
+      url: appendApiPath(input.apiBase, VENDOR_SHAPES.dashscope.path),
       headers,
       body: JSON.stringify({ model: input.model, input: dashscopeInput }),
     }
@@ -186,7 +177,7 @@ export function buildSpeechRequest(vendor: TtsVendorId, input: TtsSpeechInput): 
   if (input.voice) body.voice = input.voice
   if (speed !== undefined) body.speed = speed
   return {
-    url: joinApiPath(input.apiBase, VENDOR_SHAPES.openai.path),
+    url: appendApiPath(input.apiBase, VENDOR_SHAPES.openai.path),
     headers,
     body: JSON.stringify(body),
   }
@@ -203,14 +194,18 @@ async function textOf(response: Response): Promise<string> {
   return await response.text().catch(() => '')
 }
 
-/** HTTP 状态码那一步的提示按厂商分叉：404 对 OpenAI 是「这家没有这个端点」，对另两家是「地址层级错了」 */
+/**
+ * HTTP 状态码那一步的提示按厂商分叉：404 对 OpenAI 是「这家没有这个端点」，对另两家是「地址层级错了」。
+ * 都以逗号开头：前面那句已经带了 `（POST 最终地址）`，再套一层括号读不动。
+ */
 function statusHint(vendor: TtsVendorId, status: number): string {
   const name = TTS_VENDOR_NAMES[vendor]
-  if (status === 401) return `（${name} 的 Key 不对、已过期，或没有调用该模型的权限）`
+  if (status === 401) return `，${name} 的 Key 不对、已过期，或没有调用该模型的权限`
   if (status === 404)
     return vendor === 'openai'
-      ? '（这个服务商可能没有 OpenAI 标准的音频接口，或 API Base 少/多层路径）'
-      : `（API Base URL 那格只该填到域名根为止，${name} 的接口路径由应用自己接上）`
+      ? '，这个服务商可能没有 OpenAI 标准的音频接口，或 API Base 少/多层路径'
+      : `，${name} 的接口路径由应用接上——地址填到域名根为止就行；照对方文档粘完整端点也认，` +
+        '那种情况下打的就是上面这一条'
   return ''
 }
 
@@ -218,11 +213,16 @@ function statusHint(vendor: TtsVendorId, status: number): string {
  * 一次响应换成音频字节。抛错即失败，调用方负责把它变成界面上的那句话——
  * 消息一律是「发生了什么 + 你能改哪一格」，服务商原话原样带在后面。
  *
+ * `request` 是调用方刚发出去的那一份（`buildSpeechRequest` 的返回值）：地址那格现在有两种活法
+ * （填到根由应用接路径、照文档粘完整端点按原话打），报 404 的人只有看见**真的打了哪一条**
+ * 才分得清是自己填深了还是应用接错了。所以这一项是必传的，不给调用方留「懒得带」的余地。
+ *
  * `signal` 是调用方那次请求的取消信号：DashScope 拿地址要再发一次 GET，
  * 用户点了「取消配音」时这一次也不能例外，否则取消按钮在最后一跳上失效。
  */
 export async function readSpeechAudio(
   vendor: TtsVendorId,
+  request: TtsVendorRequest,
   response: Response,
   signal?: AbortSignal
 ): Promise<TtsAudioResult> {
@@ -230,7 +230,10 @@ export async function readSpeechAudio(
   if (!response.ok) {
     const detail = errorSnippet(await textOf(response))
     vendorError(
-      `配音接口返回 ${response.status}${statusHint(vendor, response.status)}${detail ? `：${detail}` : ''}`
+      `配音接口返回 ${response.status}（POST ${request.url}）${statusHint(
+        vendor,
+        response.status
+      )}${detail ? `：${detail}` : ''}`
     )
   }
 
@@ -240,7 +243,7 @@ export async function readSpeechAudio(
     const contentType = response.headers.get('content-type') || ''
     if (contentType.includes('json')) {
       const detail = errorSnippet(await textOf(response))
-      vendorError(`配音接口没返回音频，返回的是 JSON：${detail || '空 body'}`)
+      vendorError(`配音接口没返回音频，返回的是 JSON（POST ${request.url}）：${detail || '空 body'}`)
     }
     return { bytes: Buffer.from(await response.arrayBuffer()) }
   }
@@ -248,7 +251,7 @@ export async function readSpeechAudio(
   if (vendor === 'minimax') {
     const raw = await textOf(response)
     const json = parseJsonBody(raw)
-    if (!json) vendorError(notJsonMessage(name, raw))
+    if (!json) vendorError(notJsonMessage(name, request.url, raw))
     const baseResp = asObject(json.base_resp)
     const statusCode = Number(baseResp.status_code ?? 0)
     // 这一家的错误可能带着 HTTP 200 回来：状态码那一步已经过去了，这里不看就等于把失败读成成功
@@ -271,7 +274,7 @@ export async function readSpeechAudio(
   // dashscope：非流式回的是一个签名地址，音频要再去取一次
   const raw = await textOf(response)
   const json = parseJsonBody(raw)
-  if (!json) vendorError(notJsonMessage(name, raw))
+  if (!json) vendorError(notJsonMessage(name, request.url, raw))
   const output = asObject(json.output)
   const audio = asObject(output.audio)
   const inline = typeof audio.data === 'string' ? audio.data : ''
@@ -326,10 +329,14 @@ function parseJsonBody(raw: string): Record<string, unknown> | null {
   }
 }
 
-/** 200 但内容读不出一个 JSON 对象：多半是网关回了一份 HTML 报错页，或地址指到了非接口的主页 */
-function notJsonMessage(name: string, raw: string): string {
+/**
+ * 两家 JSON 接口共用的「回的不是 JSON」那一句。
+ * 200 但内容读不出一个 JSON 对象，多半是网关回了一份 HTML 报错页，或地址指到了非接口的主页——
+ * 地址是这一句里唯一能改的东西，所以必须点名打了哪一条。
+ */
+function notJsonMessage(name: string, url: string, raw: string): string {
   return (
-    `${name} 回的不是 JSON，没读出音频：${errorSnippet(raw) || '空 body'}。` +
+    `${name} 回的不是 JSON，没读出音频（POST ${url}）：${errorSnippet(raw) || '空 body'}。` +
     'API Base URL 那格填错了层级时会出现这一句'
   )
 }

@@ -1279,6 +1279,10 @@ const APPENDED_ENDPOINT_PATHS: readonly string[] = [
  * 再把「对方文档里那条完整端点」也认下来（见 APPENDED_ENDPOINT_PATHS）：用户照着文档整段复制
  * 粘进来的就是 `https://api.minimax.cn/v1/speech_to_text`，而应用自己还要再接一次路径，
  * 拼出来是 `.../v1/speech_to_text/v1/speech_to_text`——症状是一句 404，而他填的明明是对方的原话。
+ *
+ * 表没更新（新加端点、或对方改了路径）时兜底的是 `apiPath.appendApiPath`：那条尾巴接不上我们
+ * 要接的那一条就不再接第二遍，打出去的就是用户填的原话。这张表仍然留着，因为它多治一类
+ * 表兜不住的情况——在 MiniMax 的地址上粘了百炼的端点：按原话打必然不通，认成尾巴洗回根地址反而能用。
  */
 export function normalizeApiBase(raw: string): string {
   const noSlash = (raw || '').trim().replace(/\/+$/, '')

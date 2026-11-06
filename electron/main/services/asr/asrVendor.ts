@@ -17,6 +17,7 @@
  * - 服务商的错误原话照旧由调用方递给界面，这里不拦、不猜。
  */
 import { formatBytes } from '../../../../src/utils/formatBytes'
+import { appendApiPath } from '../apiPath'
 
 /** 界面上「厂商」那格的取值；`openai` 同时是「留空／不认识」的落点 */
 export type AsrVendorId = 'openai' | 'minimax'
@@ -92,7 +93,7 @@ export function buildAsrRequest(rawVendor: unknown, input: AsrRequestInput): Asr
         }
   if (language && vendor !== 'minimax') fields.language = language
   return {
-    url: `${input.apiBase}/${vendor === 'minimax' ? 'v1/speech_to_text' : 'v1/audio/transcriptions'}`,
+    url: appendApiPath(input.apiBase, vendor === 'minimax' ? '/v1/speech_to_text' : '/v1/audio/transcriptions'),
     headers: vendor === 'minimax' && language ? { language } : {},
     fields,
   }
