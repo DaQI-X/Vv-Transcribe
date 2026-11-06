@@ -16,6 +16,7 @@
  *   两个名字挨得很近，但它们不是一回事，取值时别混。
  * - 服务商的错误原话照旧由调用方递给界面，这里不拦、不猜。
  */
+import { formatBytes } from '../../../../src/utils/formatBytes'
 
 /** 界面上「厂商」那格的取值；`openai` 同时是「留空／不认识」的落点 */
 export type AsrVendorId = 'openai' | 'minimax'
@@ -48,6 +49,8 @@ export const ASR_VENDOR_DEFAULT_MODEL: Record<AsrVendorId, string> = {
 /** 转写请求的除文件以外那部分；`url` 里的 apiBase 必须已经过 `normalizeApiBase` */
 export interface AsrRequestShape {
   url: string
+  /** 除 Authorization 以外要带上的请求头；没有额外头部时给空对象，调用方一律展开 */
+  headers: Record<string, string>
   /** 除 file 以外的 multipart 字段，按插入顺序拼 */
   fields: Record<string, string>
 }
@@ -71,8 +74,11 @@ export interface AsrRequestInput {
 export function buildAsrRequest(rawVendor: unknown, input: AsrRequestInput): AsrRequestShape {
   const vendor = normalizeAsrVendor(rawVendor)
   const model = input.model.trim() || ASR_VENDOR_DEFAULT_MODEL[vendor]
-  // 语言这一项两家都收、键名也一样，所以跟着形状一起给；空串干脆不发，
-  // 让服务商自己判——把一个空 language 递过去，两家各自的默认行为并不一样
+  const language = input.language.trim()
+  // 语言这一项**两家放的位置不一样**：OpenAI 是 multipart 里的 `language` 字段，
+  // MiniMax 原厂口径是 `language` 请求头（值是同一套短码，zh/en/ja/…，没有区域后缀）。
+  // 当成字段发给 MiniMax 不会报错，只会静静被忽略——界面选了中文、对方按自动检测跑，
+  // 这是最难被发现的那类「配了但没生效」。空串两家都不发，让服务商自己判。
   const fields: Record<string, string> =
     vendor === 'minimax'
       ? // 原厂口径：`POST /v1/speech_to_text`，官方 OpenAPI 里 form 字段就这几个。
@@ -84,9 +90,54 @@ export function buildAsrRequest(rawVendor: unknown, input: AsrRequestInput): Asr
           response_format: 'verbose_json',
           'timestamp_granularities[0]': 'segment',
         }
-  if (input.language) fields.language = input.language
+  if (language && vendor !== 'minimax') fields.language = language
   return {
     url: `${input.apiBase}/${vendor === 'minimax' ? 'v1/speech_to_text' : 'v1/audio/transcriptions'}`,
+    headers: vendor === 'minimax' && language ? { language } : {},
     fields,
   }
+}
+
+/** 一次请求收多大的文件、收多长的音频；没写的那一项就是对方没给这条限制 */
+interface VendorFileLimits {
+  maxBytes?: number
+  maxSeconds?: number
+}
+
+/**
+ * 原厂文档里写死的那两条上限。`openai` 这一支留空是**有意的**：25MB 是 OpenAI 自己那家的上限，
+ * 而兼容网关各自放多少并不一样（本机起的、内网的常常不收这一项），替它们拦人会把能用的人挡在门外。
+ * MiniMax 这两条必须拦：它的 500 秒是硬上限，而一段超过 8 分钟的媒体是这一行最常见的输入，
+ * 「一次 POST 整段音频」这条链路对它根本不成立——不拦的话用户在批次跑完前什么都看不到，
+ * 只会在日志里撞到一句对方原话。
+ *
+ * 体积按 `50_000_000` 而不是 `50 * 1024 * 1024`：对方文档写的是 50MB，没说是十进制还是 1024 进制，
+ * 取小的那个是**宁可多拦一句也不让对方回 413**。念出来的数走 `formatBytes` 那一把尺（#282）。
+ */
+const VENDOR_FILE_LIMITS: Record<AsrVendorId, VendorFileLimits> = {
+  openai: {},
+  minimax: { maxBytes: 50_000_000, maxSeconds: 500 },
+}
+
+/**
+ * 开工前问一句「这一段这一家收不收」。返回 null＝可以发；返回一句人话＝别发，直接把话递给界面。
+ * `seconds` 拿不到（探测失败）时只按体积判，不猜时长。
+ */
+export function asrFileProblem(
+  rawVendor: unknown,
+  input: { bytes: number; seconds?: number }
+): string | null {
+  const vendor = normalizeAsrVendor(rawVendor)
+  const limits = VENDOR_FILE_LIMITS[vendor]
+  const name = ASR_VENDOR_NAMES[vendor]
+  if (limits.maxBytes !== undefined && input.bytes > limits.maxBytes) {
+    return `${name} 单次转写上传上限 ${formatBytes(limits.maxBytes)}，这一份音频是 ${formatBytes(input.bytes)}`
+  }
+  if (limits.maxSeconds !== undefined && input.seconds !== undefined && input.seconds > limits.maxSeconds) {
+    return (
+      `${name} 单次转写只收 ${limits.maxSeconds} 秒（约 8 分钟）以内的音频，这一份是 ${Math.round(input.seconds)} 秒。` +
+      '这一家没有长音频异步接口可用，需要整段转写的任务请换本地转写，或改用支持分段上传的服务'
+    )
+  }
+  return null
 }

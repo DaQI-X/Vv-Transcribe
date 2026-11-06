@@ -3,6 +3,8 @@
  * 这几个函数都是「配置值进入下一步之前必须过的一道收口」，而且它们的落点不是同一个：
  * 档位名会被拼成 HuggingFace repo 名、引擎 id 会被拼成模型目录名。测它们不是在测格式好看，
  * 是在测「用户手改过的 settings.json 或旧版本残留值，不会把下载目标带偏」。
+ * `normalizeApiBase` 还多担一件事：接口地址那格粘的常常是服务商文档里那条**完整端点**，
+ * 认不下这个尾巴就是 1.1.1 那句「填了就能连上」的兑现失败（MiniMax 404 的根因，#327）。
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -11,6 +13,8 @@ import {
   normalizeLocalVoice,
   normalizeTtsEngine,
 } from '../electron/main/services/settingsService'
+import { buildAsrRequest } from '../electron/main/services/asr/asrVendor'
+import { buildSpeechRequest } from '../electron/main/services/ttsVendor'
 import {
   DEFAULT_LOCAL_TTS_ENGINE,
   LOCAL_TTS_ENGINES,
@@ -36,6 +40,68 @@ describe('normalizeApiBase', () => {
 
   it('不动没有斜杠后缀的正常地址', () => {
     expect(normalizeApiBase('http://127.0.0.1:11434')).toBe('http://127.0.0.1:11434')
+  })
+
+  it('认下「照着对方文档粘进来的整条端点」', () => {
+    // 用户在接口地址那格粘的是服务商文档里那条完整 URL，而应用自己还要再接一次路径。
+    // 不认这条尾巴，MiniMax 就得到 `.../v1/speech_to_text/v1/speech_to_text`，症状是一句 404，
+    // 而他填的明明是对方的原话——这一条就是 1.1.1 那句「输入框里填了就能连上」的直接兑现
+    expect(normalizeApiBase('https://api.minimax.cn/v1/speech_to_text')).toBe('https://api.minimax.cn')
+    expect(normalizeApiBase('https://api.minimax.cn/v1/t2a_v2')).toBe('https://api.minimax.cn')
+    expect(normalizeApiBase('https://api.openai.com/v1/audio/transcriptions')).toBe('https://api.openai.com')
+    expect(normalizeApiBase('https://api.openai.com/v1/audio/speech')).toBe('https://api.openai.com')
+    expect(normalizeApiBase('https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer')).toBe(
+      'https://dashscope.aliyuncs.com'
+    )
+  })
+
+  it('粘错的尾巴认得大小写，也不误伤路径里带这些词的自有网关', () => {
+    expect(normalizeApiBase('https://api.minimax.cn/V1/Speech_To_Text')).toBe('https://api.minimax.cn')
+    expect(normalizeApiBase('https://gw.example.com/v1/speech_to_text/v1/speech_to_text')).toBe(
+      'https://gw.example.com/v1/speech_to_text'
+    )
+    // 只剥一层：真把端点放在某个更长路径底下的自建网关，剥完还得是个能用的地址
+    expect(normalizeApiBase('https://gw.example.com/proxy/v1/chat/completions')).toBe('https://gw.example.com/proxy')
+  })
+
+  it('对账：三条拼请求的链路，把用户粘的完整端点喂回去还能拼回同一条', () => {
+    // 这张尾巴表是手抄的，抄漏一条不会编译报错，只会在用户那格变成 404。
+    // 所以这里不比对表内容，比对的是**真拼出来的那条 URL**：把适配层产出的完整端点当成
+    // 用户粘贴的输入走一遍归一化，再拼一次必须回到同一条地址——加了新端点却忘了登记时，
+    // 这一步必然拼出双重路径
+    const apiBase = 'https://gateway.example.com'
+
+    for (const vendor of ['openai', 'minimax'] as const) {
+      const input = { apiBase, model: 'm', language: '' }
+      const pasted = buildAsrRequest(vendor, input).url
+      expect(normalizeApiBase(pasted)).not.toBe(pasted)
+      expect(buildAsrRequest(vendor, { ...input, apiBase: normalizeApiBase(pasted) }).url).toBe(pasted)
+    }
+
+    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+      const pasted = buildSpeechRequest(vendor, {
+        apiBase,
+        apiKey: 'k',
+        model: 'm',
+        text: 't',
+        voice: '',
+        speed: 1,
+      }).url
+      expect(normalizeApiBase(pasted)).not.toBe(pasted)
+      expect(
+        buildSpeechRequest(vendor, {
+          apiBase: normalizeApiBase(pasted),
+          apiKey: 'k',
+          model: 'm',
+          text: 't',
+          voice: '',
+          speed: 1,
+        }).url
+      ).toBe(pasted)
+    }
+
+    // 校对这一腿没有适配层，路径就写死在 openaiCompatible 与连接自检里；这里钉住表抄对了
+    expect(normalizeApiBase(`${apiBase}/v1/chat/completions`)).toBe(apiBase)
   })
 })
 

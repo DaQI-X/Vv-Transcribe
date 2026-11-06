@@ -87,17 +87,33 @@ interface VendorShape {
   path: string
   /** 这一家的音色是不是必填（只用于错误提示的措辞，见 ttsConfigProblem） */
   voiceRequired: boolean
+  /**
+   * 「测试连接」在界面没带音色时用哪一个（见 connectionTestService.testTTSConfig）。
+   *
+   * 只能是**本机实测通过**的那一个：这一页从 1.1.0 起没有云端音色格，而必填那几家不收空音色，
+   * 不给一个值就等于那颗按钮对 MiniMax／百炼永远红着——用户照着提示去配音页填了音色再回来点，
+   * 那一格的值不落盘、也传不过来，是个走不出来的圈。
+   * 没实测过的家留空（百炼的音色表我们只抄过灰字举例，没发过一次真请求），宁缺毋滥：
+   * 猜一个被拒的 id 只会把「地址和 Key 通不通」这条真诊断埋进一句 voice id not exist。
+   */
+  probeVoice: string
 }
 
 const VENDOR_SHAPES: Record<TtsVendorId, VendorShape> = {
-  openai: { path: '/v1/audio/speech', voiceRequired: false },
-  minimax: { path: '/v1/t2a_v2', voiceRequired: true },
-  dashscope: { path: '/api/v1/services/audio/tts/SpeechSynthesizer', voiceRequired: true },
+  openai: { path: '/v1/audio/speech', voiceRequired: false, probeVoice: '' },
+  // 2026-11-06 本机实测：speech-2.8-hd + 这一个音色合成出 37428 字节 / 2.232 秒（male-qn-qingse）
+  minimax: { path: '/v1/t2a_v2', voiceRequired: true, probeVoice: 'male-qn-qingse' },
+  dashscope: { path: '/api/v1/services/audio/tts/SpeechSynthesizer', voiceRequired: true, probeVoice: '' },
 }
 
 /** 这一家的音色是不是必填；界面与前置校验都按它分叉，别在渲染层再抄一份表 */
 export function ttsVendorNeedsVoice(vendor: TtsVendorId): boolean {
   return VENDOR_SHAPES[vendor].voiceRequired
+}
+
+/** 自检那一次能替界面补的音色，空串＝这一家没有「实测能用」的那个值，补不了 */
+export function ttsVendorProbeVoice(vendor: TtsVendorId): string {
+  return VENDOR_SHAPES[vendor].probeVoice
 }
 
 /**

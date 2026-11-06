@@ -13,9 +13,15 @@ import {
   normalizeTtsVendor,
   readSpeechAudio,
   ttsVendorNeedsVoice,
+  ttsVendorProbeVoice,
   TtsVendorError,
   type TtsSpeechInput,
 } from '../electron/main/services/ttsVendor'
+// 渲染层那张厂商表（界面文案读它）：与上面这张对账，见下面那个 describe
+import {
+  ttsVendorNeedsVoice as uiNeedsVoice,
+  ttsVendorProbeVoice as uiProbeVoice,
+} from '../src/utils/profileSpec'
 
 const input: TtsSpeechInput = {
   apiBase: 'https://gateway.example.com',
@@ -68,6 +74,27 @@ describe('normalizeTtsVendor', () => {
     expect(ttsVendorNeedsVoice('openai')).toBe(false)
     expect(ttsVendorNeedsVoice('minimax')).toBe(true)
     expect(ttsVendorNeedsVoice('dashscope')).toBe(true)
+  })
+})
+
+describe('ttsVendorProbeVoice：「测试连接」在界面没带音色时补的那一个', () => {
+  it('MiniMax 有实测过的值（speech-2.8-hd + 这一个音色真出过音频）', () => {
+    expect(ttsVendorProbeVoice('minimax')).toBe('male-qn-qingse')
+  })
+
+  it('OpenAI 兼容本来就不收音色、百炼那份音色表我们只抄过灰字举例没发过真请求 → 都留空', () => {
+    // 留空不是「忘了填」，是让 connectionTestService 走「这一页测不了这一家」那句真话；
+    // 补一个没实测过的 id，症状是把「地址和 Key 通不通」这条诊断埋进一句 voice id not exist
+    expect(ttsVendorProbeVoice('openai')).toBe('')
+    expect(ttsVendorProbeVoice('dashscope')).toBe('')
+  })
+
+  it('对账：界面那张表（提示文案与灰字举例读它）和主进程这张表得说同一个值', () => {
+    // 两处分开写的代价是「设置页写着自检会用 A 音色，实际发的是 B」——那颗按钮的结论没法解释
+    for (const vendor of ['openai', 'minimax', 'dashscope'] as const) {
+      expect(uiProbeVoice(vendor)).toBe(ttsVendorProbeVoice(vendor))
+      expect(uiNeedsVoice(vendor)).toBe(ttsVendorNeedsVoice(vendor))
+    }
   })
 })
 

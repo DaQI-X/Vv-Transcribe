@@ -7,12 +7,13 @@
  * 换回一句对方网关的 400/404——而那时烧的是他自己 Key 上的额度。
  *
  * 值写死按原厂文档：MiniMax 的音频接口不是它自己那个 OpenAI 兼容层（那层只覆盖文本），
- * 所以路径、字段名和默认模型名都必须逐条钉住，不能靠「兼容」两个字推定。
+ * 所以路径、字段名、语言放哪一层（字段还是头部）和默认模型名都必须逐条钉住，不能靠「兼容」两个字推定。
  */
 import { describe, expect, it } from 'vitest'
 import {
   ASR_VENDOR_DEFAULT_MODEL,
   ASR_VENDOR_NAMES,
+  asrFileProblem,
   buildAsrRequest,
   normalizeAsrVendor,
   type AsrRequestInput,
@@ -59,11 +60,19 @@ describe('buildAsrRequest：OpenAI 兼容档', () => {
       response_format: 'verbose_json',
       'timestamp_granularities[0]': 'segment',
     })
+    expect(shape.headers).toEqual({})
   })
 
   it('模型留空时用这一家的默认档', () => {
     expect(shapeOf('openai', { model: '' }).fields.model).toBe(ASR_VENDOR_DEFAULT_MODEL.openai)
     expect(shapeOf('openai', { model: '   ' }).fields.model).toBe('whisper-1')
+  })
+
+  it('语言走 multipart 字段，不放头部', () => {
+    // OpenAI 这条只认字段；这一档错了会直接 400，比 MiniMax 那一档容易被发现
+    const shape = shapeOf('openai', { language: 'zh' })
+    expect(shape.fields.language).toBe('zh')
+    expect(shape.headers).toEqual({})
   })
 })
 
@@ -86,14 +95,30 @@ describe('buildAsrRequest：MiniMax 档', () => {
     expect(shapeOf('minimax', { model: '' }).fields.model).toBe('asr-1.0')
     expect(ASR_VENDOR_DEFAULT_MODEL.minimax).toBe('asr-1.0')
   })
+
+  it('语言走 language 请求头，不进 multipart 字段', () => {
+    // 原厂 OpenAPI 里 speech_to_text 的 language 是 header，form 里没有这一项。
+    // 当成字段发过去对方不报错、只是不理——界面选了中文、实际按自动检测跑，
+    // 这种「配了但没生效」不会有任何一句提示，只能靠这一条钉住
+    const shape = shapeOf('minimax', { language: 'zh' })
+    expect(shape.headers).toEqual({ language: 'zh' })
+    expect(shape.fields).not.toHaveProperty('language')
+  })
+
+  it('语言留空时头部也不发这一项', () => {
+    // 空串发给对方等于替用户猜一份默认行为，两家各自怎么处理并不一样
+    expect(shapeOf('minimax', { language: '' }).headers).toEqual({})
+    expect(shapeOf('minimax', { language: '   ' }).headers).toEqual({})
+  })
 })
 
 describe('buildAsrRequest：两家共有的口径', () => {
-  it('语言留空时干脆不发这一项', () => {
-    // 把一个空 language 递过去，两家的默认行为并不一样，等于替用户猜一份
+  it('语言留空时这一项两处都不发', () => {
+    // 把一个空 language 递过去，两家的默认行为并不一样，等于替用户猜一份。
+    // 放的位置两家不同（字段／头部），所以两处都得钉住，不能只查一处
     for (const vendor of ['openai', 'minimax']) {
       expect(shapeOf(vendor, { language: '' }).fields).not.toHaveProperty('language')
-      expect(shapeOf(vendor, { language: 'zh' }).fields.language).toBe('zh')
+      expect(shapeOf(vendor, { language: '' }).headers).toEqual({})
     }
   })
 
@@ -115,5 +140,39 @@ describe('buildAsrRequest：两家共有的口径', () => {
     expect(ASR_VENDOR_NAMES.openai).toBe('OpenAI 兼容接口')
     expect(ASR_VENDOR_NAMES.minimax).toBe('MiniMax')
     expect(Object.keys(ASR_VENDOR_NAMES).sort()).toEqual(Object.keys(ASR_VENDOR_DEFAULT_MODEL).sort())
+  })
+})
+
+describe('asrFileProblem：发出去之前先问这一家收不收', () => {
+  // 按十进制 MB 取值：MiniMax 文档那句「50MB」没写进制，应用按小的那一头拦（见 VENDOR_FILE_LIMITS）
+  const MB = 1000 * 1000
+
+  it('MiniMax 超时长就拦，并且把这份到底是多长说出来', () => {
+    // 500 秒是硬上限，而一段超过 8 分钟的媒体对这一行是常态：不拦的话整批跑完才撞到对方原话
+    const problem = asrFileProblem('minimax', { bytes: 5 * MB, seconds: 501 })
+    expect(problem).toContain('500')
+    expect(problem).toContain('501')
+    expect(asrFileProblem('minimax', { bytes: 5 * MB, seconds: 500 })).toBeNull()
+  })
+
+  it('MiniMax 超体积也拦，这一条比时长先判', () => {
+    // 数字出自 formatBytes 那一把尺（#282），这里不另算一份
+    const problem = asrFileProblem('minimax', { bytes: 51 * MB, seconds: 10 })
+    expect(problem).toContain('50.0MB')
+    expect(problem).toContain('51.0MB')
+    expect(asrFileProblem('minimax', { bytes: 50 * MB, seconds: 10 })).toBeNull()
+  })
+
+  it('时长探不到时只按体积判，不拿猜出来的秒数拦人', () => {
+    // ffprobe 挂了不等于这份音频有问题；把它当「没这条信息」，本来能成的转写不该被拦下来
+    expect(asrFileProblem('minimax', { bytes: 5 * MB })).toBeNull()
+    expect(asrFileProblem('minimax', { bytes: 5 * MB, seconds: undefined })).toBeNull()
+  })
+
+  it('OpenAI 兼容档不拦：各家网关放多少并不一样', () => {
+    // 本机起的和内网的兼容网关常常不收这两条上限，替它们拦人会把能用的人挡在门外
+    for (const vendor of ['openai', undefined, 'dashscope']) {
+      expect(asrFileProblem(vendor, { bytes: 500 * MB, seconds: 999999 })).toBeNull()
+    }
   })
 })

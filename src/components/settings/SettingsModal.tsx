@@ -69,6 +69,7 @@ import {
   ttsVendorLabel,
   ttsVendorNeedsVoice,
   ttsVendorOf,
+  ttsVendorProbeVoice,
   ttsVoiceExample,
 } from '@/utils/profileSpec'
 import type {
@@ -893,9 +894,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 apiBase: fields.ttsApiBase ?? '',
                 apiKey: '',
                 model: fields.ttsModel ?? '',
-                // 本地档的编号跟着表单走（换引擎时上面那个下拉会归回第一个）；
-                // 云端档这一页压根没有音色格（1.1.0 起它不在方案里），传空串让主进程回落成
-                // 设置里那一份全局值——测的必须是真配音会发的那一份，不然合格证救不了命
+                // 本地档的编号跟着表单走（换引擎时上面那个下拉会归回第一个）；云端档这一页压根没有
+                // 音色格（1.1.0 起它不在方案里），所以这里只能传空串：收空音色的家由主进程回落到
+                // 设置里那一份全局值，不收的家按 ttsVendorProbeVoice 补一个实测能用的系统音色
+                // （绝不回落全局那一份——那多半是别家的名字，塞过去等于替用户绕过硬校验）
                 voice: ttsLocal ? values.ttsLocalVoice : '',
               }
             : { apiBase: fields.aiApiBase ?? '', apiKey: '', model: fields.aiModel ?? '' }
@@ -1194,6 +1196,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    */
   const ttsVendor = ttsVendorLabel(ttsRow?.values.ttsProvider)
   const ttsVoiceRequired = ttsVendorNeedsVoice(ttsRow?.values.ttsProvider)
+  /** 这一家有没有「实测能用」的系统音色可让自检补位（空串＝没有，那句提示要换成「这页测不了这一家」） */
+  const ttsProbeVoice = ttsVendorProbeVoice(ttsRow?.values.ttsProvider)
   /**
    * 「地址和 Key 留空＝沿用校对那一套」这条回落只对 OpenAI 兼容那一档成立：
    * MiniMax／百炼在校对那边通常没有对应网关，跟着回落就是把请求发到别人家去，得到一个 404/401。
@@ -1505,11 +1509,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       '重启用的是已保存的那一档，表单里换了没保存不算。'
                     : !ttsRow
                       ? testBlockedHint('tts')
-                      : `按「当前使用」那一套（「${ttsVendor}」 · ${profileRowTitle('tts', ttsRow, '没填模型')}）已保存的地址、模型和 Key 合成一句话（约 10 个字），确认这一套能出音频。音色跟磁盘上那一份走——1.1.0 起这一页没有音色格了，旧版存过就用它${
-                          ttsVoiceRequired
-                            ? `，「${ttsVendor}」不收空音色，所以磁盘上没存过时这一句会被当场拦下；先去配音页那一格填一个（例如 ${ttsVoiceExample(ttsRow.values.ttsProvider)}）再回来测`
-                            : '，没存过干脆不发这一项，不影响这次自检'
-                        }。本次只合成一句，按字符计费的接口上这是最小的一笔；弹窗里没点「保存」的那些字不算，地址和 Key 留空时沿用校对那一套${
+                      : `按「当前使用」那一套（「${ttsVendor}」 · ${profileRowTitle('tts', ttsRow, '没填模型')}）已保存的地址、模型和 Key 合成一句话（约 10 个字），确认这一套能出音频。` +
+                        // 音色这一格 1.1.0 从这一页摘掉了，所以这里要说清「这次那个音色是从哪来的」：
+                        // 收空音色的家跟磁盘上那一份；不收的家用主进程实测过的系统音色；
+                        // 连实测值都没有（百炼）就直说这颗按钮测不了这一套，别把人绕到配音页填一个传不过来的值。
+                        (ttsVoiceRequired
+                          ? ttsProbeVoice
+                            ? `这一家不收空音色，而这一页没有音色格，所以自检用实测能用的那一个系统音色「${ttsProbeVoice}」——验的是地址、Key 和模型这三样；你在字幕配音页填的那个音色听不听得到，要到那一页点「试听」才验得到。`
+                            : `这一家不收空音色，而这一页没有音色格，应用也不替你猜一个没实测过的音色 id，所以这颗按钮测不了这一套：要验地址、Key 和模型，去字幕配音页的「音色」那一格填一个（例如 ${ttsVoiceExample(ttsRow.values.ttsProvider)}）再点「试听」——那一次用的就是这套方案。`
+                          : '音色跟磁盘上那一份走——1.1.0 起这一页没有音色格了，旧版存过就用它，没存过干脆不发这一项，不影响这次自检。') +
+                        `本次只合成一句，按字符计费的接口上这是最小的一笔；弹窗里没点「保存」的那些字不算，地址和 Key 留空时沿用校对那一套${
                           ttsOpenaiCompatible ? '' : `——「${ttsVendor}」在校对那边一般没有对应的网关，这两格空着多半就是 404/401，要在这一条里填全`
                         }。`}
                 </span>

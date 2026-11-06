@@ -357,12 +357,15 @@ export function VoiceStudio() {
    */
   const vendorLabel = ttsVendorLabel(configProvider)
   const voiceRequired = ttsVendorNeedsVoice(configProvider)
-  /** 音色那格的占位：留空时真用哪个名字，取决于设置里存没存过（主进程那边是 `voice || base.voice`） */
-  const voicePlaceholder =
-    configVoice ||
-    (voiceRequired
-      ? `「${vendorLabel}」的音色必填，例如 ${ttsVoiceExample(configProvider)}`
-      : '留空＝不发这一项')
+  /**
+   * 音色那格的占位：留空时真用哪个名字，看主进程那次回落（`withOverrides` 是 `voice || base.voice`，
+   * 而 `base.voice` 只在「这一家收空音色」时才从设置里带过来，见 getTTSConfig）。
+   * 必填那两家不能先念 configVoice：那半多半是 1.1.0 从旧方案迁过来的外家名字（alloy），
+   * 摆在框里等于劝人照抄一个当场会被拦下的值。
+   */
+  const voicePlaceholder = voiceRequired
+    ? `「${vendorLabel}」的音色必填，例如 ${ttsVoiceExample(configProvider)}`
+    : configVoice || '留空＝不发这一项'
 
   return (
     <div className="voice-studio">
@@ -506,13 +509,17 @@ export function VoiceStudio() {
                   (voiceRequired
                     ? `这一套的厂商是「${vendorLabel}」，它要音色才出声，所以这一格不是可选项：填一个音色 id（例如 ${ttsVoiceExample(configProvider)}），名单以对方文档为准。填错由接口回原话。`
                     : '这一档模型能念哪些音色由服务商决定，应用不替你猜，所以这一格手输——OpenAI 兼容接口常见的六个是 alloy、echo、fable、onyx、nova、shimmer（中文听感上 onyx 偏沉、nova 偏亮），换网关时以对方给的名字为准。填错由接口回原话。') +
-                  // 留空到底等于什么，取决于根上那一份 `ttsVoice` 有没有值（`withOverrides` 是 voice || base.voice）。
-                  // 1.1.0 起这一页是唯一入口、它又不写回设置，所以旧版存下来的那个名字会一直当默认——
-                  // 那句「留空＝不指定音色」在这时候就是说谎：留空照样把 alloy 发出去了。
-                  (configVoice
-                    ? `留空＝用设置里存着的那一份「${configVoice}」，要换就在这儿填一个名字（只作用于这一批，不写回设置）。`
-                    : voiceRequired
-                      ? `留空＝点「开始配音」会被当场拦下，因为「${vendorLabel}」不收空音色。`
+                  // 留空等于什么，先问这一家收不收空音色，收的话才轮得到根上那份 `ttsVoice`。
+                  // 反过来写就是说谎：1.1.0 把音色从方案里摘出来时那一份旧名字（多半是 alloy）
+                  // 还留在设置根上，而必填那两家的 `base.voice` 现在是空串（getTTSConfig 按厂商
+                  // 落成空），所以「留空＝用设置里那一份 alloy」对 MiniMax／百炼已经不成立，
+                  // 界面上这一句要和「开始配音」当场拦下的那句（ttsConfigProblem）对得上。
+                  (voiceRequired
+                    ? `留空＝点「开始配音」会被当场拦下，因为「${vendorLabel}」不收空音色${
+                        configVoice ? `（设置里存过的那一份「${configVoice}」是别家的名字，这一家不认）` : ''
+                      }。`
+                    : configVoice
+                      ? `留空＝用设置里存着的那一份「${configVoice}」，要换就在这儿填一个名字（只作用于这一批，不写回设置）。`
                       : '留空＝不指定音色，请求里干脆不发这一项，有的模型本来就不收这一项。')}
           </p>
 

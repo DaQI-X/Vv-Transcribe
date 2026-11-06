@@ -111,6 +111,8 @@ const TTS_VENDOR_UI: Record<
     label: string
     voiceRequired: boolean
     voiceExample: string
+    /** 「测试连接」在界面没带音色时补的那一个，空串＝这一家没有实测过的值可补（与主进程 VENDOR_SHAPES 同一份，见 tests/ttsVendor.test.ts 的对账） */
+    probeVoice: string
     apiBaseExample: string
     modelExample: string
   }
@@ -119,6 +121,7 @@ const TTS_VENDOR_UI: Record<
     label: 'OpenAI 兼容接口',
     voiceRequired: false,
     voiceExample: 'alloy',
+    probeVoice: '',
     apiBaseExample: 'https://api.openai.com',
     modelExample: 'tts-1',
   },
@@ -126,6 +129,7 @@ const TTS_VENDOR_UI: Record<
     label: 'MiniMax',
     voiceRequired: true,
     voiceExample: 'male-qn-qingse',
+    probeVoice: 'male-qn-qingse',
     apiBaseExample: 'https://api.minimax.cn',
     modelExample: 'speech-2.8-hd',
   },
@@ -133,6 +137,9 @@ const TTS_VENDOR_UI: Record<
     label: '阿里云百炼（CosyVoice）',
     voiceRequired: true,
     voiceExample: 'longanyang',
+    // 这个举例值没发过一次真请求（本机没有百炼的 Key），所以自检不能拿它当默认值——
+    // 界面上那句话因此要说「这一页测不了这一家」，而不是替用户点一次注定被拒的合成
+    probeVoice: '',
     apiBaseExample: 'https://dashscope.aliyuncs.com',
     modelExample: 'cosyvoice-v3-flash',
   },
@@ -155,6 +162,15 @@ export function ttsVendorLabel(raw: unknown): string {
 /** 这一家收不收音色：收的话「留空＝不发这一项」那句话就是谎话，得换成必填口径 */
 export function ttsVendorNeedsVoice(raw: unknown): boolean {
   return TTS_VENDOR_UI[ttsVendorOf(raw)].voiceRequired
+}
+
+/**
+ * 「测试连接」在界面没带音色时能补的那一个（与主进程 `ttsVendorProbeVoice` 同一份值，
+ * tests/ttsVendor.test.ts 里对账）。空串＝这一家没有实测过的音色可补，那句提示要说
+ * 「这一页测不了这一家，去配音页试听」，不能写成「自检会用某某音色合成」——那是谎话。
+ */
+export function ttsVendorProbeVoice(raw: unknown): string {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].probeVoice
 }
 
 /** 音色那一格的举例值（只做占位提示，不是可选清单——两家的系统音色表都写在对方文档里） */

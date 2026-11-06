@@ -29,7 +29,7 @@ import { rename } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { normalizeLocalTtsEngine, type LocalTtsEngineId } from './localTtsEngine'
-import { normalizeTtsVendor, type TtsVendorId } from './ttsVendor'
+import { normalizeTtsVendor, ttsVendorNeedsVoice, type TtsVendorId } from './ttsVendor'
 import { normalizeAsrVendor } from './asr/asrVendor'
 import {
   CORRUPT_SETTINGS_PREFIX,
@@ -1250,14 +1250,41 @@ export async function setDefaultProfile(
 }
 
 /**
+ * 应用自己往根地址后面接的那几条路径，逐条抄自三个拼请求的地方：
+ * `ttsVendor.VENDOR_SHAPES`、`asrVendor.buildAsrRequest`、`ai/openaiCompatible`。
+ * 这张表只用来**认用户粘错的尾巴**，不用来拼请求——拼法仍以那三处为准，
+ * 新增一条端点而忘了登记到这里的代价是「粘贴完整端点又变成 404」，
+ * `tests/settingsNormalize.test.ts` 里有一条对账测试专门盯这件事。
+ *
+ * 表里只放**真的会发出去**的那几条：`/v1/responses`、`/v1/messages` 这类「以后也许接」的先不登记，
+ * 因为认下它们的尾巴只会把一份本来就不兼容的配置洗成「看着像能用」——应用照旧发
+ * `/v1/chat/completions` 加 Bearer，撞过去的还是那句错，只是这次连用户填的原话都看不到了。
+ */
+const APPENDED_ENDPOINT_PATHS: readonly string[] = [
+  '/v1/audio/transcriptions',
+  '/v1/speech_to_text',
+  '/v1/audio/speech',
+  '/v1/t2a_v2',
+  '/api/v1/services/audio/tts/speechsynthesizer',
+  '/v1/chat/completions',
+]
+
+/**
  * 接口地址归一化。
  * 各家文档常直接给 `https://api.openai.com/v1` 这种带后缀的形式，而请求统一拼成
  * `${apiBase}/v1/...`，所以这里容忍末尾斜杠和多余的 /v1。
  * 转写、校对、以及设置里的「测试连接」必须共用这一个实现，否则测试用归一化后的地址、
- * 干活用原始地址，就会出现「测试说可用、一转写就 404」这种最难查的分歧。
+ * 干活用原始地址，就会出现「测试说可用、一转写就 404」这种最难查的分叉。
+ *
+ * 再把「对方文档里那条完整端点」也认下来（见 APPENDED_ENDPOINT_PATHS）：用户照着文档整段复制
+ * 粘进来的就是 `https://api.minimax.cn/v1/speech_to_text`，而应用自己还要再接一次路径，
+ * 拼出来是 `.../v1/speech_to_text/v1/speech_to_text`——症状是一句 404，而他填的明明是对方的原话。
  */
 export function normalizeApiBase(raw: string): string {
-  return (raw || '').trim().replace(/\/+$/, '').replace(/\/v1$/, '')
+  const noSlash = (raw || '').trim().replace(/\/+$/, '')
+  const tail = APPENDED_ENDPOINT_PATHS.find((path) => noSlash.toLowerCase().endsWith(path))
+  const rooted = tail ? noSlash.slice(0, -tail.length).replace(/\/+$/, '') : noSlash
+  return rooted.replace(/\/v1$/i, '')
 }
 
 /**
@@ -1346,18 +1373,28 @@ export async function getTTSConfig(profileId?: string | null): Promise<{
 }> {
   const settings = await loadSettings({ tts: profileId ?? undefined })
   const engine = normalizeTtsEngine(settings.ttsEngine)
+  const vendor = normalizeTtsVendor(settings.ttsProvider)
   return {
     engine,
     // 本地档不看这一项（那边连地址和 Key 都不参与），但它在两份配置里都算得出来，
     // 投出来比「本地档时留个空」少一处「这个字段什么时候有意义」的分叉
-    vendor: normalizeTtsVendor(settings.ttsProvider),
+    vendor,
     apiKey: settings.ttsApiKey || settings.aiApiKey,
     apiBase:
       normalizeApiBase(settings.ttsApiBase) ||
       normalizeApiBase(settings.aiApiBase) ||
       'https://api.openai.com',
     model: settings.ttsModel,
-    voice: engine === 'local' ? normalizeLocalVoice(settings.ttsLocalVoice) : settings.ttsVoice,
+    // 根上那一份 `ttsVoice` 是 1.1.0 把音色从方案里摘出来时留下的位置，界面上已经没有格子能改它
+    // （改的是配音页那一格，不落盘）。所以它只剩两种来源：旧方案迁过来的那一次，和空串。
+    // 把它当默认音色递给 OpenAI 兼容是原本的意思；递给 MiniMax 或百炼就是拿一家的音色名
+    // 去问另一家——界面已经写了「这一家不收空音色」，落回一个外来音色等于替用户把那句话绕过去。
+    voice:
+      engine === 'local'
+        ? normalizeLocalVoice(settings.ttsLocalVoice)
+        : ttsVendorNeedsVoice(vendor)
+          ? ''
+          : settings.ttsVoice,
     localEngine: normalizeLocalTtsEngine(settings.ttsLocalEngine),
   }
 }

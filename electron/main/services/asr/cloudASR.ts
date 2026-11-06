@@ -6,7 +6,7 @@
  */
 import type { ASRProvider, ASRSegment, ASRProgress } from './types'
 import { toSimplified } from './simplifyChinese'
-import { buildAsrRequest } from './asrVendor'
+import { asrFileProblem, buildAsrRequest } from './asrVendor'
 
 interface CloudASRConfig {
   apiKey: string
@@ -62,9 +62,15 @@ export class CloudASRProvider implements ASRProvider {
 
     const { readFile } = await import('node:fs/promises')
     const { basename } = await import('node:path')
+    const { probeFile } = await import('../audioProcessor')
 
     const audioBuffer = await readFile(audioFilePath)
     const fileName = basename(audioFilePath)
+    // 时长只用来判「这一家收不收这么长」，探不到就当没这条信息（体积那一条仍然拦），
+    // 不能因为 ffprobe 失败就把一次本来能成的转写拦下来
+    const seconds = await probeFile(audioFilePath)
+      .then((meta) => meta.duration)
+      .catch(() => undefined)
 
     // 一家的字段名与路径都在这一个调用里问出来，两个调用点（这里 + 测试连接）不许各拼一遍
     const shape = buildAsrRequest(this.config.vendor, {
@@ -72,6 +78,11 @@ export class CloudASRProvider implements ASRProvider {
       model: this.config.model,
       language: options.language ?? '',
     })
+
+    // 上限拦在发出去之前：MiniMax 的 500 秒对一整段媒体是常态而非例外，
+    // 让它自己回一句对方原话，用户在进度条跑完之前什么也看不到
+    const fileProblem = asrFileProblem(this.config.vendor, { bytes: audioBuffer.length, seconds })
+    if (fileProblem) throw new Error(fileProblem)
 
     const formData = new FormData()
     const blob = new Blob([audioBuffer])
@@ -86,6 +97,8 @@ export class CloudASRProvider implements ASRProvider {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.config.apiKey}`,
+        // 这一家要放在头部的项（例如 MiniMax 的语言）由适配层给，这里不猜
+        ...shape.headers,
       },
       body: formData,
       signal: this.abortController.signal,
@@ -93,7 +106,11 @@ export class CloudASRProvider implements ASRProvider {
 
     if (!response.ok) {
       const errorText = await response.text()
-      throw new Error(`ASR API 请求失败 (${response.status}): ${errorText}`)
+      // 带上最终 URL：用户照文档粘的就是这条路径，看不出应用在后面又接了一层，
+      // 「404」这三个字本身没法定位，念出打出去的那条地址才能自查
+      throw new Error(
+        `云端转写接口返回 ${response.status}（POST ${shape.url}）：${errorText.slice(0, 200) || '对方没有附带说明'}`
+      )
     }
 
     options.onProgress?.({ percent: 80 })

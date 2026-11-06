@@ -38,6 +38,7 @@ import {
   type TTSTestValues,
   type TestOutcome,
 } from '../services/connectionTestService'
+import { normalizeTtsVendor, ttsVendorNeedsVoice } from '../services/ttsVendor'
 import { logger } from '../services/logger'
 import { ipcHandle } from './guard'
 
@@ -255,8 +256,8 @@ export function registerSettingsHandlers() {
         const needSavedKey = !isLocalTTS && !formKey.trim()
         const needSavedBase = !isLocalTTS && kind === 'tts' && !formBase.trim()
         // 云端这一腿的音色面板上没有格子（1.1.0 起它既不在方案里、也不在这页填，界面上那次覆盖不算），
-        // 所以表单传来的永远是空串。空串不能当成「不测音色」——真配音发的是设置里那一份全局值，
-        // 自检就得按同一份发，否则测出来的合格证和实际跑的又不是一回事了。
+        // 所以表单传来的永远是空串。空串不能当成「不测音色」——OpenAI 兼容那档真配音发的是
+        // 设置里那一份全局值，自检就得按同一份发；要不要回落按厂商分叉，见下面 probeNeedsVoice。
         const needSavedVoice = !isLocalTTS && kind === 'tts' && !String((values as { voice?: unknown }).voice ?? '').trim()
         // 厂商（1.1.1）同音色一个道理：这一格在方案弹窗里，配音页那颗按钮不带它。
         // 不回落就会出现「按 OpenAI 兼容的形状测绿了、实际那一条方案选的是 MiniMax、配音撞 404」。
@@ -285,11 +286,21 @@ export function registerSettingsHandlers() {
           }
           // 测试用的 Key 必须和真正干活的是同一把：表单留空时回落到已保存的那把，
           // 否则改个接口地址就得重贴 Key，测出来永远是「还没填」
+          //
+          // 音色这一项只在「这一家不收空音色」时不回落：根上那份 `ttsVoice` 是 1.1.0 从旧方案
+          // 迁过来的历史值（多半还是 alloy），把外家的音色名塞给 MiniMax，自检就会替用户把
+          // 界面上那句「这一家不收空音色」绕过去，还可能默默换个音色念一句话。
+          // 空着交给 testTTSConfig：它按厂商补一个**实测能用**的系统音色（ttsVendorProbeVoice），
+          // 补不出来就说明这一页测不了这一家、要到配音页试听——而不是拿一个外家值蒙过去。
+          const probeProvider = needSavedProvider
+            ? saved.ttsProvider
+            : String((values as { provider?: unknown }).provider ?? '')
+          const probeNeedsVoice = ttsVendorNeedsVoice(normalizeTtsVendor(probeProvider))
           probe = {
             ...values,
             apiKey: needSavedKey ? effectiveKey : values.apiKey,
             apiBase: needSavedBase ? saved.aiApiBase : values.apiBase,
-            ...(needSavedVoice ? { voice: saved.ttsVoice } : {}),
+            ...(needSavedVoice && !probeNeedsVoice ? { voice: saved.ttsVoice } : {}),
             ...(needSavedProvider ? { provider: saved.ttsProvider } : {}),
           }
         }

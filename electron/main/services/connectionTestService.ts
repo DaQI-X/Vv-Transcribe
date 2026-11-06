@@ -33,6 +33,7 @@ import {
   normalizeTtsVendor,
   readSpeechAudio,
   ttsVendorNeedsVoice,
+  ttsVendorProbeVoice,
   TTS_VENDOR_NAMES,
   type TtsAudioResult,
 } from './ttsVendor'
@@ -119,7 +120,9 @@ const STATUS_HINTS: Record<number, string> = {
   400: '请求被拒绝，最常见的原因是模型名写错',
   401: '鉴权失败：API Key 无效、已过期，或该服务不只接受 Bearer 方式',
   403: 'API Key 有效，但没有访问这个模型/接口的权限',
-  404: '接口或模型不存在：检查 API Base 是否填成了站点根地址，以及模型名是否拼写正确',
+  // 404 的两种成因要分开说：地址填深了（粘了完整端点）和模型名不存在。
+  // 旧那句「检查是否填成站点根地址」把方向写反了——根地址才是对的，这次 404 就是这么来的
+  404: '接口或模型不存在：API Base 那格只该填到域名根为止（形如 https://服务商域名），接口路径由应用自己接上；也可能是模型名不存在',
   405: '这个地址不接受 POST，可能填成了网页地址而不是 API 地址',
   408: '服务端处理超时',
   413: '请求体过大（本次只发了 1 秒静音音频，正常不该命中）',
@@ -127,13 +130,19 @@ const STATUS_HINTS: Record<number, string> = {
   429: '被限流：额度用尽或并发过高',
 }
 
-function httpFail(status: number, body: string): TestOutcome {
+/**
+ * `url` 是这一次真的打出去的那个地址（归一化后的根 + 应用自己接上的路径）。
+ * 报 404 时只说「检查地址」用户没法自查：他粘的是文档里的原话，看不出应用在后面又接了一层。
+ * 把最终 URL 念出来，路径拼错这件事当场就能自己看出来；这里绝不带 Key。
+ */
+function httpFail(status: number, body: string, url?: string): TestOutcome {
   const hint = STATUS_HINTS[status] || (status >= 500 ? '服务端正出错，稍后再试' : '服务返回了错误')
   const snippet = body.replace(/\s+/g, ' ').trim().slice(0, 200)
+  const where = url ? `。本次请求打的是 ${url}` : ''
   return {
     level: 'fail',
     title: `服务返回 ${status}`,
-    message: snippet ? `${hint}。服务端的说明：${snippet}` : hint,
+    message: snippet ? `${hint}${where}。服务端的说明：${snippet}` : `${hint}${where}`,
   }
 }
 
@@ -293,7 +302,9 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
   try {
     response = await fetch(shape.url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${values.apiKey.trim()}` },
+      // 展开适配层给的额外头部（MiniMax 的语言走头部）：这里不列白名单，
+      // 否则「自检少发一条头、真转写发了」又成了两处形状对不上的老毛病
+      headers: { Authorization: `Bearer ${values.apiKey.trim()}`, ...shape.headers },
       body: form,
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     })
@@ -302,7 +313,7 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
   }
 
   const latencyMs = Date.now() - started
-  if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''))
+  if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''), shape.url)
 
   let body: Record<string, unknown>
   try {
@@ -331,6 +342,19 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
     : ''
   // 静音样本本来就转不出字，segments 是空数组不代表不支持分段；字段在不在才是判据
   if (!Array.isArray(body.segments)) {
+    // 但 MiniMax 这条对「判据」是例外，而且是原厂行为：没听出字时它干脆不给 segments 这一项
+    // （实测返回的键只有 text / duration / n_speakers / trace_id）。真给音频时它给的是秒级
+    // start/end（实测过），所以这里报「不支持分段、建议换 whisper-1」是把一句对的判断
+    // 说成了错的建议——用户照提示换服务，而问题本来不存在。
+    if (vendor === 'minimax') {
+      return {
+        level: 'pass',
+        title: '云端转写可用',
+        message:
+          `${originNote}耗时 ${formatLatency(latencyMs)}，地址、Key 和模型「${model}」都通。` +
+          '分段时间戳这次没验到：这一家对没听出字的样本直接不返回 segments，真实转写里再看',
+      }
+    }
     return {
       level: 'warn',
       title: '能转写，但不返回分段时间戳',
@@ -358,9 +382,10 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
   const originNote = usedDefault ? '（模型留空，本次用的是默认值 gpt-4o-mini）' : ''
 
   const started = Date.now()
+  const chatUrl = `${base}/v1/chat/completions`
   let response: Response
   try {
-    response = await fetch(`${base}/v1/chat/completions`, {
+    response = await fetch(chatUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${values.apiKey.trim()}` },
       // 与真实校对请求保持同一契约：同样的 prompt、同样要求只回 JSON、同样的 temperature
@@ -377,7 +402,7 @@ export async function testAIConfig(values: AITestValues): Promise<TestOutcome> {
   }
 
   const latencyMs = Date.now() - started
-  if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''))
+  if (!response.ok) return httpFail(response.status, await response.text().catch(() => ''), chatUrl)
 
   const data = (await response.json().catch(() => null)) as {
     choices?: Array<{ message?: { content?: unknown } }>
@@ -526,7 +551,14 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
 
   // 模型不替用户猜，空着就是没配；音色看不选的那一家（下面按 vendorNeedsVoice 分叉）。
   const model = values.model.trim()
+  // 界面那格空着时补一个「实测能用」的音色：必填那几家在设置这一页没有音色格（1.1.0 摘掉的），
+  // 不补就是这颗按钮对它们永远红，而提示让人去配音页填、那一格的值又不落盘——回来再点还是红。
+  // 补的是这一家的系统音色（ttsVendorProbeVoice 只收实测过的那一个），跟用户自己填的那个不是一回事，
+  // 所以结论里要点名；猜不出来的家（百炼）留空，让下面那句 fail 说「这页测不了，去配音页试听」。
+  const probeVoice = ttsVendorProbeVoice(vendor)
   const voice = values.voice.trim()
+  const usedVoice = voice || probeVoice
+  const voiceSubstituted = !voice && !!probeVoice
   if (!model) {
     return {
       level: 'fail',
@@ -535,12 +567,13 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
         '拿校对的 chat 模型去调会被直接拒；填在「设置 → 配音配置」里当前使用那一条的「配音模型」那一格',
     }
   }
-  if (ttsVendorNeedsVoice(vendor) && !voice) {
+  if (ttsVendorNeedsVoice(vendor) && !usedVoice) {
     return {
       level: 'fail',
-      title: '还测不了',
-      message: `${TTS_VENDOR_NAMES[vendor]} 必须有音色才能出声，而现在这一批没指定音色。` +
-        '去字幕配音页的「音色」那一格填一个该家的音色 id（以对方文档为准）再测',
+      title: '这一页测不了这一家',
+      message: `${TTS_VENDOR_NAMES[vendor]} 必须有音色才出声，而设置这一页没有音色格，` +
+        `应用也不替你猜一个没实测过的音色 id。要验这一套的地址、Key 和模型，` +
+        '去字幕配音页的「音色」那一格填一个（以对方文档为准）再点「试听」——那一次用的就是这套方案',
     }
   }
 
@@ -548,7 +581,7 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     apiBase: base,
     apiKey: values.apiKey.trim(),
     model,
-    voice,
+    voice: usedVoice,
     speed: 1,
     text: TTS_PROBE_TEXT,
   })
@@ -576,7 +609,12 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     // 适配层那句已经是「发生了什么 + 能改哪一格」，原样贴出来，不再翻成通用文案
     const message = err instanceof Error ? err.message : String(err)
     logger.warn('ConnTest', 'tts probe got no audio', { vendor, model, message })
-    return { level: 'fail', title: '配音接口没出声', message }
+    // 这个 id 是应用补的、不是用户填的，不点名就会让人去配音页改一个本来就没错的音色
+    return {
+      level: 'fail',
+      title: '配音接口没出声',
+      message: message + (voiceSubstituted ? `（本次的音色「${probeVoice}」是应用补的，不是你填的那一个）` : ''),
+    }
   }
 
   const bytes = audio.bytes.length
@@ -584,15 +622,23 @@ export async function testTTSConfig(values: TTSTestValues): Promise<TestOutcome>
     return {
       level: 'fail',
       title: '接口没返回音频',
-      message: `耗时 ${formatLatency(latencyMs)}，body 是 0 字节。模型名或音色 id 很可能不被这家支持，以服务商文档为准`,
+      message: `耗时 ${formatLatency(latencyMs)}，body 是 0 字节。模型名或音色 id 很可能不被这家支持，以服务商文档为准` +
+        (voiceSubstituted ? `（音色「${probeVoice}」是应用补的，这一格在设置里没有入口，不用去配音页找它改）` : ''),
     }
   }
 
-  logger.info('ConnTest', 'tts probe done', { vendor, model, voice, latencyMs, bytes })
+  logger.info('ConnTest', 'tts probe done', { vendor, model, voice: usedVoice, latencyMs, bytes })
   return {
     level: 'pass',
     title: '配音接口可用',
     // 没带音色时不能写成「tts-1 · 」：那一串看着像音色被吃了，而这一档本来就没指定音色
-    message: `耗时 ${formatLatency(latencyMs)}，用「${model}${voice ? ` · ${voice}` : '（未指定音色）'}」合成出 ${audioSize(bytes)}${audio.note ? `（${audio.note}）` : ''}。本次只合成一句，按字符计费的接口上这是最小的一笔`,
+    message: `耗时 ${formatLatency(latencyMs)}，用「${model}${usedVoice ? ` · ${usedVoice}` : '（未指定音色）'}」` +
+      `合成出 ${audioSize(bytes)}${audio.note ? `（${audio.note}）` : ''}。` +
+      // 补来的音色只证明「这一家认这个 id、这条端点能出声」，不证明用户自己填的那个听得到——
+      // 那句要到配音页点「试听」才算，别说成「这一套全都通了」
+      (voiceSubstituted
+        ? `这次用的是${TTS_VENDOR_NAMES[vendor]}的系统音色「${probeVoice}」（实测能用那一个），设置这一页没有音色格；`
+        : '') +
+      '本次只合成一句，按字符计费的接口上这是最小的一笔',
   }
 }
