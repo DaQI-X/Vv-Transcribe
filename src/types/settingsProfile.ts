@@ -11,15 +11,22 @@ export type ProfileCapability = 'asr' | 'ai' | 'tts'
  * 一条方案的脱敏形状。`values` 用的键名是界面上那套扁平名（asrApiBase / ttsLocalEngine / …），
  * 和 getSettings 的脱敏视图同一套，所以「切到另一套方案」
  * 就是把这一份盖到表单身上，渲染层不需要再存一份字段对照表。
- * 转写这一档此刻只有凭据三项（地址 / Key / 模型）：模式、本地档位、转写语言是全局段，
- * 跟着 `settings:get` 那份视图走，不在任何一条方案里。
- * 密钥的键名也不在里面：表单里那一格永远从空开始（留空＝不修改）。
+ * 转写这一档此刻是厂商 / 地址 / Key / 模型，讯飞那一档另加 AppID：模式、本地档位、转写语言
+ * 是全局段，跟着 `settings:get` 那份视图走，不在任何一条方案里。
+ * 密文（apiKey、讯飞那把 apiSecret）的键名也不在 `values` 里：表单里那两格永远从空开始
+ * （留空＝不修改），跨 IPC 只带状态位。
  */
 export interface ProfileView {
   id: string
   name: string
   values: Record<string, string>
   keyStatus: 'none' | 'encrypted' | 'plaintext' | 'unreadable'
+  /**
+   * apiKey 之外那几把密文的状态，键名同样是扁平名（此刻只有 `asrApiSecret`）。
+   * 没有第二把密文的那几档是空对象。为什么不并进 keyStatus：那一位三档都在读，
+   * 改成一张表等于让校对与配音凭空多一层。
+   */
+  secretStatus: Record<string, 'none' | 'encrypted' | 'plaintext' | 'unreadable'>
 }
 
 /**

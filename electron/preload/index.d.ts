@@ -353,9 +353,26 @@ export interface TestOutcome {
 export interface ConnectionTestValues {
   /** 转写用：local 时主进程改查本机引擎，不发任何网络请求 */
   provider?: string
+  /**
+   * 转写用：云端走哪一家（'' | 'openai' | 'minimax' | 'iflytek'）。
+   * 界面必须带这一格：不带的话「当前使用」那条是别家、自检却按 OpenAI 兼容的端点去发，绿了也不作数。
+   */
+  vendor?: string
+  /**
+   * 讯飞转写用的另外两样凭据（1.1.2，#343）。AppID 是明文，界面直接把方案里那一份带过来；
+   * APISecret 和 apiKey 一样**永远传空串**——密文不过 IPC，主进程按 profileId 回落到它保存的那一份。
+   */
+  appId?: string
+  apiSecret?: string
   apiBase: string
   apiKey: string
   model: string
+  /** 配音用：'cloud' | 'local'，本地档不发任何网络请求，改起引擎真合成一句 */
+  engine?: string
+  /** 配音用：本地档要用哪个引擎（sherpa-onnx-vits-zh-ll / kokoro-multi-lang-v1_1） */
+  localEngine?: string
+  /** 配音用：只有豆包收这一项（X-Api-Resource-Id，1.1.2 #342） */
+  resourceId?: string
   /**
    * 配音用：云端＝服务商的音色名（可留空，留空＝请求里干脆不带这一项），本地＝sid 编号。
    * 只有模型是必填——音色从 1.1.0 起不再拦人，各家网关收不收这一项、收什么值都不一样。
@@ -373,15 +390,25 @@ export type SecretStatus = 'none' | 'encrypted' | 'plaintext' | 'unreadable'
  * 一条方案的脱敏形状。`values` 的键名用的是**界面上那套扁平名**（asrApiBase / ttsLocalEngine / …），
  * 和 getSettings 的脱敏视图同一套名字，所以表单可以直接把这一份
  * 覆盖到自己正在编辑的那一组上，渲染层不留第二份字段对照表。
- * 每一项都属于 `CAPABILITY_FIELDS` 里那一档：转写此刻只有凭据三项（地址 / Key / 模型），
- * 模式、本地档位、转写语言是全局段，跟着 `settings:get` 那份视图走，不在任何一条方案里。
- * apiKey 照旧不在这里——跨 IPC 只带状态位。
+ * 每一项都属于 `CAPABILITY_FIELDS` 里那一档：转写此刻是厂商 / 地址 / Key / 模型，讯飞那一档另加
+ * AppID（明文，它是要发出去的参数）；模式、本地档位、转写语言是全局段，
+ * 跟着 `settings:get` 那份视图走，不在任何一条方案里。
+ * 密文（apiKey、以及讯飞那把 apiSecret）照旧不在 `values` 里——跨 IPC 只带状态位。
  */
 export interface ProfileView {
   id: string
   name: string
   values: Record<string, string>
   keyStatus: SecretStatus
+  /**
+   * 这一条方案里除 apiKey 之外那几把密文的状态，键名是界面上那套扁平名（此刻只有转写档的
+   * `asrApiSecret`，讯飞用的第二把凭据，1.1.2 #343）。
+   * 单独一张表而不是把它塞进 `values`：`values` 里放的是**值**，密文没有值可给，
+   * 只能给状态；而 `keyStatus` 已经是「apiKey 那一项」的专用位，三档都在读它，
+   * 把它改成一张表等于让另外两档凭空多一层。
+   * 没有第二把密文的那几档，这一项是空对象。
+   */
+  secretStatus: Record<string, SecretStatus>
 }
 
 /**

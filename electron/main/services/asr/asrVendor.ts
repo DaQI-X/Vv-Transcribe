@@ -5,15 +5,21 @@
  * 真实转写（cloudASR）与设置里那颗「测试连接」（connectionTestService）共用这几函数——
  * 分叉过一次就是「自检报可用、一转写就 404」，#220/#227 记的就是这类分歧。
  *
- * 两家的响应解析**故意没分叉**：OpenAI 兼容与 MiniMax 都给 `segments[].{start,end,text}`
+ * 前两家的响应解析**故意没分叉**：OpenAI 兼容与 MiniMax 都给 `segments[].{start,end,text}`
  * （单位都是秒），多的字段都是可选的（OpenAI 的 `avg_logprob`、MiniMax 的 `speaker`），
- * 所以读响这一层共用一个函数。真出现第三家不给时间的，再在这里加一档，而不是让 cloudASR 猜。
+ * 所以读响这一层共用一个函数。讯飞给的是另一套（订单里一段双层字符串化的 lattice），
+ * 那份解析也在 `iflytekAsr.ts`，但**出口是同一个 `AsrReadResult`**——调用方拿到手还是「秒 + 段」。
  *
  * 口径与配音那一侧一致：
  * - OpenAI 兼容是**默认档**，也是磁盘上没有厂商那一项时（1.1.1 之前建出来的方案）的读法。
  * - 厂商只决定请求形状，不决定「走不走云端」——后者是全局段 `asrProvider`（云端／本地）那一份，
  *   两个名字挨得很近，但它们不是一回事，取值时别混。
  * - 服务商的错误原话照旧由调用方递给界面，这里不拦、不猜。
+ *
+ * 讯飞（#343）是第三家，也是唯一一家**不走 multipart** 的：它的录音文件转写大模型版是
+ * 「上传音频换订单号 → 轮询订单取结果」两步异步接口，每趟请求还要现算一次 HMAC 签名，
+ * 一次调用产不出一份固定形状，所以那份形状整个收在 `iflytekAsr.ts` 里，
+ * 这里的 `buildAsrRequest` 只服务前两家（见该函数的守卫）。
  *
  * 配音那一侧收了豆包（`ttsVendor.ts`），转写这一侧没有，这不是漏掉的：豆包在架的转写接口
  * 只收**公网可访问的音频 URL**（`audio.url` 必填，文档里已经没有 `audio.data` 那一条），
@@ -26,9 +32,9 @@ import { formatBytes } from '../../../../src/utils/formatBytes'
 import { appendApiPath } from '../apiPath'
 
 /** 界面上「厂商」那格的取值；`openai` 同时是「留空／不认识」的落点 */
-export type AsrVendorId = 'openai' | 'minimax'
+export type AsrVendorId = 'openai' | 'minimax' | 'iflytek'
 
-const VENDOR_IDS: readonly string[] = ['openai', 'minimax']
+const VENDOR_IDS: readonly string[] = ['openai', 'minimax', 'iflytek']
 
 /**
  * 空串、老文件里没这一项、手改出来的怪值一律按 OpenAI 兼容处理。
@@ -45,12 +51,35 @@ export function normalizeAsrVendor(raw: unknown): AsrVendorId {
 export const ASR_VENDOR_NAMES: Record<AsrVendorId, string> = {
   openai: 'OpenAI 兼容接口',
   minimax: 'MiniMax',
+  iflytek: '讯飞（录音文件转写大模型版）',
 }
 
-/** 各家没填模型名时的兜底：这一项只有厂商自己说得准，界面留空时按它走 */
+/**
+ * 各家没填模型名时的兜底：这一项只有厂商自己说得准，界面留空时按它走。
+ *
+ * 讯飞那一格是空串，因为**这一家的接口根本没有模型这一项**（上传那张参数表里没有它，
+ * 选的是 `language` 与 `pd` 领域参数）。空串在这里不是「还没兜底」，而是「没有这一格」——
+ * 界面上那一格按厂商不出现（`profileSpec.ts` 的 `visibleWhen`），别在这儿替它编一个名字。
+ */
 export const ASR_VENDOR_DEFAULT_MODEL: Record<AsrVendorId, string> = {
   openai: 'whisper-1',
   minimax: 'asr-1.0',
+  iflytek: '',
+}
+
+/**
+ * 这一家是不是走「上传拿订单号 → 轮询取结果」那条异步链路。
+ *
+ * 判据放在这一层（而不是让调用方自己 `vendor === 'iflytek'`）是因为它是**厂商的属性**，
+ * 与「这一家是谁」同一件事：真转写（`cloudASR`）、设置里那颗「测试连接」
+ * （`connectionTestService`）、以及界面上那句「这一家转写要等，不是点完就出字」都要按它分叉，
+ * 三处各写一遍 id 比较，就是下一次加一家时漏掉一处的形状（#220/#227）。
+ *
+ * 走这条链路的那一家，请求形状由 `iflytekAsr.ts` 收口，**不经过** `buildAsrRequest`——
+ * 它的签名每趟都得现算，一次调用产不出一份固定形状。
+ */
+export function asrVendorUsesOrderFlow(rawVendor: unknown): boolean {
+  return normalizeAsrVendor(rawVendor) === 'iflytek'
 }
 
 /** 转写请求的除文件以外那部分；`url` 里的 apiBase 必须已经过 `normalizeApiBase` */
@@ -82,9 +111,16 @@ export interface AsrRequestInput {
  * 它把 OpenAI 兼容只写在文本接口上，音频这条不是同一个路径，所以不能沿用 openai 那一支。
  * `timestamp_level=sentence` 是必填取向：这一项留空时返回里有没有句级时间戳并不确定，
  * 而字幕编辑器整条链路靠的就是 start/end，缺了它就只能给一整段。
+ *
+ * 讯飞不在这儿：它那份形状（两步异步 + 每趟现算签名）由 `iflytekAsr.ts` 收口，
+ * 走不到这个函数。守卫是抛错而不是静默落回 openai 那一支——落回去的结果是一条
+ * 「自检过了、真转写 404」的分叉，正是 #220/#227 那个形状。
  */
 export function buildAsrRequest(rawVendor: unknown, input: AsrRequestInput): AsrRequestShape {
   const vendor = normalizeAsrVendor(rawVendor)
+  if (vendor === 'iflytek') {
+    throw new Error('讯飞转写不走 buildAsrRequest，请用 iflytekAsr.ts 的 runIflytekOrderFlow')
+  }
   const model = input.model.trim() || ASR_VENDOR_DEFAULT_MODEL[vendor]
   const language = input.language.trim()
 
@@ -129,10 +165,25 @@ interface VendorFileLimits {
  *
  * 体积按 `50_000_000` 而不是 `50 * 1024 * 1024`：对方文档写的是 50MB，没说是十进制还是 1024 进制，
  * 取小的那个是**宁可多拦一句也不让对方回 413**。念出来的数走 `formatBytes` 那一把尺（#282）。
+ *
+ * 讯飞这两条也要拦，但拦的是完全不同的量级：500MB / 5 小时是原厂文档写死的硬上限（超时长的表现是
+ * 订单直接判 `failType 4`，用户上传完还得等一轮轮询才知道）。它同时也是**目前唯一真能收长音频的一家**，
+ * 所以超限那句尾巴不能沿用前两家那句「没有长音频异步接口可用」——对讯飞说这句是错的。
  */
 const VENDOR_FILE_LIMITS: Record<AsrVendorId, VendorFileLimits> = {
   openai: {},
   minimax: { maxBytes: 50_000_000, maxSeconds: 500 },
+  iflytek: { maxBytes: 500_000_000, maxSeconds: 5 * 3600 },
+}
+
+/**
+ * 把分钟数念成人话：满一小时说小时，不到说分钟。
+ * 300 分钟没人读得下去，而讯飞那条上限正好是 5 小时。
+ * 小时位**向上**取整，理由见调用点那句注释；分钟位原样输出，
+ * 所以调用方必须先自己把秒换成整数分钟（上限向下、这一份向上，两边方向不同，见调用点）。
+ */
+function humanDuration(minutes: number): string {
+  return minutes >= 60 ? `${Math.ceil(minutes / 60)} 小时` : `${minutes} 分钟`
 }
 
 /**
@@ -150,13 +201,19 @@ export function asrFileProblem(
     return `${name} 单次转写上传上限 ${formatBytes(limits.maxBytes)}，这一份音频是 ${formatBytes(input.bytes)}`
   }
   if (limits.maxSeconds !== undefined && input.seconds !== undefined && input.seconds > limits.maxSeconds) {
-    const minutes = Math.round(limits.maxSeconds / 60)
     // 这份自己多长要**向上**取整：501 秒四舍五入是 8 分钟，于是那句变成「只收 8 分钟，这一份是 8 分钟」——
-    // 读起来像被误拦，而它真的超了。向上取整只会把 8 分 21 秒念成 9 分钟，不会反过来
-    const usedMinutes = Math.ceil(input.seconds / 60)
+    // 读起来像被误拦，而它真的超了。向上取整只会把 8 分 21 秒念成 9 分钟，不会反过来。
+    // 同一道坑在小时位上更近：5 小时零 1 分钟四舍五入还是 5 小时，只有 ceil 才念得出「6 小时」
+    //
+    // 上限那一头方向相反，必须**向下**：MiniMax 写的是 500 秒（＝8 分 20 秒），ceil 会念成「只收 9 分钟」，
+    // 于是一个 8 分 40 秒的用户看到「只收 9 分钟以内，这一份是 9 分钟」——像是我们拦错了。
+    // 说 8 分钟顶多保守 20 秒，说 9 分钟是把对方会拒的那一段说成能收。
     return (
-      `${name} 单次转写只收 ${minutes} 分钟以内的音频，这一份是 ${usedMinutes} 分钟。` +
-      '这一家没有长音频异步接口可用，或改用支持分段上传的服务'
+      `${name} 单次转写只收 ${humanDuration(Math.floor(limits.maxSeconds / 60))}以内的音频，` +
+      `这一份是 ${humanDuration(Math.ceil(input.seconds / 60))}。` +
+      (vendor === 'iflytek'
+        ? '这一家已经是「上传换订单号再轮询」的异步接口，5 小时就是它的硬上限，超过只能先把音频切开分几次转'
+        : '这一家没有长音频异步接口可用，或改用支持分段上传的服务')
     )
   }
   return null

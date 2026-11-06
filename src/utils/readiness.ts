@@ -7,7 +7,12 @@ import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { hasInAppDownload, missingBinaryHint, missingModelHint } from '@/utils/localTtsEngines'
-import { PROFILE_CAP_SPEC, ttsVendorNeedsModel } from '@/utils/profileSpec'
+import {
+  PROFILE_CAP_SPEC,
+  asrVendorLabel,
+  asrVendorWantsAppCredentials,
+  ttsVendorNeedsModel,
+} from '@/utils/profileSpec'
 import type { ProfileCapability } from '@/types/settingsProfile'
 
 export interface ReadinessBlock {
@@ -77,18 +82,45 @@ export async function checkTranscriptionReady(): Promise<ReadinessBlock | null> 
   const settings = await api.getSettings().catch(() => null)
   const provider = str(settings?.asrProvider)
 
-  // 云端优先：缺 Key/地址就拦下。宁可让用户补配置或改回本地，也不要默默降级成另一套引擎
+  // 云端优先：缺凭据就拦下。宁可让用户补配置或改回本地，也不要默默降级成另一套引擎
   if (provider === 'cloud') {
     const asrKey = keyStatus(settings, 'asrKeyStatus')
-    if (asrKey === 'unreadable') return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'asr' }
+    // 讯飞那一档还有第二把密文。它读不出来时的成因与出路和 API Key 完全一样（这台机器的密钥库
+    // 认不出这份密文，重填一次并保存），所以复用同一句话，不为它另编一种措辞
+    const asrSecret = keyStatus(settings, 'asrSecretStatus')
+    if (asrKey === 'unreadable' || asrSecret === 'unreadable') {
+      return { message: UNREADABLE_KEY_MESSAGE, settingsTab: 'asr' }
+    }
     const blocked = await noCurrentProfileMessage(
       api,
       'asr',
       '转写模式是「云端优先」，但',
-      '接口地址、API Key 和模型',
+      '接口地址、API Key 和模型（讯飞那一家是 AppID、API Key 与 APISecret）',
       '；或把模式改回「本地转写」'
     )
     if (blocked) return { message: blocked, settingsTab: 'asr' }
+    const vendor = str(settings?.asrVendor)
+    /**
+     * 讯飞那一档要三样凭据外加一个非空地址，缺哪一格都得在这儿点名：
+     * 缺着发出去只会被回一条 100009「鉴权失败」，那句不会说是哪一格错了，用户只能三格挨个试。
+     * 地址也一样——这一家留空时不会回落到 OpenAI 的官方地址（见 `asrManager.createCloudProvider`），
+     * 所以「留空也能用」那条省事口径对它不成立。
+     */
+    if (asrVendorWantsAppCredentials(vendor)) {
+      const missing = [
+        !str(settings?.asrAppId) && 'AppID',
+        asrKey === 'none' && 'API Key',
+        asrSecret === 'none' && 'APISecret',
+        !str(settings?.asrApiBase) && '接口地址',
+      ].filter((item): item is string => !!item)
+      if (missing.length) {
+        return {
+          message: `转写模式是「云端优先」，但这套${asrVendorLabel(vendor)}方案还缺 ${missing.join('、')}（都在讯飞开放平台那个应用的信息页里）。请在「转写配置」里点它的「编辑」，在弹窗里补全并点「保存」；或把模式改回「本地转写」`,
+          settingsTab: 'asr',
+        }
+      }
+      return null
+    }
     if (asrKey === 'none' || !str(settings?.asrApiBase)) {
       return {
         message:

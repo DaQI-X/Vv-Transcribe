@@ -10,21 +10,33 @@
  * 所以路径、字段名、语言放哪一层（字段还是头部）和默认模型名都必须逐条钉住，
  * 不能靠「兼容」两个字推定。
  *
- * 这一版只有两家（openai / minimax）。豆包与阿里云百炼的转写都没收——两家只吃「公网可访问的
- * 音频地址」，本机文件换不到一个能递给对方的地址；完整理由在 `asrVendor.ts` 抬头与
- * `src/utils/profileSpec.ts` 的 ASR_VENDOR_UI 抬头里。所以这两个名字在这里是**反向**断言：
- * 它们必须落回 openai（见 normalizeAsrVendor），不能凭空长出一条只属于它们的分支。
+ * 这一版收下三家（openai / minimax / iflytek）。豆包与阿里云百炼的转写都没收——两家只吃
+ * 「公网可访问的音频地址」，本机文件换不到一个能递给对方的地址；完整理由在 `asrVendor.ts`
+ * 抬头与 `src/utils/profileSpec.ts` 的 ASR_VENDOR_UI 抬头里。所以这两个名字在这里是**反向**
+ * 断言：它们必须落回 openai（见 normalizeAsrVendor），不能凭空长出一条只属于它们的分支。
+ *
+ * 讯飞（1.1.2，#343）是第三家，也是唯一走「上传换订单号 → 轮询取结果」那条异步链路的：
+ * 它的请求形状在 `iflytekAsr.ts` 里（每趟现算签名，`buildAsrRequest` 产不出一份固定形状），
+ * 这里只钉「这一家是谁、这一家走不走异步、上限是多少」，以及界面那张表与主进程这张表对得上。
  */
 import { describe, expect, it } from 'vitest'
 import {
   ASR_VENDOR_DEFAULT_MODEL,
   ASR_VENDOR_NAMES,
   asrFileProblem,
+  asrVendorUsesOrderFlow,
   buildAsrRequest,
   normalizeAsrVendor,
   readAsrResponse,
   type AsrRequestInput,
 } from '../electron/main/services/asr/asrVendor'
+// 渲染层那张厂商表（界面文案与字段可见性读它）：与上面这张对账，见文件末尾那个 describe
+import {
+  asrVendorIsAsync as uiIsAsync,
+  asrVendorLabel as uiLabel,
+  asrVendorWantsAppCredentials as uiWantsAppCredentials,
+  asrVendorWantsModel as uiWantsModel,
+} from '../src/utils/profileSpec'
 
 const input: AsrRequestInput = {
   apiBase: 'https://gateway.example.com',
@@ -251,5 +263,82 @@ describe('readAsrResponse：读回来那一段', () => {
   it('响应体不是 JSON 时原样抛出，由调用方说那一句', async () => {
     // 这一层不吞错也不改写：自检里「200 但返回的不是 JSON」那一条靠的就是这里漏出来
     await expect(readAsrResponse(new Response('<html>gate</html>'))).rejects.toBeInstanceOf(SyntaxError)
+  })
+})
+
+describe('讯飞（#343）：第三家，也是唯一走异步订单链路的一家', () => {
+  const MB = 1000 * 1000
+
+  it('认得这一家，大小写与空格不影响', () => {
+    expect(normalizeAsrVendor('iflytek')).toBe('iflytek')
+    expect(normalizeAsrVendor(' IFLYTEK ')).toBe('iflytek')
+    expect(ASR_VENDOR_NAMES.iflytek).toContain('讯飞')
+  })
+
+  it('这一家没有「模型」那一格：默认档是空串，那是「没有这一格」不是「还没兜底」', () => {
+    // 界面上那一格按厂商不出现（profileSpec 的 visibleWhen）。在这儿替它编一个模型名，
+    // 症状是发出去一个对方参数表里根本没有的字段
+    expect(ASR_VENDOR_DEFAULT_MODEL.iflytek).toBe('')
+  })
+
+  it('asrVendorUsesOrderFlow 只对这一家为真', () => {
+    // 判据收在这一层，是为了真转写、自检、以及界面上那句「这一家要等」三处不必各写一遍 id 比较
+    expect(asrVendorUsesOrderFlow('iflytek')).toBe(true)
+    expect(asrVendorUsesOrderFlow(' IFLYTEK ')).toBe(true)
+    for (const vendor of ['openai', 'minimax', '', undefined, 'dashscope']) {
+      expect(asrVendorUsesOrderFlow(vendor)).toBe(false)
+    }
+  })
+
+  it('buildAsrRequest 拒收这一家，并把出路点名到 runIflytekOrderFlow', () => {
+    // 抛错而不是静默落回 openai 那一支：落回去的结果是一条「自检过了、真转写 404」的分叉
+    expect(() => shapeOf('iflytek')).toThrow(/runIflytekOrderFlow/)
+  })
+
+  it('500MB / 5 小时那两条上限拦得住，尾巴不沿用前两家那句', () => {
+    const tooBig = asrFileProblem('iflytek', { bytes: 501 * MB, seconds: 10 }) as string
+    expect(tooBig).toContain('500.0MB')
+    expect(tooBig).toContain('501.0MB')
+
+    const tooLong = asrFileProblem('iflytek', { bytes: 10 * MB, seconds: 5 * 3600 + 60 }) as string
+    expect(tooLong).toContain('只收 5 小时以内')
+    // 5 小时零 1 分钟：四舍五入还是 5 小时，只有 ceil 才念得出「6 小时」
+    expect(tooLong).toContain('这一份是 6 小时')
+    // 它本身就是异步接口，对它说「这一家没有长音频异步接口可用」是句假话
+    expect(tooLong).toContain('已经是「上传换订单号再轮询」的异步接口')
+    expect(tooLong).not.toContain('没有长音频异步接口可用')
+
+    expect(asrFileProblem('iflytek', { bytes: 500 * MB, seconds: 5 * 3600 })).toBeNull()
+  })
+
+  it('前两家那句「没有长音频异步接口可用」仍然只对它们说', () => {
+    const problem = asrFileProblem('minimax', { bytes: MB, seconds: 501 }) as string
+    expect(problem).toContain('没有长音频异步接口可用')
+    expect(problem).not.toContain('上传换订单号')
+  })
+})
+
+describe('对账：界面那张厂商表与主进程这张表逐家一致', () => {
+  it('每一家的名字、要不要模型、走不走异步、要不要 AppID/APISecret 都同源', () => {
+    // 少一家或差一项的症状是「弹窗里那一格不出现，但请求照发一个用户没填过的值」，
+    // 或者反过来「界面摆了一格没人读的值」——两种都不报错，只有这里能挡住
+    for (const vendor of Object.keys(ASR_VENDOR_NAMES)) {
+      expect(normalizeAsrVendor(vendor)).toBe(vendor)
+      expect(uiLabel(vendor)).toBe(ASR_VENDOR_NAMES[vendor as keyof typeof ASR_VENDOR_NAMES])
+      // 界面「画不画模型那一格」必须与主进程「这一家有没有默认模型」是同一件事
+      expect(uiWantsModel(vendor)).toBe(ASR_VENDOR_DEFAULT_MODEL[vendor as keyof typeof ASR_VENDOR_DEFAULT_MODEL] !== '')
+      expect(uiIsAsync(vendor)).toBe(asrVendorUsesOrderFlow(vendor))
+      // AppID/APISecret 只有异步那一家要：它的签名是三把凭据一起算的
+      expect(uiWantsAppCredentials(vendor)).toBe(asrVendorUsesOrderFlow(vendor))
+    }
+  })
+
+  it('豆包与百炼不在这一档的表里：它们必须落回 openai', () => {
+    for (const vendor of ['volc', 'dashscope', 'doubao', 'bailian']) {
+      expect(normalizeAsrVendor(vendor)).toBe('openai')
+      expect(asrVendorUsesOrderFlow(vendor)).toBe(false)
+      expect(uiIsAsync(vendor)).toBe(false)
+      expect(uiLabel(vendor)).toBe(ASR_VENDOR_NAMES.openai)
+    }
   })
 })

@@ -109,8 +109,15 @@ export interface SettingsStore {
  * 和「哪些配置全局共用」两件事仍然只有这一处定义，读盘、落盘、投给界面的扁平视图都按它走。
  *
  * 三档都按「换一家网关要换的东西」这条线收窄：
- * - asr 四项：厂商 / 地址 / Key / 模型。「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，
- *   不是这家网关的参数。
+ * - asr 六项：厂商 / 地址 / Key / 模型 / AppID / APISecret。「用本地还是云端」「本地档位」「转写语言」
+ *   是这次任务怎么选的问题，不是这家网关的参数。
+ *   后两项是 1.1.2 接讯飞（#343）才长出来的，只有那一家用：它的签名要 AppID + APIKey + APISecret
+ *   三样。两项的存放方式**故意不同**——AppID 走明文格（它是要发出去的参数，既进签名串也进 URL，
+ *   跟 `ttsResourceId` 同理）；APISecret 走 safeStorage（它只用来算 HMAC，一个字节都不发出去，
+ *   泄漏它等于交出这一家的全部调用权）。这一格因此由 `settingsService.SECRET_PROFILE_FIELDS` 认领，
+ *   不在本表里再标一次——标两遍迟早分叉。
+ *   老方案里没有这两项，读出来是空串，而 `asrManager.createCloudProvider` 见到「讯飞但凭据不齐」
+ *   就落回本地转写，行为与 1.1.1 一字不差，所以同样不需要一次迁移。
  *   厂商这一项是这三档里**唯一**名字不统一的：扁平键叫 `asrVendor`、方案字段叫 `vendor`，
  *   而 ai／tts 那两档同一格叫 `provider`。原因是 asr 这一档已经被 `provider` 这个词占了——
  *   `asrProvider` 从 1.0.5 起是全局段那份「转写模式＝云端／本地」，而方案里沿用 `provider`
@@ -147,6 +154,8 @@ export const CAPABILITY_FIELDS: Record<
     ['asrApiKey', 'apiKey'],
     ['asrApiBase', 'apiBase'],
     ['asrModel', 'model'],
+    ['asrAppId', 'appId'],
+    ['asrApiSecret', 'apiSecret'],
   ],
   ai: [
     ['aiProvider', 'provider'],

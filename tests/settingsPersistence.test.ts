@@ -541,9 +541,21 @@ describe('多方案的两道闸门', () => {
     expect(onDisk).toMatchObject({ asrProvider: 'cloud', asrLocalModel: 'small', asrLanguage: 'en' })
     for (const profile of diskProfiles(onDisk).asr) {
       // 1.1.1 起多一个 vendor：它是「这套地址和 Key 是哪家」的书签，主进程按它选请求形状。
+      // 1.1.2 起多一个 appId：讯飞的签名要 AppID + APIKey + APISecret 三把，只有 AppID 不是密文。
+      // 磁盘上看不到 apiSecret 这一格，是**对的**：密文空着就不写键（写一个空串会把「这条方案
+      // 没有这一格」和「这一格填了空」混成一件事）。apiKey 是唯一的历史例外——它从 v2 起就
+      // 一直在 Profile 那份接口里，所以空着也留着键。
       // 转写这一档没有资源编号那一格（收它的只有豆包转写，而豆包转写本版不接，理由见
       // electron/main/services/asr/asrVendor.ts 抬头）；配音那一档有，见下面 tts 那条断言
-      expect(Object.keys(profile).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name', 'vendor'])
+      expect(Object.keys(profile).sort()).toEqual([
+        'apiBase',
+        'apiKey',
+        'appId',
+        'id',
+        'model',
+        'name',
+        'vendor',
+      ])
     }
     // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住
     await loadInto(dir)

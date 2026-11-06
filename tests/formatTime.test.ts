@@ -149,14 +149,19 @@ describe('界面与导出同一个读数', () => {
 
 describe('判据：时钟只剩一把尺', () => {
   /**
-   * 补零到两位是「自己拼时钟」的指纹。今天允许的两处：
+   * 补零到两位是「自己拼时钟」的指纹。今天允许的这些：
    * - `src/utils/formatTime.ts`：那把尺本身。
    * - `src/utils/exportTranscript.ts`：SRT/VTT 的字幕时间戳，是文件格式不是界面读数，
    *   收进界面尺等于改一次显示口径就写坏一份交付文件。
-   * 出现第三个文件时得先回答：这是界面读数（改用那把尺），还是别的格式（在这里写清为什么留）。
+   * - `electron/main/services/asr/iflytekAsr.ts`（#343）：两处都跟时钟无关——
+   *   一处是百分号转义补两位十六进制（对齐对方 Java 样例的 URLEncoder），
+   *   一处是讯飞签名参数里 `dateTime=yyyyMMddHHmmss` 这个**线上字段**，格式由对方文档写死，
+   *   补不补零直接决定签名对不对。它念给机器看，不念给人看，所以不走界面那把尺。
+   * 再出现别的文件时得先回答：这是界面读数（改用那把尺），还是别的格式（在这里写清为什么留）。
    */
-  it('自己补两位拼时钟的文件只有这两个', async () => {
+  it('自己补两位拼时钟的文件只有这几个', async () => {
     expect(await holdersOf(/padStart\(2/)).toEqual([
+      'electron/main/services/asr/iflytekAsr.ts',
       'src/utils/exportTranscript.ts',
       'src/utils/formatTime.ts',
     ])
@@ -166,9 +171,17 @@ describe('判据：时钟只剩一把尺', () => {
    * 第二条指纹量换算本身（`Math.floor(... / 60)` 把秒折成分），防的是「不补零但自己算分钟」这种
    * 写法——上面那条抓不到它。播放器里 `(i / 60) * duration` 那行数的是 60 根波形柱的序号、
    * 不折时间，所以判式要求同一行出现 floor：这是刻意的，不是漏收。
+   *
+   * 新增允许的两处（#343）都不是 MM:SS 读数，套那把尺反而会错：
+   * - `asrVendor.ts` 把厂商上限 500 秒折成一句中文「只收 8 分钟以内」。那把尺会给 `00:08:20`，
+   *   放进句子里就成了「只收 00:08:20以内的音频」——而且这句的方向是**向下**取整（保守），
+   *   与界面进度读数一律 floor 的理由不是同一件事。
+   * - `iflytekAsr.ts` 折的是签名里那个时区偏移的分钟位，同样是线上字段。
    */
-  it('把秒折成分的地方也只有这两个', async () => {
+  it('把秒折成分的地方也只有这几个', async () => {
     expect(await holdersOf(/Math\.floor\(.*\/\s*60\)/)).toEqual([
+      'electron/main/services/asr/asrVendor.ts',
+      'electron/main/services/asr/iflytekAsr.ts',
       'src/utils/exportTranscript.ts',
       'src/utils/formatTime.ts',
     ])

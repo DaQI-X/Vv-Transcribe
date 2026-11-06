@@ -78,7 +78,10 @@ describe('checkTranscriptionReady 的云端方案分支', () => {
     expect(blocked?.message).toContain('新建API接入')
     // 第⑥步起那三格只活在小弹窗里，所以出路必须先把「点新建API接入、在弹窗里填」说出口，
     // 而不是让用户去填一个他在面板上根本看不到的输入框
-    expect(blocked?.message).toContain('在弹窗里把接口地址、API Key 和模型填好')
+    expect(blocked?.message).toContain('在弹窗里把接口地址、API Key 和模型')
+    // 零条方案时还不知道用户会选哪家，所以两种口径都得说到：讯飞那一档没有「模型」这一格，
+    // 换成三样凭据。只说前一种，选了讯飞的人会去弹窗里找一个不存在的格子
+    expect(blocked?.message).toContain('（讯飞那一家是 AppID、API Key 与 APISecret）填好')
     // 落盘的是弹窗自己那颗「保存」：指到右下角「保存设置」就等于让用户白点一颗碰不到凭据的按钮
     expect(blocked?.message).toContain('点弹窗底部的「保存」')
     expect(blocked?.message).not.toContain('保存设置')
@@ -116,6 +119,67 @@ describe('checkTranscriptionReady 的云端方案分支', () => {
     api.listProfiles.mockResolvedValue(profilesView(['a'], 'a'))
 
     expect(await checkTranscriptionReady()).toBeNull()
+  })
+
+  /**
+   * 讯飞那一档要三把凭据（#343）。这一组钉的是「缺哪一把就点名哪一把」：
+   * 缺着发出去只会撞一条 100009「鉴权失败」，那句不说哪格错了，用户只能三格挨个试。
+   * 同样要紧的是**不许**落回那句泛泛的「API Base 或 API Key 还没填」——它对这一档是错的口径。
+   */
+  describe('讯飞那一档：三把凭据缺一把就点名那一把', () => {
+    const iflytek = (over: Record<string, unknown> = {}) =>
+      cloudSettings({
+        asrVendor: 'iflytek',
+        asrAppId: 'app-1',
+        asrSecretStatus: 'encrypted',
+        asrApiBase: 'https://office-api-ist-dx.iflyaisol.com',
+        ...over,
+      })
+
+    it('三把都在：放行，且不问本地引擎', async () => {
+      api.getSettings.mockResolvedValue(iflytek())
+      api.listProfiles.mockResolvedValue(profilesView(['a'], 'a'))
+
+      expect(await checkTranscriptionReady()).toBeNull()
+      expect(api.testConnection).not.toHaveBeenCalled()
+    })
+
+    it('只缺 APISecret：只说 APISecret，不把已经填好的 AppID 也报上去', async () => {
+      api.getSettings.mockResolvedValue(iflytek({ asrSecretStatus: 'none' }))
+      api.listProfiles.mockResolvedValue(profilesView(['a'], 'a'))
+
+      const blocked = await checkTranscriptionReady()
+
+      expect(blocked?.message).toContain('还缺 APISecret')
+      expect(blocked?.message).not.toContain('AppID、')
+      expect(blocked?.message).toContain('讯飞')
+      expect(blocked?.settingsTab).toBe('asr')
+      // 落回那句泛泛的话就等于没说：这一档不是「API Base 或 API Key」两格的事
+      expect(blocked?.message).not.toContain('API Base 或 API Key 还没填')
+    })
+
+    it('AppID、API Key、接口地址一起缺：三样按顺序点名', async () => {
+      api.getSettings.mockResolvedValue(
+        iflytek({ asrAppId: '', asrKeyStatus: 'none', asrApiBase: '' })
+      )
+      api.listProfiles.mockResolvedValue(profilesView(['a'], 'a'))
+
+      const blocked = await checkTranscriptionReady()
+
+      expect(blocked?.message).toContain('还缺 AppID、API Key、接口地址')
+      // APISecret 这一把是好的，不该被捎带进去
+      expect(blocked?.message).not.toContain('APISecret')
+    })
+
+    it('APISecret 解不开：与 Key 解不开同一句话，不去点名单格', async () => {
+      api.getSettings.mockResolvedValue(iflytek({ asrSecretStatus: 'unreadable' }))
+      api.listProfiles.mockResolvedValue(profilesView(['a'], 'a'))
+
+      const blocked = await checkTranscriptionReady()
+
+      expect(blocked?.message).toBe(UNREADABLE_KEY_MESSAGE)
+      expect(api.listProfiles).not.toHaveBeenCalled()
+    })
   })
 
   it('Key 解不开排在方案判据之前：哪怕方案是好的，也只说「读不出」', async () => {

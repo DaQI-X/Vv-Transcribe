@@ -263,8 +263,12 @@ export function registerSettingsHandlers() {
         // 不回落就会出现「按 OpenAI 兼容的形状测绿了、实际那一条方案选的是 MiniMax、配音撞 404」。
         const needSavedProvider =
           !isLocalTTS && kind === 'tts' && !String((values as { provider?: unknown }).provider ?? '').trim()
+        // 讯飞那一档还有第二把凭据：APISecret（1.1.2，#343）。它和 apiKey 一样只以密文落盘、
+        // 明文从不发给渲染层，所以「表单里这一格空着」不代表用户没配过——回落口径必须与 apiKey
+        // 一字不差，否则编辑一条已经存好的讯飞方案时点自检，永远报「还缺 APISecret」。
+        const needSavedSecret = kind === 'asr' && !String((values as { apiSecret?: unknown }).apiSecret ?? '').trim()
         let probe = values
-        if (needSavedKey || needSavedBase || needSavedVoice || needSavedProvider) {
+        if (needSavedKey || needSavedBase || needSavedVoice || needSavedProvider || needSavedSecret) {
           const view = await getSettingsView(selection)
           const saved = await loadSettings(selection)
           const effectiveKey =
@@ -277,7 +281,12 @@ export function registerSettingsHandlers() {
             kind === 'tts'
               ? [view.ttsKeyStatus, view.aiKeyStatus]
               : [kind === 'ai' ? view.aiKeyStatus : view.asrKeyStatus]
-          if (needSavedKey && !effectiveKey && statuses.includes('unreadable')) {
+          // 那句话写的是「API Key」，对 APISecret 也照用：成因与出路完全相同（这台机器的密钥库读不出
+          // 这一份密文，重填一次并保存就好），为它另写一句只是让用户在两种措辞之间猜是不是两件事
+          if (
+            (needSavedKey && !effectiveKey && statuses.includes('unreadable')) ||
+            (needSavedSecret && !saved.asrApiSecret && view.asrSecretStatus === 'unreadable')
+          ) {
             return {
               level: 'fail' as const,
               title: '还测不了',
@@ -302,6 +311,7 @@ export function registerSettingsHandlers() {
             apiBase: needSavedBase ? saved.aiApiBase : values.apiBase,
             ...(needSavedVoice && !probeNeedsVoice ? { voice: saved.ttsVoice } : {}),
             ...(needSavedProvider ? { provider: saved.ttsProvider } : {}),
+            ...(needSavedSecret ? { apiSecret: saved.asrApiSecret } : {}),
           }
         }
         if (kind === 'tts') return await testTTSConfig(probe as TTSTestValues)

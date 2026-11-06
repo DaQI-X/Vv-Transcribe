@@ -331,9 +331,15 @@ describe('取值按 id 挑方案', () => {
     expect((await service.getASRConfig('asr-y')).model).toBe('m-y')
     const view = await service.listProfiles()
     // asrVendor 是 1.1.1 新认的厂商书签：老方案里没有，投出来是空串（界面按 OpenAI 兼容显示）
+    // asrAppId 是 1.1.2 讯飞那一档要的三把凭据里唯一不算密文的一把（另两把走状态位）
     // 转写这一档没有资源编号那一格：收它的只有豆包转写，而豆包转写本版不接（理由见
     // electron/main/services/asr/asrVendor.ts 抬头）；配音那一档有，见 tts 那几条断言
-    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel', 'asrVendor'])
+    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual([
+      'asrApiBase',
+      'asrAppId',
+      'asrModel',
+      'asrVendor',
+    ])
   })
 
   it('配音留空回落的「校对那套」固定是校对档当前默认那条，不跟配音的 id 走', async () => {
@@ -550,10 +556,17 @@ describe('方案列表：一次给全的脱敏形状', () => {
     // 1.1.1 起 tts 多带一个「厂商」书签：它决定这次发的请求长什么样，所以是方案的一部分，不是全局偏好
     // asr 同一格叫 asrVendor 而不是 asrProvider：后者是「去不去云端」，一个名字不能同时说两件事
     // 1.1.2 起 tts 再多一格资源编号：只有豆包收（X-Api-Resource-Id），另三家不看这一项。
-    // 它不是密钥（SECRET_FIELDS 只列三个 *ApiKey），按明文留在方案里；
-    // 键名不以 ApiKey 结尾，所以下面那条「密钥的键名都不许出现」仍然成立。
+    // 它不是密钥，按明文留在方案里；键名不以 ApiKey/ApiSecret 结尾，所以下面那条
+    // 「密钥的键名都不许出现」仍然成立。
     // 转写那一档没有这一格：收它的只有豆包转写，而豆包转写本版不接（理由见 asr/asrVendor.ts 抬头）
-    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel', 'asrVendor'])
+    // 1.1.2 起 asr 多一格 asrAppId：讯飞的签名要 AppID + APIKey + APISecret 三把，
+    // 其中只有 AppID 不是密文（它同时是列表行上认人的那个标题），所以它进 values，另两把走状态位
+    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual([
+      'asrApiBase',
+      'asrAppId',
+      'asrModel',
+      'asrVendor',
+    ])
     expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['aiApiBase', 'aiModel', 'aiProvider'])
     expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
     expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual([
@@ -563,10 +576,11 @@ describe('方案列表：一次给全的脱敏形状', () => {
       'ttsResourceId',
     ])
     // 连密钥的**键名**都不许出现：表单把这一份直接盖到自己身上，
-    // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串
+    // 多出 asrApiKey 就会把用户刚粘进输入框的那把 Key 冲成空串。
+    // 1.1.2 起密文有两种后缀（讯飞那把叫 asrApiSecret），判式跟着收两种
     for (const cap of ['asr', 'ai', 'tts'] as const) {
       for (const profile of view.profiles[cap]) {
-        expect(Object.keys(profile.values).filter((key) => key.endsWith('ApiKey'))).toEqual([])
+        expect(Object.keys(profile.values).filter((key) => /Api(Key|Secret)$/.test(key))).toEqual([])
       }
     }
   })

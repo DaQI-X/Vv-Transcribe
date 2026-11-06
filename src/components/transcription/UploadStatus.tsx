@@ -44,6 +44,13 @@ function ProcessingView({ fileName, progress, stage, model, onCancel, cancelling
   cancelling: boolean
 }) {
   const loadingModel = stage === 'loading_model'
+  /**
+   * 「提交完还要等对方出结果」那一段（1.1.2 讯飞，#343）。进度条在这一段是**钉住的**：
+   * 对方只给一个没有实测依据的 `taskEstimateTime`，按它换算百分比就是编数（口径见 `ASRStage`）。
+   * 所以这一句必须自己说清「停着不等于卡住」——不说，用户会在第五分钟点取消重传，
+   * 而重传只是重新排一次队。
+   */
+  const waitingOrder = stage === 'waiting_order'
   // 体积由引擎随状态事件报来（各档位权重差 3 倍多），写死一个数会对另一档撒谎
   const downloadNote = model?.weightsMb
     ? `首次使用需下载模型（${model.tier} 档约 ${model.weightsMb}MB），完成后不再需要`
@@ -88,10 +95,18 @@ function ProcessingView({ fileName, progress, stage, model, onCancel, cancelling
 
         <div className="processing-text">
           <span className="processing-text__title">
-            {loadingModel ? '正在加载语音模型' : 'ASR 识别转写处理中'}
+            {waitingOrder
+              ? '已提交，等对方出结果'
+              : loadingModel
+                ? '正在加载语音模型'
+                : 'ASR 识别转写处理中'}
           </span>
           <span className="processing-text__desc">
-            {loadingModel ? downloadNote : 'AI 正在分析音频内容，自动识别语音并生成文字'}
+            {waitingOrder
+              ? '音频已经交给服务商，正在排队转写。这一段对方不报真实进度，条子会停在 20% 不动——不是卡住了，长音频等上几分钟到几十分钟都算正常。取消只是不再等这一单，重传要重新排一次队'
+              : loadingModel
+                ? downloadNote
+                : 'AI 正在分析音频内容，自动识别语音并生成文字'}
           </span>
         </div>
 

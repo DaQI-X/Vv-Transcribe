@@ -42,11 +42,19 @@ import {
 import {
   ASR_VENDOR_DEFAULT_MODEL,
   ASR_VENDOR_NAMES,
+  asrVendorUsesOrderFlow,
   buildAsrRequest,
   normalizeAsrVendor,
   readAsrResponse,
   type AsrReadResult,
 } from './asr/asrVendor'
+import {
+  IFLYTEK_FAIL_SILENT,
+  IFLYTEK_PROBE_DEADLINE_MS,
+  iflytekFailTypeMessage,
+  runIflytekOrderFlow,
+  type IflytekFlowResult,
+} from './asr/iflytekAsr'
 import { engineBinaryInManifest } from './componentService'
 import { AI_CHAT_PATH, DEFAULT_PROMPT } from './ai/openaiCompatible'
 import { appendApiPath } from './apiPath'
@@ -69,13 +77,21 @@ export interface AsrTestValues {
   /** 云端／本地这一档（不是厂商）——名字沿用界面那格，别和下面的 vendor 混 */
   provider: string
   /**
-   * 云端走哪一家（'openai' | 'minimax'），决定这次自检发的请求长什么样。
+   * 云端走哪一家（'openai' | 'minimax' | 'iflytek'），决定这次自检发的请求长什么样。
    * 表单里带了这一格就按它测；没带（空串）落回 OpenAI 兼容——与真转写的取值口径同一个函数。
    */
   vendor?: string
   apiBase: string
   apiKey: string
   model: string
+  /**
+   * 讯飞那一家的另外两样凭据（1.1.2，#343）。别家不看这两格；讯飞三样少一样签名就不成立，
+   * 所以自检在发请求之前先把它们数齐——真发一趟只会回一句 100009「签名校验不通过」，
+   * 用户看不出到底少的是哪一格。
+   * `apiSecret` 走 safeStorage，界面传来的是解密后的值，用完即弃，不进日志（见 logRedact）。
+   */
+  appId?: string
+  apiSecret?: string
 }
 
 export interface AITestValues {
@@ -279,12 +295,123 @@ async function checkLocalEngine(): Promise<TestOutcome> {
   }
 }
 
+/**
+ * 讯飞那一腿整个上界：轮询上界再多留 30 秒。
+ * 多留的那一段是为了让「对方还在处理」走**优雅**那个出口（`completed:false`，能把订单号交出去），
+ * 而不是先被信号打断成一句笼统的超时——两条路给用户的信息量差一个订单号。
+ * 而信号本身不能不要：轮询上界只管两次查询之间那段等待，一次卡死的 `fetch` 得靠它收。
+ */
+const IFLYTEK_PROBE_TIMEOUT_MS = IFLYTEK_PROBE_DEADLINE_MS + TEST_TIMEOUT_MS
+
+/**
+ * 讯飞那一腿的自检。
+ *
+ * 它不是「一次 POST 拿结果」，而是上传换订单号再轮询，所以这里不自己拼请求，直接走真转写那一个入口
+ * （`runIflytekOrderFlow`）——两处各拼一遍签名，就是 #220/#227 那种「自检说可用、一转写就失败」的分歧。
+ *
+ * 结论口径与真转写**故意差一处**：静音样本必然转不出字，配置全对时对方回的是
+ * `status 4` + `failType 6 静音文件`。这在真转写里是失败（编辑器会白屏），在这里是**通过**——
+ * 它证明地址、三样凭据、签名、上传、轮询、结果解析整条链都通了，只有「这份音频里没有人声」
+ * 是样本自己的性质。判成 fail，配置正确的用户就永远看到红的「测试连接」，正是 1.1.1 那次
+ * MiniMax 音色死锁的同一类坑。
+ */
+async function testIflytekASR(base: string, values: AsrTestValues): Promise<TestOutcome> {
+  const appId = (values.appId ?? '').trim()
+  const apiKey = values.apiKey.trim()
+  const apiSecret = (values.apiSecret ?? '').trim()
+  if (!appId || !apiKey || !apiSecret) {
+    const missing = [!appId && 'AppID', !apiKey && 'APIKey', !apiSecret && 'APISecret']
+      .filter((item): item is string => !!item)
+      .join('、')
+    return {
+      level: 'fail',
+      title: '还测不了',
+      message:
+        `这一家转写要三样凭据，现在还缺 ${missing}（都在讯飞开放平台那个应用的信息页里）。` +
+        '如果只是在本机转写，把转写模式改回「本地转写」即可，不用填这些',
+    }
+  }
+
+  const started = Date.now()
+  let flow: IflytekFlowResult
+  try {
+    flow = await runIflytekOrderFlow({
+      apiBase: base,
+      credentials: { appId, apiKey, apiSecret },
+      fileName: 'vv-probe.wav',
+      audio: buildSilentWav(),
+      deadlineMs: IFLYTEK_PROBE_DEADLINE_MS,
+      signal: AbortSignal.timeout(IFLYTEK_PROBE_TIMEOUT_MS),
+    })
+  } catch (err) {
+    if ((err as Error)?.name === 'TimeoutError') {
+      return {
+        level: 'fail',
+        title: '等不到结果',
+        message:
+          `等了 ${Math.round(IFLYTEK_PROBE_TIMEOUT_MS / 60_000)} 分钟，上传或查询这一趟还没回来。` +
+          '地址可能指向了一个不会响应请求的服务，或者网络被拦截（真转写那边最长会等 1 小时）',
+      }
+    }
+    // TypeError 是 fetch 自己那一层（DNS、拒连、证书…），需要 connectFail 翻成人话；
+    // 其余都是适配层已经念成句子的（HTTP 状态、非 JSON、错误码 + 该改哪一格），照原话给用户
+    if (err instanceof TypeError) return connectFail(err)
+    const message = err instanceof Error ? err.message : String(err)
+    logger.warn('ConnTest', 'iflytek asr probe failed', { message })
+    return { level: 'fail', title: '云端转写没成功', message }
+  }
+
+  const latencyMs = Date.now() - started
+  if (!flow.completed) {
+    return {
+      level: 'fail',
+      title: '提交了，但等不到结果',
+      message:
+        `${ASR_VENDOR_NAMES.iflytek}收下了这一份（订单号 ${flow.orderId}），` +
+        `查询 ${flow.polls} 次之后对方还在处理，自检到这儿为止。` +
+        '凭据与地址大概率是对的——它已经发得出订单号了；真转写最长会等 1 小时，也可以拿这个订单号去控制台查',
+    }
+  }
+
+  logger.info('ConnTest', 'iflytek asr probe done', {
+    orderId: flow.orderId,
+    failType: flow.failType,
+    polls: flow.polls,
+    latencyMs,
+    segments: flow.segments.length,
+  })
+
+  if (flow.failType !== 0 && flow.failType !== IFLYTEK_FAIL_SILENT) {
+    return {
+      level: 'fail',
+      title: '这一单没转出结果',
+      message:
+        `${iflytekFailTypeMessage(flow.failType)}（订单号 ${flow.orderId}，耗时 ${formatLatency(latencyMs)}）。` +
+        '地址与凭据是通的——对方已经收下并处理了这一单，卡住的是音频本身',
+    }
+  }
+
+  return {
+    level: 'pass',
+    title: '云端转写可用',
+    message:
+      `耗时 ${formatLatency(latencyMs)}（含上传与 ${flow.polls} 次查询，订单号 ${flow.orderId}）。` +
+      '地址、AppID、APIKey、APISecret 都通，签名也被对方认下了。' +
+      '这一家收长音频要排队等：真转写时进度条会停在「已提交，等对方出结果」那一段，不是卡住了',
+  }
+}
+
 export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome> {
   if (values.provider !== 'cloud') return checkLocalEngine()
 
   const base = normalizeApiBase(values.apiBase)
   const baseProblem = invalidBase(base)
   if (baseProblem) return { level: 'fail', title: '还测不了', message: baseProblem }
+
+  const vendor = normalizeAsrVendor(values.vendor)
+  // 讯飞那一档从这儿分出去：它不发 multipart，凭据也不止一把（见 testIflytekASR）
+  if (asrVendorUsesOrderFlow(vendor)) return testIflytekASR(base, values)
+
   if (!values.apiKey.trim()) {
     return {
       level: 'fail',
@@ -293,7 +420,6 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
     }
   }
 
-  const vendor = normalizeAsrVendor(values.vendor)
   const model = values.model.trim() || ASR_VENDOR_DEFAULT_MODEL[vendor]
   const usedDefault = !values.model.trim()
   // 路径与头部（含凭据）全问同一层：这里只要自己拼一次，

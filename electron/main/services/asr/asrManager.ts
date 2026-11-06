@@ -7,6 +7,7 @@
 import type { ASRSegment, ASROptions, ASRProgress } from './types'
 import { CloudASRProvider } from './cloudASR'
 import { LocalASRProvider } from './localASR'
+import { asrVendorUsesOrderFlow } from './asrVendor'
 import { ensureLocalTier, getASRServiceStatus } from '../asrServiceManager'
 import { normalizeLocalModel } from '../settingsService'
 import { logger } from '../logger'
@@ -23,13 +24,22 @@ function getLocalProvider(): LocalASRProvider {
 function createCloudProvider(config: Record<string, unknown>): CloudASRProvider | null {
   const apiKey = config.apiKey as string
   if (!apiKey) return null
+  const vendor = (config.vendor as string) || ''
+  const apiBase = (config.apiBase as string) || ''
+  // 讯飞那一档地址留空时**不许**落回下面那个 OpenAI 默认地址：那等于把用户的音频
+  // POST 到一个他没选过的服务商去（还是境外的一家）。「地址那一格没填」和「选了另一家」
+  // 是两件事，混成一件是隐私事故，不是兜底
+  if (asrVendorUsesOrderFlow(vendor) && !apiBase.trim()) return null
   return new CloudASRProvider({
     apiKey,
-    apiBase: (config.apiBase as string) || 'https://api.openai.com',
+    apiBase: apiBase || 'https://api.openai.com',
     // 模型名不在这里兜底：留空时该落哪一档由厂商说了算（OpenAI 兼容是 whisper-1，
     // MiniMax 是 asr-1.0），在这儿写死一个 whisper-1 就等于替 MiniMax 猜它的清单
     model: (config.model as string) || '',
-    vendor: (config.vendor as string) || '',
+    vendor,
+    // 这两把只有讯飞用（AppID + APISecret），走 multipart 的那几家读不到它们
+    appId: (config.appId as string) || '',
+    apiSecret: (config.apiSecret as string) || '',
   })
 }
 
@@ -69,6 +79,9 @@ export async function runTranscription(
     logger.info(TAG, 'Cloud not selected or unavailable, using local transcription', {
       provider: config.provider,
       keyStatus: !!config.apiKey,
+      // 讯飞那一档要三把凭据 + 一个地址才发得出去，缺一样就在这里落回本地。
+      // 少了这一项，日志上看不出是「没选云端」还是「选了但没配齐」
+      vendor: config.vendor,
     })
   }
 

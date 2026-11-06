@@ -61,12 +61,23 @@ import {
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
 import { ProfileList } from '@/components/settings/ProfileList'
-import { ProfileDialog, type ProfileDraft } from '@/components/settings/ProfileDialog'
+import {
+  ProfileDialog,
+  type DraftSecret,
+  type ProfileDraft,
+} from '@/components/settings/ProfileDialog'
 import {
   PROFILE_CAP_SPEC,
+  asrVendorIsAsync,
+  asrVendorLabel,
+  asrVendorLanguageApplies,
   fieldsOf,
-  keyFieldOf,
   profileRowTitle,
+  savedSecretLabels,
+  secretFieldsOf,
+  secretLabelOf,
+  secretStatusOf,
+  titleKeyOf,
   ttsVendorLabel,
   ttsVendorNeedsVoice,
   ttsVendorOf,
@@ -359,8 +370,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
 
   /**
    * 列表读回来之后要刷的两样：列表本身，和三个页面上那条「方案」下拉。
-   * 密钥状态不在这里对齐——它跟着列表里那一行（`profile.keyStatus`），弹窗开给哪一条就显那一条的，
-   * 面板上从此没有「正在编辑的那条」这个概念了。
+   * 密文那几格的状态不在这里对齐——它们跟着列表里那一行（`profile.keyStatus` / `secretStatus`），
+   * 弹窗开给哪一条就显那一条的，面板上从此没有「正在编辑的那条」这个概念了。
    */
   const applyProfiles = (view: ProfilesView) => {
     setProfiles(view)
@@ -413,14 +424,32 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   }
 
   /**
+   * 弹窗草稿里那几格密文的起手状态。
+   *
+   * 新建一律 `none`：密钥从不过 IPC，而且新的一条还没拿到任何密钥，挂着「已保存」那个标记
+   * 说的就是别的那一套。编辑照磁盘上这一条的读数（`secretStatusOf` 认得「这是第几把」，
+   * 讯飞那档有两把）——它决定格子里那句灰字说「留空＝不改」还是「这一套还没有 Key」。
+   */
+  const draftSecretsOf = (cap: ProfileCapability, profile?: ProfileView) => {
+    const secrets: Record<string, DraftSecret> = {}
+    for (const key of secretFieldsOf(cap)) {
+      secrets[key] = {
+        value: '',
+        status: profile ? secretStatusOf(cap, profile, key) : 'none',
+        cleared: false,
+      }
+    }
+    return secrets
+  }
+
+  /**
    * 「新建API接入」＝弹出那几格（#222 重写第⑥步做在转写上，第⑧步三档共用）。这一步**一个字节都不写磁盘**。
    *
    * 以前这颗按钮当场就建一条，用户点完才第一次看见输入框：想改就得改一条已经存在的方案，
    * 点错了还多出一条没人要的。
    * 地址与模型从「列表上此刻在用的那一条」抄过来作起手——同一家网关换个模型是最常见的第二次配置，
    * 不用重打一遍地址；这一档没有「当前使用」那条时抄列表第一条（行上就写着它，抄得不算突然）。
-   * Key 那格永远从空开始（密钥从不过 IPC），而且新的一条还没拿到任何密钥，
-   * 不能挂着「已保存」那个标记——那说的是别的那一套。
+   * 密文那几格不跟着抄：密钥属于那一家，悄悄搬到另一套里，下一次干活按谁计价就没人说得清了。
    */
   const openNewDialog = (cap: ProfileCapability) => {
     const source = currentRow(cap) ?? profiles?.profiles[cap][0]
@@ -429,9 +458,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       mode: 'new',
       profileId: '',
       fields: fieldsOf(cap, source?.values ?? {}),
-      apiKey: '',
-      keyStatus: 'none',
-      keyCleared: false,
+      secrets: draftSecretsOf(cap),
       // 这一档现在没有「当前使用」那一条（一条都没建过，或上一条刚被删掉）时，建出来这套默认就该勾上，
       // 否则用户还得再进去翻一次开关才能开工；本来就有在用的那条时不顶掉它
       isCurrent: !(profiles?.defaultProfileId[cap] ?? ''),
@@ -439,7 +466,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     invalidateTest(cap)
   }
 
-  /** 某一行的「编辑」＝为那一条开弹窗：草稿照磁盘上这一条的字段起手，Key 一样不回显 */
+  /** 某一行的「编辑」＝为那一条开弹窗：草稿照磁盘上这一条的字段起手，密文一样不回显 */
   const openEditDialog = (cap: ProfileCapability, profileId: string) => {
     const profile = profiles?.profiles[cap].find((item) => item.id === profileId)
     // 方案不在列表里＝列表刚被别处改掉，不能拿旧数据开一份要写盘的草稿
@@ -452,9 +479,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       mode: 'edit',
       profileId: profile.id,
       fields: fieldsOf(cap, profile.values),
-      apiKey: '',
-      keyStatus: profile.keyStatus,
-      keyCleared: false,
+      secrets: draftSecretsOf(cap, profile),
       isCurrent: profile.id === (profiles?.defaultProfileId[cap] ?? ''),
     })
     invalidateTest(cap)
@@ -490,14 +515,23 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const setDraftField = (key: string, value: string) =>
     setProfileDraft((prev) => (prev ? { ...prev, fields: { ...prev.fields, [key]: value } } : prev))
 
-  /** 在密钥框里打字＝要替换，之前点的「清除」作废 */
-  const setDraftKey = (value: string) =>
-    setProfileDraft((prev) =>
-      prev ? { ...prev, apiKey: value, keyCleared: value ? false : prev.keyCleared } : prev
-    )
+  /** 在某一格密文框里打字＝要替换这一把，之前对**这一格**点的「清除」作废（另一格不动） */
+  const setDraftSecret = (key: string, value: string) =>
+    setProfileDraft((prev) => {
+      if (!prev) return prev
+      const current = prev.secrets[key] ?? { value: '', status: 'none', cleared: false }
+      return {
+        ...prev,
+        secrets: { ...prev.secrets, [key]: { ...current, value, cleared: value ? false : current.cleared } },
+      }
+    })
 
-  const clearDraftKey = () =>
-    setProfileDraft((prev) => (prev ? { ...prev, apiKey: '', keyCleared: true } : prev))
+  const clearDraftSecret = (key: string) =>
+    setProfileDraft((prev) => {
+      if (!prev) return prev
+      const current = prev.secrets[key] ?? { value: '', status: 'none', cleared: false }
+      return { ...prev, secrets: { ...prev.secrets, [key]: { ...current, value: '', cleared: true } } }
+    })
 
   const setDraftCurrent = (isCurrent: boolean) =>
     setProfileDraft((prev) => (prev ? { ...prev, isCurrent } : prev))
@@ -514,9 +548,18 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     if (!api || !profileDraft || profileBusy || draftSaving) return
     const draft = profileDraft
     const cap = draft.capability
-    const keyField = keyFieldOf(cap)
     const spec = PROFILE_CAP_SPEC[cap]
-    const typedKey = draft.apiKey.trim()
+    // 密文那几格各按各的三态走（留空＝不改、点了「清除」＝抹掉、有字＝替换），
+    // 所以先把这一档有哪几把、每把此刻是什么状态摊平，下面新建与编辑两条路都读它
+    const secretKeys = secretFieldsOf(cap)
+    const typed: Record<string, string> = {}
+    const cleared: string[] = []
+    for (const key of secretKeys) {
+      const value = (draft.secrets[key]?.value ?? '').trim()
+      if (value) typed[key] = value
+      else if (draft.secrets[key]?.cleared) cleared.push(key)
+    }
+    const label = (keys: string[]) => keys.map((key) => secretLabelOf(cap, key)).join('、')
     setDraftSaving(true)
     try {
       if (draft.mode === 'new') {
@@ -525,7 +568,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         const view = await runProfileAction(() =>
           api.createProfile(cap, {
             fromProfileId: '',
-            values: { ...draft.fields, [keyField]: typedKey },
+            // 没填的那几把发空串：主进程那侧「空＝这一条不带这把密文」，与 1.1.1 只有一把时同口径
+            values: { ...draft.fields, ...Object.fromEntries(secretKeys.map((key) => [key, typed[key] ?? ''])) },
             setDefault: draft.isCurrent,
           })
         )
@@ -539,7 +583,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
           )
           return
         }
-        const keyNote = created.keyStatus === 'none' ? '' : '，API Key 也一起存好了'
+        // 念的是磁盘上真存了哪几把（`savedSecretLabels` 按状态筛），不是「用户填了几格」：
+        // 密钥库不可用时那把其实是以明文落的，说「存好了」也不算错，但一律说「API Key」
+        // 对只存了 APISecret 的那一条就是错话
+        const savedLabels = savedSecretLabels(cap, created)
+        const keyNote = savedLabels.length ? `，${savedLabels.join('、')} 也一起存好了` : ''
         const currentNote =
           created.id === view.defaultProfileId[cap]
             ? `它现在就是「当前使用」的那一套，下一次${spec.activity}按它走`
@@ -559,9 +607,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         profileIds: { [cap]: draft.profileId },
         ...draft.fields,
       }
-      // Key 那格三态：留空＝不改（整个键不发）、点了「清除」＝null、有字＝替换
-      if (typedKey) patch[keyField] = typedKey
-      else if (draft.keyCleared) patch[keyField] = null
+      // 密文那几格三态：留空＝不改（整个键不发）、点了「清除」＝null、有字＝替换
+      for (const [key, value] of Object.entries(typed)) patch[key] = value
+      for (const key of cleared) patch[key] = null
       // 指针只在用户真翻过那颗勾选时才发：没翻过就不带这个键，主进程那边「缺席＝不挪」。
       // 照当前值发下去，用户只是进来改个模型名，出去之后这一档却被拦下说「没有当前使用的方案」
       const pointerChanged = draft.isCurrent !== (draft.profileId === onDisk)
@@ -580,11 +628,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       const row = fresh?.profiles[cap].find((profile) => profile.id === draft.profileId)
       if (fresh) applyProfiles(fresh)
       refreshVoicePage(cap)
-      const keyNote = typedKey
-        ? '，含新填的 API Key'
-        : draft.keyCleared
-          ? '，那把已保存的 Key 也从磁盘清掉了'
-          : ''
+      const typedKeys = Object.keys(typed)
+      const keyNote =
+        (typedKeys.length ? `，含新填的 ${label(typedKeys)}` : '') +
+        (cleared.length ? `，已保存的 ${label(cleared)} 也从磁盘清掉了` : '')
       const pointerNote = pointerChanged
         ? draft.isCurrent
           ? `；它现在是「当前使用」的那一套，下一次${spec.activity}按它走`
@@ -593,10 +640,15 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       const staleNote = fresh
         ? ''
         : '；方案列表这次没跟着刷新，关掉设置窗口重开一次看到的才是磁盘上真实的样子'
-      // 这一句要说的是列表上那一行显示的东西：行标题是模型名优先，方案名建那条时按当时的模型落定、
-      // 之后不跟着改（弹窗里没有改名格），照 `name` 念就成了「已存好「whisper-large-v3」」、
-      // 而行上写着刚改的模型名——用户会以为存错了地方
-      const rowTitle = profileRowTitle(cap, row, draft.fields[spec.titleKey] || '这一套')
+      // 这一句要说的是列表上那一行显示的东西：行标题是模型名优先（讯飞那档没有模型格，改取 AppID），
+      // 方案名建那条时按当时的标题落定、之后不跟着改（弹窗里没有改名格），照 `name` 念就成了
+      // 「已存好「whisper-large-v3」」、而行上写着刚改的模型名——用户会以为存错了地方。
+      // 列表这次没刷新出来（`row` 为空）时只能念弹窗里那几格，所以取哪一格也得按同一张表问
+      const rowTitle = profileRowTitle(
+        cap,
+        row,
+        draft.fields[titleKeyOf(cap, draft.fields)] || '这一套'
+      )
       toast.success(`已存好「${rowTitle}」的凭据${keyNote}${pointerNote}${staleNote}`, 6000)
       closeDialog()
     } catch {
@@ -613,9 +665,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     if (!api) return false
     const deleted = profiles?.profiles[cap].find((profile) => profile.id === profileId)
     const deletedName = profileRowTitle(cap, deleted, '这一套')
-    // 「含它保存的 API Key」要说得有条件：这一套没填过 Key 时（自建网关、或只填了地址的草稿），
-    // 括号里那句就是凭空多出来的恐吓，用户会以为删掉了一把还在别处用的密钥
-    const keyTail = deleted && deleted.keyStatus !== 'none' ? '（含它保存的 API Key）' : ''
+    // 「含它保存的 API Key」要说得有条件：这一套没填过密文时（自建网关、或只填了地址的草稿），
+    // 括号里那句就是凭空多出来的恐吓，用户会以为删掉了一把还在别处用的密钥。
+    // 存了哪几把按磁盘上的状态念（讯飞那档可能是两把），一律说「API Key」对只有 APISecret 的那条是错话
+    const savedLabels = savedSecretLabels(cap, deleted)
+    const keyTail = savedLabels.length ? `（含它保存的 ${savedLabels.join('、')}）` : ''
     const view = await runProfileAction(() => api.deleteProfile(cap, profileId))
     if (!view) return false
     refreshVoicePage(cap)
@@ -885,6 +939,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
               apiBase: fields.asrApiBase ?? '',
               apiKey: '',
               model: fields.asrModel ?? '',
+              // 讯飞那一档多两样（1.1.2，#343）：AppID 是要发出去的参数，走明文格照读；
+              // APISecret 只用来算签名，明文从不过 IPC，所以这里恒发空串，
+              // 主进程按下面那个 profileId 回落到磁盘上已存的那一把（与 apiKey 同一口径）
+              appId: fields.asrAppId ?? '',
+              apiSecret: '',
             }
           : kind === 'tts'
             ? {
@@ -1211,6 +1270,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    */
   const ttsOpenaiCompatible = ttsVendorOf(ttsRow?.values.ttsProvider) === 'openai'
 
+  /**
+   * 转写这一档同上一段：厂商决定这次请求长什么样，也决定面板上那两句话怎么说。
+   * 一样读磁盘上「当前使用」那一条——弹窗里还没保存的厂商不算数，真转写用的是这一条。
+   */
+  const asrVendorName = asrVendorLabel(asrRow?.values.asrVendor)
+  /** 讯飞那家：自检与真转写都要「提交完再等」，两句话都不能写成「点完就出结果」 */
+  const asrAsync = asrVendorIsAsync(asrRow?.values.asrVendor)
+  /** 「转写语言」那格对这一家有没有用（讯飞钉死 autodialect，这一格发不过去） */
+  const asrLanguageApplies = asrVendorLanguageApplies(asrRow?.values.asrVendor)
+
   if (!tab) return null
 
   /**
@@ -1282,8 +1351,12 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   ))}
                 </select>
                 <span className="settings-form-hint">
-                  本地和云端都按这个语言转写，保存后对下一次生效。选错会整段跑偏、甚至输出成另一种语言的翻译；
-                  非中文暂不支持本地校对（误听表和词库都是中文的），要走「校对配置」里的 AI 校对
+                  {values.asrProvider === 'cloud' && !asrLanguageApplies
+                    ? // 这一格对讯飞那一条是空的：它的上传参数只收 autodialect／autominor，
+                      // Whisper 那套语言短码发过去是一条 100020。不说清楚，用户会把一次方言识别
+                      // 失败算到这一格头上，然后在这里反复改一个发不出去的值
+                      `「当前使用」那一条是${asrVendorName}：这一家自己判语种，这一格发不过去，选什么都不影响它的结果。换成别的那一家时才按这里选的语言转写。非中文暂不支持本地校对（误听表和词库都是中文的），要走「校对配置」里的 AI 校对`
+                    : '本地和云端都按这个语言转写，保存后对下一次生效。选错会整段跑偏、甚至输出成另一种语言的翻译；非中文暂不支持本地校对（误听表和词库都是中文的），要走「校对配置」里的 AI 校对'}
                 </span>
               </div>
               {values.asrProvider === 'cloud' && (
@@ -1330,7 +1403,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   {values.asrProvider === 'cloud'
                     ? !asrRow
                       ? testBlockedHint('asr')
-                      : `按「当前使用」那一套（${profileRowTitle('asr', asrRow, '没填模型')}）已保存的地址、模型和 Key 真实走一次转写接口：上传 1 秒静音，花费可忽略。弹窗里没点「保存」的那些字不算`
+                      : asrAsync
+                        ? // 这一家不是「一发请求就有结论」：先上传换订单号，再轮询到对方出结果。
+                          // 不说清等待量，用户会在第一分钟就认定按钮坏了、再点一次
+                          `按「当前使用」那一套（${profileRowTitle('asr', asrRow, '没填 AppID')}）已保存的地址与三样凭据真实走一次：上传一份静音样本换订单号，再轮询到出结果，最长等 3 分钟——按钮一直转不是卡住了，花费可忽略。弹窗里没点「保存」的那些字不算`
+                        : `按「当前使用」那一套（${profileRowTitle('asr', asrRow, '没填模型')}）已保存的地址、模型和 Key 真实走一次转写接口：上传 1 秒静音，花费可忽略。弹窗里没点「保存」的那些字不算`
                     : '只检查本机引擎是否在线，不发网络请求；引擎没起来点「重启本地引擎」，不用退出应用'}
                 </span>
                 {testResults.asr && <TestResultView result={testResults.asr} />}
@@ -1753,8 +1830,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
             }
             busy={profileBusy || draftSaving}
             onFieldChange={setDraftField}
-            onApiKeyChange={setDraftKey}
-            onClearKey={clearDraftKey}
+            onSecretChange={setDraftSecret}
+            onClearSecret={clearDraftSecret}
             onCurrentChange={setDraftCurrent}
             onSave={commitDialog}
             onCancel={closeDialog}

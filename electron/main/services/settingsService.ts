@@ -80,6 +80,17 @@ export interface AppSettings {
   asrApiBase: string
   asrModel: string
   /**
+   * 讯飞那一档要的第二、第三把凭据（1.1.2，#343）。只有这一家用得上：它的签名要
+   * AppID + APIKey + APISecret 三样一起才算得出来，缺任何一样都发不出请求。
+   * 走 multipart 的那几家（OpenAI 兼容、MiniMax）读不到这两项，界面上也按厂商不画这两格。
+   *
+   * AppID 不是凭据（它出现在签名参数里、也要拼进 URL），所以走明文格；
+   * APISecret 只用来算 HMAC、**从不作为参数发出去**，与 APIKey 同一条 safeStorage 通道。
+   * 两格都跟着方案走，与 `ttsResourceId` 一样：老方案磁盘上没有，读出来是空串，不需要一次迁移。
+   */
+  asrAppId: string
+  asrApiSecret: string
+  /**
    * 本地引擎的 Whisper 档位（base / small）。
    * 与 asrModel 分开存：asrModel 只喂云端转写接口，本地档位名会被 Python 侧直接拼成
    * HuggingFace repo 名，两者混用会让用户填的云端模型名变成下载目标。
@@ -137,8 +148,18 @@ export interface AppSettings {
 }
 
 /** 密钥字段的字段名；脱敏视图与保存语义都按这几个键走 */
-type SecretField = 'asrApiKey' | 'aiApiKey' | 'ttsApiKey'
-const SECRET_FIELDS: SecretField[] = ['asrApiKey', 'aiApiKey', 'ttsApiKey']
+type SecretField = 'asrApiKey' | 'asrApiSecret' | 'aiApiKey' | 'ttsApiKey'
+const SECRET_FIELDS: SecretField[] = ['asrApiKey', 'asrApiSecret', 'aiApiKey', 'ttsApiKey']
+
+/**
+ * 方案字段里哪几格算凭据（走 safeStorage、跨 IPC 只给状态位、保存时「留空＝不改」）。
+ *
+ * 按**字段名**列而不是按「哪一档」列：`apiSecret` 此刻只有转写档用得上（讯飞那一家的签名
+ * 要 AppID + APIKey + APISecret 三把，1.1.2 #343），另两档的方案里根本不会出现这一格，
+ * 所以「这一档有哪几项」仍然只由 CAPABILITY_FIELDS 说了算，这里只回答「这一格要不要封起来」。
+ * 少一张按档列的表，就少一处「加了一档凭据、忘了在另一张表里登记」的分叉。
+ */
+const SECRET_PROFILE_FIELDS: readonly string[] = ['apiKey', 'apiSecret']
 
 /**
  * 密文在 JSON 里的写法。加前缀是为了「能不能解密」和「是不是新版格式」能分开判断：
@@ -154,6 +175,11 @@ export type SettingsView = Omit<AppSettings, SecretField> & {
   asrKeyStatus: SecretStatus
   aiKeyStatus: SecretStatus
   ttsKeyStatus: SecretStatus
+  /**
+   * 转写档那第二把凭据（APISecret）的状态。只有讯飞用得上，另两档没有这一格——
+   * 所以它不跟上面那三个并列命名成 `asrApiSecretStatus`：那会让人以为校对/配音也该有一个。
+   */
+  asrSecretStatus: SecretStatus
   keyEncryptionAvailable: boolean
   /**
    * 这份配置是怎么来的：null＝正常读到了磁盘上的配置；非 null＝磁盘那份没读出来，
@@ -175,6 +201,13 @@ export interface ProfileView {
   name: string
   values: Record<string, string>
   keyStatus: SecretStatus
+  /**
+   * 这一档除 apiKey 之外还封着的凭据在界面上的状态，键是**扁平名**（此刻只有转写档的
+   * `asrApiSecret`，讯飞要三把）。没有这一格的档就是空对象。
+   * 为什么不并进 keyStatus：三档的列表行与编辑弹窗都在读 keyStatus 说「Key 存没存」，
+   * 把它摊成一张按档不同的表，等于让另两档凭空多一层要读的东西。
+   */
+  secretStatus: Record<string, SecretStatus>
 }
 
 /**
@@ -221,6 +254,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   asrApiKey: '',
   asrApiBase: '',
   asrModel: '',
+  asrAppId: '',
+  asrApiSecret: '',
   asrLocalModel: 'base',
   asrLanguage: 'zh',
   aiProvider: 'openai',
@@ -267,35 +302,39 @@ function defaultGlobals(): SettingsGlobals {
   return globals
 }
 
+/** 一条方案里那几格封过的凭据：键是方案字段名，值同时带明文与它给界面看的状态 */
+type ProfileSecrets = Record<string, { value: string; status: SecretStatus }>
+
 /**
- * 一份缓存三样用途：raw 是磁盘上该原样写回的样子（全局段 + 方案列表，密文不动它），
- * plain / status 是按「能力 + 方案 id」索引的两张查找表——解密后的 Key 和它给界面看的状态。
+ * 一份缓存两样用途：raw 是磁盘上该原样写回的样子（全局段 + 方案列表，密文不动它），
+ * secrets 是按「能力 + 方案 id + 方案字段」索引的一张查找表——解密后的凭据和它的状态。
  *
  * 为什么不干脆再存一份「解密后的方案列表」：那要把整个 store 深拷贝一遍，而两处列表
- * 迟早会分叉（就地加密改一处、保存改另一处）。密钥是唯一需要解密的字段，把它单独摊成
+ * 迟早会分叉（就地加密改一处、保存改另一处）。凭据是唯一需要解密的字段，把它单独摊成
  * 一张表，「谁被解过、解成什么状态」就只有一份事实；其余字段本来就是明文，读 raw 即可。
  * 每次解密都要过一遍系统密钥库，所以按进程缓存，不在每次取配置时重解。
+ *
+ * 这一张表原来是 `plain` + `status` 两张（一条方案只有一格凭据时够用）；讯飞那一档要第二格
+ * 之后合成一张，是因为两张表的键完全一样、只差一个字段维度——分成两张就会出现
+ * 「解出来的是 A 的明文、状态说的是 B 的」这种编译期管不住的错配。
  */
 interface SettingsCache {
   raw: SettingsStore
-  plain: Record<ProfileCapability, Record<string, string>>
-  status: Record<ProfileCapability, Record<string, SecretStatus>>
+  /**
+   * [能力][方案 id][方案字段] → 解出来的明文与它的状态。
+   * 键是**方案字段名**（apiKey / apiSecret），一条方案此刻最多两格；
+   * 缺项即「这条方案没有这一格」（老方案里没有 apiSecret 就是这一种）。
+   */
+  secrets: Record<ProfileCapability, Record<string, ProfileSecrets>>
   /** 磁盘上有没有需要就地加密的历史明文（任何一条方案里的都算） */
   migrated: boolean
 }
 
-/** 三张查找表的空壳：buildCache 往里逐项填，缺项即「这条方案不存在」 */
-function emptyLookups(): {
-  plain: Record<ProfileCapability, Record<string, string>>
-  status: Record<ProfileCapability, Record<string, SecretStatus>>
-} {
-  const plain = {} as Record<ProfileCapability, Record<string, string>>
-  const status = {} as Record<ProfileCapability, Record<string, SecretStatus>>
-  for (const cap of PROFILE_CAPABILITIES) {
-    plain[cap] = {}
-    status[cap] = {}
-  }
-  return { plain, status }
+/** 凭据查找表的空壳：buildCache 往里逐项填，缺项即「这条方案不存在」或「没有这一格」 */
+function emptySecrets(): Record<ProfileCapability, Record<string, ProfileSecrets>> {
+  const secrets = {} as Record<ProfileCapability, Record<string, ProfileSecrets>>
+  for (const cap of PROFILE_CAPABILITIES) secrets[cap] = {}
+  return secrets
 }
 
 let cache: SettingsCache | null = null
@@ -497,17 +536,24 @@ function unseal(stored: string): { value: string; status: SecretStatus } {
  * 界面（第③④步）按 (能力, 方案 id) 显示的就是这里的 status。
  */
 function buildCache(raw: SettingsStore): SettingsCache {
-  const { plain, status } = emptyLookups()
+  const secrets = emptySecrets()
   let migrated = false
   for (const cap of PROFILE_CAPABILITIES) {
     for (const profile of raw.profiles[cap]) {
-      const { value, status: st } = unseal(profile.apiKey)
-      plain[cap][profile.id] = value
-      status[cap][profile.id] = st
-      if (st === 'plaintext') migrated = true
+      const entry: ProfileSecrets = {}
+      for (const field of SECRET_PROFILE_FIELDS) {
+        const stored = profile[field]
+        // 这一格在这条方案里根本不存在时（老方案没有 apiSecret）不建条目：建一个
+        // status='none' 的空壳和「确实没填」在界面上分不出来，而缺项才是真话
+        if (typeof stored !== 'string' || !stored) continue
+        const { value, status } = unseal(stored)
+        entry[field] = { value, status }
+        if (status === 'plaintext') migrated = true
+      }
+      secrets[cap][profile.id] = entry
     }
   }
-  return { raw, plain, status, migrated }
+  return { raw, secrets, migrated }
 }
 
 /**
@@ -567,8 +613,11 @@ async function migratePlainKeys(store: SettingsStore): Promise<void> {
   const sealed = cloneStore(store)
   for (const cap of PROFILE_CAPABILITIES) {
     for (const profile of sealed.profiles[cap]) {
-      if (profile.apiKey && !profile.apiKey.startsWith(ENC_PREFIX)) {
-        profile.apiKey = seal(profile.apiKey)
+      for (const field of SECRET_PROFILE_FIELDS) {
+        const stored = profile[field]
+        if (typeof stored === 'string' && stored && !stored.startsWith(ENC_PREFIX)) {
+          profile[field] = seal(stored)
+        }
       }
     }
   }
@@ -585,12 +634,12 @@ function asObject(value: unknown): Record<string, unknown> {
 /**
  * 一条全新的默认方案：id / name 用生产那对常量，业务字段逐个落回 DEFAULT_SETTINGS。
  * 字段只按 CAPABILITY_FIELDS 那张表写，所以「这一档有哪几项」加一项时不用改这里
- * （密钥除外：它的默认值不在这里猜，只从磁盘那一份来）。
+ * （凭据除外：它的默认值不在这里猜，只从磁盘那一份来）。
  */
 function defaultProfileFor(cap: ProfileCapability): Profile {
   const profile: Profile = { id: DEFAULT_PROFILE_IDS[cap], name: DEFAULT_PROFILE_NAME, apiKey: '' }
   for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
-    if (field === 'apiKey') continue
+    if (SECRET_PROFILE_FIELDS.includes(field)) continue
     profile[field] = DEFAULT_SETTINGS[flatKey as keyof AppSettings]
   }
   return profile
@@ -844,23 +893,26 @@ function flattenFor(current: SettingsCache, selection?: ProfileSelection): AppSe
     const profile = pickProfile(current.raw, cap, selection?.[cap])
     if (!profile) continue
     for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
-      const value = field === 'apiKey' ? current.plain[cap][profile.id] : profile[field]
+      const value = SECRET_PROFILE_FIELDS.includes(field)
+        ? current.secrets[cap][profile.id]?.[field]?.value
+        : profile[field]
       out[flatKey as keyof AppSettings] = typeof value === 'string' ? value : ''
     }
   }
   return out
 }
 
-/** 某个 id（缺省＝该档默认方案）在界面上的密钥状态：视图里那三个 `*KeyStatus` 取自这里 */
-function keyStatusFor(
+/** 某个 id（缺省＝该档默认方案）那一格凭据在界面上的状态：视图里那几个 `*Status` 取自这里 */
+function secretStatusFor(
   current: SettingsCache,
   cap: ProfileCapability,
+  field: string,
   selection?: ProfileSelection
 ): SecretStatus {
   const profile = pickProfile(current.raw, cap, selection?.[cap])
-  // 这一档现在没有方案，「有没有 Key」的答案就是「没有」——不是「读不出来」
+  // 这一档现在没有方案，「有没有」的答案就是「没有」——不是「读不出来」
   if (!profile) return 'none'
-  return current.status[cap][profile.id] ?? 'none'
+  return current.secrets[cap][profile.id]?.[field]?.status ?? 'none'
 }
 
 /**
@@ -946,16 +998,17 @@ export async function loadSettings(selection?: ProfileSelection): Promise<AppSet
   return flattenFor(await readCache(), selection)
 }
 
-/** 给界面的脱敏视图：几把 Key 在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」 */
+/** 给界面的脱敏视图：凭据在这里就不再返回明文，渲染层拿到的是「有没有、能不能用、是不是明文」 */
 export async function getSettingsView(selection?: ProfileSelection): Promise<SettingsView> {
   const current = await readCache()
   const flat = flattenFor(current, selection)
-  const { asrApiKey: _asr, aiApiKey: _ai, ttsApiKey: _tts, ...rest } = flat
+  const { asrApiKey: _asr, asrApiSecret: _asrSecret, aiApiKey: _ai, ttsApiKey: _tts, ...rest } = flat
   return {
     ...rest,
-    asrKeyStatus: keyStatusFor(current, 'asr', selection),
-    aiKeyStatus: keyStatusFor(current, 'ai', selection),
-    ttsKeyStatus: keyStatusFor(current, 'tts', selection),
+    asrKeyStatus: secretStatusFor(current, 'asr', 'apiKey', selection),
+    aiKeyStatus: secretStatusFor(current, 'ai', 'apiKey', selection),
+    ttsKeyStatus: secretStatusFor(current, 'tts', 'apiKey', selection),
+    asrSecretStatus: secretStatusFor(current, 'asr', 'apiSecret', selection),
     keyEncryptionAvailable: encryptionAvailable(),
     storageProblem: describeLoadProblem(loadProblem),
   }
@@ -969,7 +1022,7 @@ export async function getSettingsView(selection?: ProfileSelection): Promise<Set
  */
 function hasCredentialInput(patch: SettingsPatch, cap: ProfileCapability): boolean {
   for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
-    if (field === 'apiKey') {
+    if (SECRET_PROFILE_FIELDS.includes(field)) {
       const secret = patch[flatKey as SecretField]
       if (typeof secret === 'string' && secret) return true
       continue
@@ -1024,7 +1077,7 @@ export async function saveSettings(patch: SettingsPatch): Promise<SettingsView> 
       if (SECRET_FIELDS.includes(flatKey as SecretField)) {
         const incomingSecret = patch[flatKey as SecretField]
         if (incomingSecret === undefined || incomingSecret === '') continue
-        profile.apiKey = incomingSecret === null ? '' : seal(incomingSecret.trim())
+        profile[field] = incomingSecret === null ? '' : seal(incomingSecret.trim())
         continue
       }
       // 只认这里列得出的配置项，且只收字符串：界面上多带的字段（脱敏视图的状态位）
@@ -1068,23 +1121,30 @@ function normalizeProfileIdArg(raw: unknown): string {
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
-/** 一条方案投成界面看的脱敏形状：字段按 CAPABILITY_FIELDS 那张表给，密钥只给状态 */
+/** 一条方案投成界面看的脱敏形状：字段按 CAPABILITY_FIELDS 那张表给，凭据只给状态 */
 function profileViewFor(
   current: SettingsCache,
   cap: ProfileCapability,
   profile: Profile
 ): ProfileView {
   const values: Record<string, string> = {}
+  const secretStatus: Record<string, SecretStatus> = {}
+  const secrets = current.secrets[cap][profile.id] ?? {}
   for (const [flatKey, field] of CAPABILITY_FIELDS[cap]) {
-    if (field === 'apiKey') continue
-    const value = profile[field]
-    values[flatKey] = typeof value === 'string' ? value : ''
+    if (!SECRET_PROFILE_FIELDS.includes(field)) {
+      const value = profile[field]
+      values[flatKey] = typeof value === 'string' ? value : ''
+      continue
+    }
+    // apiKey 那一格的状态走下面那个 keyStatus（三档的列表行都在读它），不在这张表里再抄一份
+    if (field !== 'apiKey') secretStatus[flatKey] = secrets[field]?.status ?? 'none'
   }
   return {
     id: profile.id,
     name: profile.name,
     values,
-    keyStatus: current.status[cap][profile.id] ?? 'none',
+    keyStatus: secrets.apiKey?.status ?? 'none',
+    secretStatus,
   }
 }
 
@@ -1260,8 +1320,8 @@ export async function setDefaultProfile(
 }
 
 /**
- * 应用自己往根地址后面接的那几条路径，逐条抄自三个拼请求的地方：
- * `ttsVendor.VENDOR_SHAPES`、`asrVendor.buildAsrRequest`、`ai/openaiCompatible`。
+ * 应用自己往根地址后面接的那几条路径，逐条抄自四个拼请求的地方：
+ * `ttsVendor.VENDOR_SHAPES`、`asrVendor.buildAsrRequest`、`asr/iflytekAsr`、`ai/openaiCompatible`。
  * 这张表只用来**认用户粘错的尾巴**，不用来拼请求——拼法仍以那三处为准，
  * 新增一条端点而忘了登记到这里的代价是「粘贴完整端点又变成 404」，
  * `tests/settingsNormalize.test.ts` 里有一条对账测试专门盯这件事。
@@ -1274,6 +1334,8 @@ const APPENDED_ENDPOINT_PATHS: readonly string[] = [
   '/v1/audio/transcriptions',
   '/v1/speech_to_text',
   '/api/v3/auc/bigmodel/recognize/flash',
+  '/v2/upload',
+  '/v2/getResult',
   '/v1/audio/speech',
   '/v1/t2a_v2',
   '/api/v1/services/audio/tts/speechsynthesizer',
@@ -1298,7 +1360,11 @@ const APPENDED_ENDPOINT_PATHS: readonly string[] = [
  */
 export function normalizeApiBase(raw: string): string {
   const noSlash = (raw || '').trim().replace(/\/+$/, '')
-  const tail = APPENDED_ENDPOINT_PATHS.find((path) => noSlash.toLowerCase().endsWith(path))
+  // 两边都要小写：表里有一条大小写混排的（讯飞的 `/v2/getResult`），只把用户粘的那一份转小写
+  // 会让那一条永远匹配不上——症状是「粘完整端点又变回 404」，正是这张表要治的那一类。
+  // 切长度用表里原样的那一份：ASCII 的大小写转换不改长度，所以两个数必然相等。
+  const lowered = noSlash.toLowerCase()
+  const tail = APPENDED_ENDPOINT_PATHS.find((path) => lowered.endsWith(path.toLowerCase()))
   const rooted = tail ? noSlash.slice(0, -tail.length).replace(/\/+$/, '') : noSlash
   return rooted.replace(/\/v1$/i, '')
 }
@@ -1325,6 +1391,10 @@ export async function getASRConfig(
     apiKey: settings.asrApiKey,
     apiBase: normalizeApiBase(settings.asrApiBase),
     model: settings.asrModel,
+    // 讯飞那一档要的另外两把（#343）：它的签名要 AppID + APIKey + APISecret 一起才算得出来。
+    // 其余厂商的适配层读不到这两项，所以照旧投得出来，不由调用方判断「这一项什么时候有意义」
+    appId: settings.asrAppId,
+    apiSecret: settings.asrApiSecret,
     localModel: normalizeLocalModel(settings.asrLocalModel),
   }
 }

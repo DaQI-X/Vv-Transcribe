@@ -14,6 +14,7 @@ import {
   normalizeTtsEngine,
 } from '../electron/main/services/settingsService'
 import { buildAsrRequest } from '../electron/main/services/asr/asrVendor'
+import { buildIflytekResult, buildIflytekUpload } from '../electron/main/services/asr/iflytekAsr'
 import { buildSpeechRequest } from '../electron/main/services/ttsVendor'
 import {
   DEFAULT_LOCAL_TTS_ENGINE,
@@ -105,6 +106,35 @@ describe('normalizeApiBase', () => {
           resourceId: '',
         }).url
       ).toBe(pasted)
+    }
+
+    // 讯飞那两趟的路径不在适配层的固定形状里（每趟现算签名），但尾巴表照样要认下它们：
+    // 用户照文档粘的正是 `.../v2/upload` 与 `.../v2/getResult` 这两条。
+    // 查询串不参与归一化，所以比的是路径那一段
+    const iflytekCredentials = { appId: 'a', apiKey: 'k', apiSecret: 's' }
+    const iflytekUpload = (base: string) =>
+      buildIflytekUpload({
+        apiBase: base,
+        credentials: iflytekCredentials,
+        fileName: 'f.wav',
+        fileSize: 1,
+        signatureRandom: 'r',
+        dateTime: '2026-11-07T01:02:03+0800',
+      }).url.split('?')[0]
+    const iflytekResult = (base: string) =>
+      buildIflytekResult({
+        apiBase: base,
+        credentials: iflytekCredentials,
+        orderId: 'o',
+        signatureRandom: 'r',
+        dateTime: '2026-11-07T01:02:03+0800',
+      }).url.split('?')[0]
+
+    for (const build of [iflytekUpload, iflytekResult]) {
+      const pasted = build(apiBase)
+      const rooted = normalizeApiBase(pasted)
+      expect(rooted).toBe(apiBase)
+      expect(build(rooted)).toBe(pasted)
     }
 
     // 校对这一腿没有适配层，路径就写死在 openaiCompatible 与连接自检里；这里钉住表抄对了

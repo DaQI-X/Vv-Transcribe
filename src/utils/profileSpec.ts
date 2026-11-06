@@ -41,8 +41,11 @@ export interface ProfileFieldSpec {
   /**
    * 同一句话在不同厂商下不是同一件事实时才用（配音模型：三家必填、豆包不收）。
    * 与 `placeholderFrom` 同一个约束：只说界面，不写值。
+   *
+   * 返回 undefined＝「这一家没有特别要交代的」，弹窗据此落回上面那句静态 `hint`
+   * （转写的 API Key 就是这种：只有讯飞那档要提醒「它不是 AppID 也不是 APISecret」）。
    */
-  hintFrom?: (fields: Record<string, string>) => string
+  hintFrom?: (fields: Record<string, string>) => string | undefined
   options?: ProfileFieldOption[]
   /**
    * 这一格在什么条件下才出现。收的是整份 draft.fields，所以判据可以跟着「厂商」那一格走。
@@ -55,7 +58,7 @@ export interface ProfileFieldSpec {
   /** 选中某项时连带填入的其他格：换服务商就是换一家网关，地址与默认模型跟着换 */
   fills?: Record<string, Record<string, string>>
   /**
-   * 选中某项时连带**清空**的其他格（含密钥那格，弹窗按 `keyFieldOf` 认出来）。
+   * 选中某项时连带**清空**的其他格（含密文那几格，弹窗按 `secretFieldsOf` 认出来）。
    * 和 `fills` 是相反的决定：这一家的地址、Key、模型名只有对方文档说了算，
    * 我们填进去的每一个值都可能被用户当成「已经配好了」直接点保存，
    * 而猜错的地址比空格子难发现——空格子会被当场拦下，猜错的地址要跑到失败才说话。
@@ -68,6 +71,14 @@ export interface ProfileFieldSpec {
    * 界面上一格空白，用户以为没选，主进程那边按默认档发请求。
    */
   fallback?: string
+  /**
+   * 密文那格（`kind: 'key'`）自己的「这一套还没有」说法，新建与编辑各一句。
+   * 不给就用这一档那一份（`keyHintNew` / `keyHintEdit`）。只有第二把密文才用得上——
+   * 讯飞那格 APISecret 说「这一套还没有 Key」是句错话，它不是 Key，用途也完全不同
+   * （只用来算 HMAC，一个字节都不发出去）。
+   */
+  secretHintNew?: string
+  secretHintEdit?: string
 }
 
 export interface ProfileCapSpec {
@@ -77,6 +88,12 @@ export interface ProfileCapSpec {
   activity: string
   /** 行标题取哪一格（模型名） */
   titleKey: string
+  /**
+   * 行标题按厂商改取哪一格。只有「这一家压根没有模型那一格」时才用得上（讯飞，1.1.2 #343）：
+   * 不换的话每一条讯飞方案的行标题都落回方案名「默认」，三条方案在列表上一模一样，
+   * 用户认不出自己点的是哪一条。AppID 是这一家里唯一还能区分彼此、又不是密钥的那一格。
+   */
+  titleKeyFrom?: (fields: Record<string, string>) => string
   /** 域名那一格（接口地址） */
   baseKey: string
   /** 弹窗里从上到下的格子，密钥那格也在里面占一位 */
@@ -266,17 +283,66 @@ export function ttsVoiceListUrl(raw: unknown): string {
  * 100 QPS 不可扩容）。与其在下拉里挂一个「选了大概率失败」的选项，不如先不列它——
  * 这一格不许说做不到的小事。豆包的**配音**照旧收（它那条链路一次 POST 就给音频），
  * 所以下拉里在配音那一档看得到豆包、在这一档看不到，不是漏了。
+ *
+ * 讯飞（1.1.2，#343）是这三家里唯一收下的「异步」一家：它上传的是**裸音频字节**，
+ * 不需要先把本机文件换成一个公网 URL，所以「上传换订单号 → 轮询取结果」这条链路本机能走完。
+ * 代价是两处：它单独一个适配文件（`asr/iflytekAsr.ts`，签名每趟现算），界面上多两格凭据
+ * （AppID + APISecret）而少一格模型。**这一家本机没有凭据、一次真请求都没发过**，
+ * 所以下拉里选得到它，但任何文案都不许说它验证过。
  */
-const ASR_VENDOR_UI: Record<string, { label: string; apiBaseExample: string; modelExample: string }> = {
+const ASR_VENDOR_UI: Record<
+  string,
+  {
+    label: string
+    apiBaseExample: string
+    modelExample: string
+    /** 这一家收不收「模型」那一格：讯飞那条链路没有模型参数，摆一格等于让人往没人读的地方填值 */
+    wantsModel: boolean
+    /** 这一家还要 AppID + APISecret 两格：它的签名要三样凭据，少一样就是 100009 */
+    wantsAppCredentials: boolean
+    /**
+     * 「转写语言」那一格对这一家有没有用。讯飞只收 `autodialect` / `autominor`，
+     * Whisper 那套短码（zh/en/ja）发过去是一条 100020「语言验证失败」，所以适配层钉死了
+     * `autodialect`——界面上必须说清这一格对它无效，否则用户会把一次方言识别失败算到语言头上。
+     */
+    languageApplies: boolean
+    /**
+     * 这一家走「上传换订单号 → 轮询取结果」那条异步链路（与主进程 `asrVendorUsesOrderFlow` 同一份，
+     * `tests/asrVendor.test.ts` 里对账）。界面上要按它分叉两句话：自检不是「点完就出结论」
+     * （最长等 3 分钟），真转写时进度条会停在「已提交，等对方出结果」那一段。
+     */
+    orderFlow: boolean
+  }
+> = {
   openai: {
     label: 'OpenAI 兼容接口',
     apiBaseExample: 'https://api.openai.com',
     modelExample: 'whisper-1',
+    wantsModel: true,
+    wantsAppCredentials: false,
+    languageApplies: true,
+    orderFlow: false,
   },
   minimax: {
     label: 'MiniMax',
     apiBaseExample: 'https://api.minimax.cn',
     modelExample: 'asr-1.0',
+    wantsModel: true,
+    wantsAppCredentials: false,
+    languageApplies: true,
+    orderFlow: false,
+  },
+  // 1.1.2（#343）新接的一家，也是这三家里唯一「上传换订单号再轮询」的异步接口。
+  // **本机没有这一家的凭据，一次真请求都没发过**：形状全部抄自原厂文档，所以这里一个
+  // 「实测能用」的默认值都不给，界面上也不许说这一家验证过。
+  iflytek: {
+    label: '讯飞（录音文件转写大模型版）',
+    apiBaseExample: 'https://office-api-ist-dx.iflyaisol.com',
+    modelExample: '',
+    wantsModel: false,
+    wantsAppCredentials: true,
+    languageApplies: false,
+    orderFlow: true,
   },
 }
 
@@ -299,11 +365,35 @@ export function asrModelExample(raw: unknown): string {
   return ASR_VENDOR_UI[asrVendorOf(raw)].modelExample
 }
 
+/** 「模型」那一格画不画（与主进程 `ASR_VENDOR_DEFAULT_MODEL` 里空串那几家同源） */
+export function asrVendorWantsModel(raw: unknown): boolean {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].wantsModel
+}
+
+/** AppID 与 APISecret 那两格画不画（与主进程 `asrVendorUsesOrderFlow` 同源，tests/asrVendor.test.ts 对账） */
+export function asrVendorWantsAppCredentials(raw: unknown): boolean {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].wantsAppCredentials
+}
+
+/** 面板上「转写语言」那格要不要说「对这一家无效」 */
+export function asrVendorLanguageApplies(raw: unknown): boolean {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].languageApplies
+}
+
+/**
+ * 这一家是不是「提交后要等」的那条异步链路。界面上两处要按它分叉：自检那句
+ * （不是点完就出结论，最长等 3 分钟）与真转写时进度条那一段的说明。
+ */
+export function asrVendorIsAsync(raw: unknown): boolean {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].orderFlow
+}
+
 export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
   asr: {
     listLabel: '云端转写方案',
     activity: '云端转写',
     titleKey: 'asrModel',
+    titleKeyFrom: (fields) => (asrVendorWantsModel(fields.asrVendor) ? 'asrModel' : 'asrAppId'),
     baseKey: 'asrApiBase',
     fields: [
       {
@@ -314,37 +404,71 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 界面就是一格空白，而主进程那边正按它发请求
         fallback: 'openai',
         hint:
-          '决定这次转写的请求长什么样。换一家的下面几格（接口地址、API Key、模型）会一起清空，不替你猜值——灰字只是举例。这一版可选的是 OpenAI 兼容与 MiniMax；豆包和阿里云百炼的转写都没收，它们只吃「公网可访问的音频地址」，本机文件换不到一个能递给对方的地址（官方那条换临时地址的通道自己写着「请勿用于生产环境」）。豆包的配音是收的，在配音那一档里。校对里那家「通义千问」管的是文字，转写接不上。',
+          '决定这次转写的请求长什么样。换一家的下面几格（接口地址、凭据、模型）会一起清空，不替你猜值——灰字只是举例。这一版可选 OpenAI 兼容、MiniMax 与讯飞。讯飞是「上传音频换订单号、再轮询取结果」的异步接口，收 5 小时以内的长音频，但要三样凭据（AppID / APIKey / APISecret）且没有模型那一格。豆包和阿里云百炼的转写都没收，它们只吃「公网可访问的音频地址」，本机文件换不到一个能递给对方的地址（官方那条换临时地址的通道自己写着「请勿用于生产环境」）。豆包的配音是收的，在配音那一档里。校对里那家「通义千问」管的是文字，转写接不上。',
         options: [
           { value: 'openai', label: 'OpenAI 兼容接口' },
           { value: 'minimax', label: 'MiniMax' },
+          { value: 'iflytek', label: '讯飞（录音文件转写大模型版）' },
         ],
-        clears: ['asrApiBase', 'asrApiKey', 'asrModel'],
+        clears: ['asrApiBase', 'asrApiKey', 'asrModel', 'asrAppId', 'asrApiSecret'],
       },
       {
         key: 'asrApiBase',
         label: 'API Base URL',
         kind: 'text',
         placeholderFrom: (fields) => asrApiBaseExample(fields.asrVendor),
-        hint:
-          '网关的接口地址，填到域名根为止就行（后面的路径按上面的「厂商」接）；照对方文档粘完整端点也认，打的就是你填的这一条。列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
+        // 「留空按 OpenAI 的官方地址发」这句对讯飞是假话：那一档留空时主进程**不会**拿别家的地址
+        // 替它发（那等于把用户的音频 POST 到一个他没选过的服务商去），而是直接判云端不可用
+        hintFrom: (fields) =>
+          asrVendorWantsAppCredentials(fields.asrVendor)
+            ? '这一家的接口地址，填到域名根为止就行（后面的 /v2/upload 与 /v2/getResult 由应用自己接）；照对方文档粘完整端点也认，打的就是你填的这一条。这一格**不能留空**：留空时应用不会拿别家的地址替它发，云端转写直接不可用、落回本地引擎。列表那一行显示的域名就是它。'
+            : '网关的接口地址，填到域名根为止就行（后面的路径按上面的「厂商」接）；照对方文档粘完整端点也认，打的就是你填的这一条。列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
       },
-      { key: 'asrApiKey', label: 'API Key', kind: 'key' },
+      {
+        key: 'asrAppId',
+        label: 'AppID',
+        kind: 'text',
+        // 只有讯飞的签名要它：另两家请求里没有这一层，摆一格等于让人往没人读的地方填值
+        visibleWhen: (fields) => asrVendorWantsAppCredentials(fields.asrVendor),
+        hint:
+          '讯飞开放平台那个应用的 APPID（形如 12345678）。它不是密钥——签名与请求参数里都要带上它，所以按明文存。要和下面两把是**同一个应用**的，串着用得到的是一句 100009「签名校验不通过」。',
+      },
+      {
+        key: 'asrApiKey',
+        label: 'API Key',
+        kind: 'key',
+        hintFrom: (fields) =>
+          asrVendorWantsAppCredentials(fields.asrVendor)
+            ? '讯飞控制台里那把 APIKey——它在请求参数里叫 accessKeyId。它不是 AppID，也不是下面那把 APISecret，三样填串了得到的都是同一句签名不通过。'
+            : undefined,
+      },
+      {
+        key: 'asrApiSecret',
+        label: 'APISecret',
+        kind: 'key',
+        visibleWhen: (fields) => asrVendorWantsAppCredentials(fields.asrVendor),
+        secretHintNew: '填一把，跟着「保存」一起存进这一条；不填＝这条没有 APISecret，讯飞的转写跑不起来',
+        secretHintEdit: '这一套还没有 APISecret：填一把，点「保存」才存进来',
+        hint:
+          '讯飞控制台里那把 APISecret，只用来算这一趟请求的签名，一个字节都不会发出去（所以它和 API Key 一样加密存）。少了它，对方回的是 100009「签名校验不通过」。',
+      },
       {
         key: 'asrModel',
         label: '模型',
         kind: 'text',
+        // 讯飞那条链路没有模型这一层：它的请求参数表里压根没有这个字段
+        visibleWhen: (fields) => asrVendorWantsModel(fields.asrVendor),
         placeholderFrom: (fields) => asrModelExample(fields.asrVendor),
         hint:
           '转写接口要的模型名，建好后列表那一行显示的就是它。各家型号以对方文档为准（OpenAI 兼容形如 whisper-1，MiniMax 是 asr-1.0）；留空时按这一家的默认档发。',
       },
     ],
     introNew:
-      '建一条云端转写方案：先选厂商，再按对方文档填接口地址、Key 和模型（选厂商会把这几格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '建一条云端转写方案：先选厂商，再按对方文档填接口地址、Key 和模型（选厂商会把这几格清空，不替你猜值；选了讯飞会多出 AppID 与 APISecret 两格、少掉模型那一格）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
       '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
-    credSummary: '厂商、地址、模型',
+    credSummary: '厂商、地址、模型（讯飞那一档是 AppID）',
     panelNote:
       '弹窗里的「保存」当场写盘，「删除」也是当场、撤不回来；右下角那颗「保存设置」只管上面的模式与语言。',
     keyHintNew: KEY_HINT_NEW,
@@ -469,9 +593,50 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
   },
 }
 
-/** 这一档密钥那格的扁平键名（跨 IPC 的三态补丁要用） */
+/** 这一档密钥那格的扁平键名（跨 IPC 的三态补丁要用）。有两把密文的那一档指的是第一把（API Key） */
 export function keyFieldOf(cap: ProfileCapability): string {
   return PROFILE_CAP_SPEC[cap].fields.find((field) => field.kind === 'key')!.key
+}
+
+/**
+ * 这一档**所有**密文那几格的扁平键名。
+ * 转写那一档此刻有两把（讯飞的 API Key + APISecret），校对与配音各一把。
+ * 弹窗的草稿、保存时的三态补丁都按这张单子走——只认第一把的话，第二格填了也存不下去，
+ * 而界面上它明明收得下字。
+ */
+export function secretFieldsOf(cap: ProfileCapability): string[] {
+  return PROFILE_CAP_SPEC[cap].fields.filter((field) => field.kind === 'key').map((field) => field.key)
+}
+
+/**
+ * 某一格密文在磁盘上的状态。
+ *
+ * 第一把走 `profile.keyStatus`、其余走 `profile.secretStatus[键名]`——这个不对称是主进程那边
+ * 有意留的（`keyStatus` 三档都在读，改成一张表等于让校对与配音凭空多一层），所以收在这一处，
+ * 组件里就不必各自判断「这一格是第几把」。
+ */
+export function secretStatusOf(
+  cap: ProfileCapability,
+  profile: ProfileView,
+  fieldKey: string
+): ProfileView['keyStatus'] {
+  return fieldKey === keyFieldOf(cap)
+    ? profile.keyStatus
+    : profile.secretStatus?.[fieldKey] ?? 'none'
+}
+
+/** 某一格密文在界面上的叫法（toast 与删除确认要点名是哪一把，不能一律说「API Key」） */
+export function secretLabelOf(cap: ProfileCapability, fieldKey: string): string {
+  return PROFILE_CAP_SPEC[cap].fields.find((field) => field.key === fieldKey)?.label ?? fieldKey
+}
+
+/** 这一条方案真存了哪几把密文，按界面上的叫法念 */
+export function savedSecretLabels(cap: ProfileCapability, profile?: ProfileView): string[] {
+  if (!profile) return []
+  return PROFILE_CAP_SPEC[cap].fields
+    .filter((field) => field.kind === 'key')
+    .filter((field) => secretStatusOf(cap, profile, field.key) !== 'none')
+    .map((field) => field.label)
 }
 
 /** 域名那一格：接口地址是用户手填的，不能指望它能被 URL 解析（填了 `api.x.com` 也算合法） */
@@ -481,9 +646,22 @@ export function profileRowHost(cap: ProfileCapability, profile: ProfileView): st
   return raw.replace(/^[a-z]+:\/\//i, '').replace(/\/.*$/, '')
 }
 
+/**
+ * 这一条的行标题该取哪一格。
+ *
+ * 默认是模型名，可讯飞那一档压根没有模型格（`visibleWhen` 把那一格藏了），照默认取会得到空串、
+ * 一路退回方案名「默认」——三条方案在列表上长得一模一样。所以字段表允许按厂商改口（`titleKeyFrom`）。
+ * 单独导出是因为「列表没读出来」时界面上还得念用户刚在弹窗里敲的那个值，
+ * 那时手上只有 `draft.fields`、没有 `ProfileView`。
+ */
+export function titleKeyOf(cap: ProfileCapability, values: Record<string, string>): string {
+  const spec = PROFILE_CAP_SPEC[cap]
+  return spec.titleKeyFrom?.(values ?? {}) ?? spec.titleKey
+}
+
 /** 行标题：模型名优先，没有模型才退回方案名（第一条建出来时模型可能还空着） */
 export function profileRowTitle(cap: ProfileCapability, profile?: ProfileView, fallback = ''): string {
-  return (profile?.values[PROFILE_CAP_SPEC[cap].titleKey] ?? '').trim() || profile?.name || fallback
+  return (profile?.values[titleKeyOf(cap, profile?.values ?? {})] ?? '').trim() || profile?.name || fallback
 }
 
 /**

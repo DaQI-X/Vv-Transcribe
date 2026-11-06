@@ -9,8 +9,17 @@ export interface ASRSegment {
   confidence?: number
 }
 
-/** 本地引擎的阶段性状态：目前只有首次加载/下载模型 */
-export type ASRStage = 'loading_model'
+/**
+ * 阶段性状态：这一段在等什么，而不是「进度到了百分之几」。
+ *
+ * 两个阶段都**故意不带百分比**：
+ * - `loading_model` 本地引擎首次加载/下载权重，落点由引擎自己报，我们这边不知道它到哪了；
+ * - `waiting_order` 讯飞那类「上传换订单号再轮询」的异步接口（#343），对方只给
+ *   `taskEstimateTime` 这种没有实测数的估值。按估值换算一个百分比就是编一个数给用户看，
+ *   而这条链路上「进度条走到 90% 卡住十分钟」比「一直显示在等对方」更难解释。
+ *   固定百分比 + 一句阶段文案，是 `loading_model` 那一档已经认下来的形状。
+ */
+export type ASRStage = 'loading_model' | 'waiting_order'
 
 /** 引擎在 loading_model 阶段自报的身份：档位名 + 需要下载的权重体积 */
 export interface ASRModelInfo {

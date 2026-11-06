@@ -19,14 +19,24 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { ApiKeyField } from '@/components/settings/ApiKeyField'
-import { PROFILE_CAP_SPEC, keyFieldOf, type ProfileFieldSpec } from '@/utils/profileSpec'
+import { PROFILE_CAP_SPEC, secretFieldsOf, type ProfileFieldSpec } from '@/utils/profileSpec'
 import type { ProfileCapability } from '@/types/settingsProfile'
 import type { KeyStatus } from '@/utils/readiness'
+
+/** 弹窗里一格密文的状态。三档共用这一份形状，讯飞那一档有两格（API Key + APISecret） */
+export interface DraftSecret {
+  /** 这一格里刚敲的字。空＝不改（编辑）／这一条不带密文（新建） */
+  value: string
+  /** 磁盘上那一份的状态；新建时恒为 'none'（还没建出来，磁盘上没有可替换的东西） */
+  status: KeyStatus
+  /** 点过「清除」：保存时这一格发 null，把磁盘上那一份抹掉 */
+  cleared: boolean
+}
 
 /**
  * 弹窗里那份还没落盘的草稿。
  *
- * 它自己带 `keyStatus` / `keyCleared`，不共用面板上那两份：弹窗可以在同一时刻为**另一条**
+ * 它自己带 `secrets`，不共用面板上那份：弹窗可以在同一时刻为**另一条**
  * （或一条还没存在的方案）填密钥，共用就会把 A 套的密钥状态说到 B 套头上。
  * `profileId` 是编辑那一条的 id，新建时为空串——列表上那颗按钮靠它认出自己。
  */
@@ -34,11 +44,10 @@ export interface ProfileDraft {
   capability: ProfileCapability
   mode: 'new' | 'edit'
   profileId: string
-  /** 除密钥以外的格子，键用跨 IPC 的扁平名 */
+  /** 除密文以外的格子，键用跨 IPC 的扁平名 */
   fields: Record<string, string>
-  apiKey: string
-  keyStatus: KeyStatus
-  keyCleared: boolean
+  /** 密文那几格，键同样是扁平名（`secretFieldsOf` 那张单子） */
+  secrets: Record<string, DraftSecret>
   /** 那颗「当前使用」勾选：新建时决定 createProfile 的 setDefault，编辑时决定指针挪不挪 */
   isCurrent: boolean
 }
@@ -50,8 +59,8 @@ interface ProfileDialogProps {
   showCurrentCheck: boolean
   busy: boolean
   onFieldChange: (key: string, value: string) => void
-  onApiKeyChange: (value: string) => void
-  onClearKey: () => void
+  onSecretChange: (key: string, value: string) => void
+  onClearSecret: (key: string) => void
   onCurrentChange: (value: boolean) => void
   onSave: () => void
   onCancel: () => void
@@ -63,8 +72,8 @@ export function ProfileDialog({
   showCurrentCheck,
   busy,
   onFieldChange,
-  onApiKeyChange,
-  onClearKey,
+  onSecretChange,
+  onClearSecret,
   onCurrentChange,
   onSave,
   onCancel,
@@ -83,8 +92,8 @@ export function ProfileDialog({
    * 带着 `clears` 时反过来——把那几格**清空**（配音的「厂商」走这条，1.1.1 拍板）。
    * 理由不是审美：我们替用户填的地址和模型名一旦过时，界面上它就长得像用户自己填的，
    * 点保存就落盘，而错误的地址要等请求失败才说话（空格子当场会被拦下）。
-   * 密钥那格也在 clears 里，但它不能走 `onFieldChange`（值不在 fields 里），
-   * 也不能走 `onClearKey`（那是「把磁盘上这把 Key 抹掉」的明确动作，不该由换厂商替用户做）：
+   * 密文那几格也在 clears 里，但它们不能走 `onFieldChange`（值不在 fields 里），
+   * 也不能走 `onClearSecret`（那是「把磁盘上这一把抹掉」的明确动作，不该由换厂商替用户做）：
    * 只把手上还没存的那串字清掉，磁盘上已存的还是「留空＝不改」那套口径。
    */
   const changeField = (field: ProfileFieldSpec, value: string) => {
@@ -93,9 +102,9 @@ export function ProfileDialog({
     if (fills) {
       for (const [key, filled] of Object.entries(fills)) onFieldChange(key, filled)
     }
-    const keyField = keyFieldOf(draft.capability)
+    const secretKeys = new Set(secretFieldsOf(draft.capability))
     for (const key of field.clears ?? []) {
-      if (key === keyField) onApiKeyChange('')
+      if (secretKeys.has(key)) onSecretChange(key, '')
       else onFieldChange(key, '')
     }
   }
@@ -137,25 +146,33 @@ export function ProfileDialog({
             // 同一句话在不同厂商下不是同一件事实（配音模型的必填性），判据在表里，这里只管念
             const hint = field.hintFrom?.(draft.fields) ?? field.hint
             if (field.kind === 'key') {
+              // 一格里可能有多把密文（讯飞那档 APIKey + APISecret），按 `field.key` 各取一份草稿：
+              // 共用一份就会把 A 把的状态说到 B 把头上（「磁盘上已存」其实说的是另一格）。
+              const secret = draft.secrets[field.key] ?? { value: '', status: 'none', cleared: false }
               return (
                 <div className="settings-form-group" key={field.key}>
                   <label className="settings-form-label">{field.label}</label>
                   <ApiKeyField
-                    value={draft.apiKey}
-                    status={draft.keyStatus}
+                    value={secret.value}
+                    status={secret.status}
                     encryptable={encryptable}
-                    cleared={draft.keyCleared}
+                    cleared={secret.cleared}
                     disabled={busy}
                     saveLabel="保存"
-                    emptyHint={isNew ? spec.keyHintNew : spec.keyHintEdit}
+                    emptyHint={
+                      isNew
+                        ? (field.secretHintNew ?? spec.keyHintNew)
+                        : (field.secretHintEdit ?? spec.keyHintEdit)
+                    }
                     typedHint={
                       isNew
                         ? '这一套还没建出来，磁盘上没有可替换的 Key——这把跟着新建一起存'
                         : undefined
                     }
-                    onChange={onApiKeyChange}
-                    onClear={onClearKey}
+                    onChange={(value) => onSecretChange(field.key, value)}
+                    onClear={() => onClearSecret(field.key)}
                   />
+                  {hint && <span className="settings-form-hint">{hint}</span>}
                 </div>
               )
             }
