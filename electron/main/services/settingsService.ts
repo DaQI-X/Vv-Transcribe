@@ -1321,8 +1321,8 @@ export async function setDefaultProfile(
 
 /**
  * 应用自己往根地址后面接的那几条路径，逐条抄自五个拼请求的地方：
- * `ttsVendor.VENDOR_SHAPES`、`ttsVendor.VENDOR_VOICE_LIST_PATH`、`asrVendor.buildAsrRequest`、
- * `asr/iflytekAsr`、`ai/openaiCompatible`。
+ * `ttsVendor.VENDOR_SHAPES`、`ttsVendor.VENDOR_VOICE_LIST_PATH`、`ttsVendor.VENDOR_VOICE_CLONE`、
+ * `asrVendor.buildAsrRequest`、`asr/iflytekAsr`、`ai/openaiCompatible`。
  * 这张表只用来**认用户粘错的尾巴**，不用来拼请求——拼法仍以那几处为准，
  * 新增一条端点而忘了登记到这里的代价是「粘贴完整端点又变成 404」，
  * `tests/settingsNormalize.test.ts` 里有一条对账测试专门盯这件事。
@@ -1341,6 +1341,10 @@ const APPENDED_ENDPOINT_PATHS: readonly string[] = [
   '/v1/t2a_v2',
   // 配音页那格音色的候选名单（#340）：也是真发出去的一条，所以照样要认下用户粘的尾巴
   '/v1/get_voice',
+  // 声音复刻那两步（#330）：MiniMax 先上传换 file_id 再复刻，百炼一条 customization 走完
+  '/v1/files/upload',
+  '/v1/voice_clone',
+  '/api/v1/services/audio/tts/customization',
   '/api/v1/services/audio/tts/speechsynthesizer',
   '/api/v3/tts/unidirectional',
   '/v1/chat/completions',

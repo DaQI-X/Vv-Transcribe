@@ -33,12 +33,19 @@ import { probeFile, resolveFfmpegBinary } from './audioProcessor'
 import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './localTtsEngine'
 import {
   buildSpeechRequest,
+  buildVoiceCloneRequest,
+  buildVoiceCloneUploadRequest,
   buildVoiceListRequest,
   readSpeechAudio,
+  readVoiceCloneResult,
+  readVoiceCloneUpload,
   readVoiceList,
+  ttsVendorCloneSpec,
+  ttsVendorClonesVoices,
   ttsVendorListsVoices,
   ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
+  voiceCloneProblem,
   TtsVendorError,
   TTS_VENDOR_NAMES,
   type TtsAudioResult,
@@ -301,6 +308,107 @@ export async function listVendorVoices(config: TTSConfig): Promise<VendorVoice[]
   // 名单里是音色 id 与名字，不带 Key；地址只记到域名那层，与其余 TTS 日志同一口径
   logger.info('TTS', 'vendor voice list fetched', { vendor: config.vendor, count: voices.length })
   return voices
+}
+
+/**
+ * 复刻那两步的超时。比取名单（15 秒）和一次合成（60 秒）都长得多，理由是两个真实代价：
+ * 上传那一段音频最大可到 20 MB，而复刻本身是对方在服务端建一把音色，不是当场念一句。
+ * 超时短了的症状是「明明能成的复刻被我们掐断」，用户重试一次又要重传一遍音频。
+ */
+const VOICE_CLONE_TIMEOUT_MS = 120_000
+
+/** 复刻那两步各发一次请求；错误措辞要按「哪一步」分叉，所以这一步的名字由调用方给 */
+async function cloneFetch(step: string, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(VOICE_CLONE_TIMEOUT_MS) })
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new Error(`${step} ${VOICE_CLONE_TIMEOUT_MS / 1000} 秒没响应，已中断`)
+    }
+    throw new Error(`${step}的请求没能发出去：${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** 复刻一次的产物。MiniMax 那一家的 id 是用户自己起的，百炼是对方拼的，两边都从这里拿 */
+export interface VoiceCloneResult {
+  voiceId: string
+}
+
+/**
+ * 用一段本机音频在这一家复刻一把音色（1.1.2 #330）。
+ *
+ * 只有 MiniMax 与百炼收这一件事，另两家在 `ttsVendorClonesVoices` 那段里写清了为什么刻意不接；
+ * 这一条因此先拦「这一家能不能」，再拦「这段音频合不合规矩」，两样都在花钱/上传之前。
+ *
+ * 复刻出来的音色**不落盘**：它是用户账号里的资产，MiniMax 那边能靠 #340 那条列音色接口取回来
+ * （标着「自己复刻」），百炼那边照旧手输一次。所以我们不存第二份、也就不存在「存的和账号里的
+ * 对不上」这种陈旧态——这也是 #330 当年卡住的那个「音色不落盘」问题在这条链路上不成立的原因。
+ *
+ * **两家都没在本机发过一次真复刻请求**（没有百炼的 Key，MiniMax 那把只验过合成与列音色），
+ * 形状全部抄自原厂文档，按 #224 的口径先设计上、后验。
+ */
+export async function cloneVoice(
+  config: TTSConfig,
+  input: { filePath: string; name: string }
+): Promise<VoiceCloneResult> {
+  if (config.engine === 'local') {
+    throw new Error('本地配音没有「复刻音色」这一说：本机能念的是模型自带的那些编号，换嗓子要换模型档')
+  }
+  if (!ttsVendorClonesVoices(config.vendor)) {
+    throw new Error(`${TTS_VENDOR_NAMES[config.vendor]} 不支持在应用里复刻音色`)
+  }
+  if (!config.apiKey.trim()) {
+    throw new Error(`${TTS_VENDOR_NAMES[config.vendor]} 的复刻要用配音方案里那把 Key，现在这一格是空的`)
+  }
+  const spec = ttsVendorCloneSpec(config.vendor)
+  const fileName = basename(input.filePath)
+  let bytes: Buffer
+  try {
+    bytes = await readFile(input.filePath)
+  } catch (err) {
+    throw new Error(`这段音频没能读出来（${fileName}）：${err instanceof Error ? err.message : String(err)}`)
+  }
+  const problem = voiceCloneProblem(config.vendor, { name: input.name, fileName, bytes: bytes.length })
+  if (problem) throw new Error(problem)
+
+  const base = { apiBase: config.apiBase, apiKey: config.apiKey }
+  let voiceId: string
+  if (spec.uploadPath) {
+    // 两步的那一家（MiniMax）：先拿 file_id，再把它与自己起的 voice_id 绑起来。
+    // 第一步失败就别走第二步——带着一个不存在的 file_id 去复刻，对方回的那句和「音频不合格」长得一样
+    const upload = buildVoiceCloneUploadRequest(config.vendor, { ...base, fileName, bytes })
+    const uploadResponse = await cloneFetch('上传复刻音频', upload.url, {
+      method: 'POST',
+      headers: upload.headers,
+      body: upload.form,
+    })
+    const fileId = await readVoiceCloneUpload(config.vendor, upload, uploadResponse)
+    const request = buildVoiceCloneRequest(config.vendor, { ...base, name: input.name, model: config.model, fileId })
+    const response = await cloneFetch('复刻音色', request.url, {
+      method: 'POST',
+      headers: request.headers,
+      body: request.body,
+    })
+    voiceId = await readVoiceCloneResult(config.vendor, request, response, input.name)
+  } else {
+    // 一步的那一家（百炼）：音频编成 Base64 Data URI 直接进请求体，不需要先传到哪儿
+    const request = buildVoiceCloneRequest(config.vendor, {
+      ...base,
+      name: input.name,
+      model: config.model,
+      fileName,
+      bytes,
+    })
+    const response = await cloneFetch('复刻音色', request.url, {
+      method: 'POST',
+      headers: request.headers,
+      body: request.body,
+    })
+    voiceId = await readVoiceCloneResult(config.vendor, request, response, input.name)
+  }
+  // 日志只记体积与新音色的 id：那段音频是用户自己的嗓子，一个字节都不该落进 app.log
+  logger.userAction('TTS voice cloned', { vendor: config.vendor, bytes: bytes.length, voiceId })
+  return { voiceId }
 }
 
 /** 渲染层传下来的段落形状：时间轴只有渲染层有，主进程不存第二份（与 proofread:local 同一口径） */

@@ -11,23 +11,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildSpeechRequest,
+  buildVoiceCloneRequest,
+  buildVoiceCloneUploadRequest,
   buildVoiceListRequest,
   normalizeTtsVendor,
   readSpeechAudio,
+  readVoiceCloneResult,
+  readVoiceCloneUpload,
   readVoiceList,
-  TtsVendorError,
+  ttsVendorCloneSpec,
+  ttsVendorClonesVoices,
   ttsVendorListsVoices,
   ttsVendorNeedsModel,
   ttsVendorNeedsVoice,
   ttsVendorProbeVoice,
   ttsVendorWantsResourceId,
   TTS_VENDOR_RESOURCE_ID,
+  TtsVendorError,
+  voiceCloneProblem,
   type TtsSpeechInput,
   type TtsVendorId,
   type TtsVendorRequest,
+  type TtsVendorUploadRequest,
 } from '../electron/main/services/ttsVendor'
 // 渲染层那张厂商表（界面文案读它）：与上面这张对账，见下面那个 describe
 import {
+  ttsCloneSpec as uiCloneSpec,
+  ttsVendorClonesVoices as uiClonesVoices,
   ttsVendorNeedsModel as uiNeedsModel,
   ttsVendorNeedsVoice as uiNeedsVoice,
   ttsVendorProbeVoice as uiProbeVoice,
@@ -733,6 +743,296 @@ describe('音色候选名单（#340）：只有厂商自己给这条接口时才
     )
     expect(err.message).toContain('回的不是 JSON')
     expect(err.message).toContain('没读出音色名单')
+    expect(err.message).not.toContain('没读出音频')
+  })
+})
+
+/**
+ * 声音复刻（#330）。这一块的口径与前面几块不同：**两家都没在本机发过一次真复刻请求**
+ * （手上没有百炼的 Key，MiniMax 那把只验过合成与列音色），所以这里钉的不是「实测行为」，
+ * 而是「照原厂当前文档拼出来的形状」——形状写错一个键名不会有任何编译错误，
+ * 只会在用户点下去之后换回一句对方网关的 400，而那句 400 看不出是哪一格错了。
+ */
+describe('声音复刻：哪家支持、按什么形状发', () => {
+  const ALL: readonly TtsVendorId[] = ['openai', 'minimax', 'dashscope', 'volc']
+  const rejected = async (promise: Promise<unknown>): Promise<Error> => {
+    try {
+      await promise
+    } catch (err) {
+      return err as Error
+    }
+    throw new Error('这一趟本该失败，却正常返回了')
+  }
+  const uploadReq = (apiBase = 'https://api.minimax.cn'): TtsVendorUploadRequest =>
+    buildVoiceCloneUploadRequest('minimax', {
+      apiBase,
+      apiKey: 'sk-test',
+      fileName: 'me.mp3',
+      bytes: Buffer.from([1, 2, 3]),
+    })
+  const cloneReq = (vendor: TtsVendorId, apiBase = 'https://api.minimax.cn'): TtsVendorRequest =>
+    vendor === 'minimax'
+      ? buildVoiceCloneRequest(vendor, { apiBase, apiKey: 'sk-test', name: 'MiniMax001', model: '', fileId: '123' })
+      : buildVoiceCloneRequest(vendor, {
+          apiBase: 'https://dashscope.aliyuncs.com',
+          apiKey: 'sk-test',
+          name: 'myvoice',
+          model: 'cosyvoice-v3-flash',
+          fileName: 'me.wav',
+          bytes: Buffer.from([9, 8, 7]),
+        })
+
+  it('四家里只有 MiniMax 与百炼支持：另两家不是漏了，是复刻本身要别的条件', () => {
+    expect(ttsVendorClonesVoices('minimax')).toBe(true)
+    expect(ttsVendorClonesVoices('dashscope')).toBe(true)
+    for (const vendor of ['openai', 'volc'] as const) {
+      expect(ttsVendorClonesVoices(vendor)).toBe(false)
+      // 拿不到 spec 时说的必须是「这家不支持」，而不是回一份空规格让上层拼出一个假请求
+      expect(() => ttsVendorCloneSpec(vendor)).toThrow(/不支持在应用里复刻音色/)
+      expect(() => voiceCloneProblem(vendor, { name: 'x', fileName: 'a.mp3', bytes: 1 })).toThrow(
+        /不支持在应用里复刻音色/
+      )
+    }
+  })
+
+  it('对账：界面那张复刻表（起名格与规则文案读它）和主进程这张得说同一件事', () => {
+    for (const vendor of ALL) {
+      expect(uiClonesVoices(vendor)).toBe(ttsVendorClonesVoices(vendor))
+      const ui = uiCloneSpec(vendor)
+      const spec = ttsVendorClonesVoices(vendor) ? ttsVendorCloneSpec(vendor) : null
+      if (!spec) {
+        expect(ui).toBeNull()
+        continue
+      }
+      expect(ui).not.toBeNull()
+      // 「两步还是一步」在界面上决定那颗按钮念什么，判据只能是「有没有上传这一步」
+      expect(ui?.twoStep).toBe(!!spec.uploadPath)
+      expect(ui?.nameLabel).toBe(spec.nameLabel)
+      expect(ui?.nameRule).toBe(spec.nameRule)
+      expect(ui?.audioRule).toBe(spec.audioRule)
+      // 报错时念的那个上限数必须也出现在界面那句原厂规矩里，否则同一件事在两个地方各说一个数
+      expect(spec.audioRule).toContain(spec.sizeLimit)
+      // 灰字举例本身要能过这一家的名字规矩，否则界面上教的第一个值就是会被拦下的那个
+      expect(voiceCloneProblem(vendor, { name: ui!.nameExample, fileName: `a.${spec.formats[0]}`, bytes: 10 })).toBeNull()
+    }
+  })
+
+  it('本机预检只拦测得准的三样：名字形状、后缀、字节数（时长刻意不拦）', () => {
+    const ok = { name: 'MiniMax001', fileName: 'me.mp3', bytes: 1024 }
+    expect(voiceCloneProblem('minimax', ok)).toBeNull()
+    expect(voiceCloneProblem('minimax', { ...ok, name: 'ab' })).toMatch(/不合这一家的规矩/)
+    expect(voiceCloneProblem('minimax', { ...ok, name: '1abc' })).toMatch(/不合这一家的规矩/)
+    expect(voiceCloneProblem('minimax', { ...ok, fileName: 'me.ogg' })).toMatch(/只收 mp3 \/ m4a \/ wav/)
+    expect(voiceCloneProblem('minimax', { ...ok, fileName: '没有后缀' })).toMatch(/认不出后缀/)
+    expect(voiceCloneProblem('minimax', { ...ok, bytes: 0 })).toMatch(/是空的/)
+    // 量出来的那一半走全仓那把尺（SI，与访达同一个数），上限那一半念厂商文档的原话
+    expect(voiceCloneProblem('minimax', { ...ok, bytes: 21 * 1024 * 1024 })).toMatch(
+      /这段音频 22\.0MB，超过这一家复刻收的 20MB/
+    )
+    // 空名字这一条是主进程自己的兜底：界面上那颗按钮本来就该是灰的
+    expect(voiceCloneProblem('minimax', { ...ok, name: '  ' })).toMatch(/先给这一把复刻音色填一个「音色 ID」/)
+  })
+
+  it('百炼那一格是前缀：只收字母数字、最长 10 个，7.5 MB 按原文件拦', () => {
+    const ok = { name: 'myvoice', fileName: 'me.wav', bytes: 1024 }
+    expect(voiceCloneProblem('dashscope', ok)).toBeNull()
+    expect(voiceCloneProblem('dashscope', { ...ok, name: '我的音色' })).toMatch(/不合这一家的规矩/)
+    expect(voiceCloneProblem('dashscope', { ...ok, name: 'prefixtoolong' })).toMatch(/不合这一家的规矩/)
+    // 原厂那句「≤10 MB」说的是 Base64 编码之后，照它拦原文件就是放一批注定被拒的请求出去
+    expect(voiceCloneProblem('dashscope', { ...ok, bytes: 8 * 1024 * 1024 })).toMatch(
+      /这段音频 8\.4MB，超过这一家复刻收的 7\.5MB/
+    )
+  })
+
+  it('上传那一步（只有 MiniMax 有）：purpose=voice_clone，头部刻意不给 Content-Type', () => {
+    const request = uploadReq()
+    expect(request.url).toBe('https://api.minimax.cn/v1/files/upload')
+    expect(Object.keys(request.headers)).toEqual(['Authorization'])
+    expect(request.headers.Authorization).toBe('Bearer sk-test')
+    expect(request.form.get('purpose')).toBe('voice_clone')
+    const file = request.form.get('file')
+    expect(file).toBeInstanceOf(Blob)
+    expect((file as File).name).toBe('me.mp3')
+    // 百炼那一家没有上传这一步，真被调到就得当场说清，而不是拼一条不存在的路径
+    expect(() =>
+      buildVoiceCloneUploadRequest('dashscope', {
+        apiBase: 'https://dashscope.aliyuncs.com',
+        apiKey: 'k',
+        fileName: 'a.wav',
+        bytes: Buffer.from([1]),
+      })
+    ).toThrow(/不用先上传音频/)
+  })
+
+  it('MiniMax 复刻请求：file_id 是纯数字就按数字发，voice_id 用用户自己起的那个', () => {
+    const request = cloneReq('minimax')
+    expect(request.url).toBe('https://api.minimax.cn/v1/voice_clone')
+    expect(request.headers['Content-Type']).toBe('application/json')
+    expect(JSON.parse(request.body)).toEqual({ file_id: 123, voice_id: 'MiniMax001' })
+    // 回执给的不是纯数字时原样发：转成 NaN 比发一个字符串更糟
+    const other = buildVoiceCloneRequest('minimax', {
+      apiBase: 'https://api.minimax.cn',
+      apiKey: 'sk-test',
+      name: ' MiniMax002 ',
+      model: '',
+      fileId: 'file-abc',
+    })
+    expect(JSON.parse(other.body)).toEqual({ file_id: 'file-abc', voice_id: 'MiniMax002' })
+    expect(() =>
+      buildVoiceCloneRequest('minimax', { apiBase: 'https://api.minimax.cn', apiKey: 'k', name: 'a', model: '' })
+    ).toThrow(/要先上传音频换 file_id/)
+  })
+
+  it('百炼复刻请求：音频编成 Data URI，target_model 必须与之后合成用的是同一个', () => {
+    const request = cloneReq('dashscope')
+    expect(request.url).toBe('https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization')
+    const body = JSON.parse(request.body) as { model: string; input: Record<string, string> }
+    expect(body.model).toBe('voice-enrollment')
+    expect(body.input.action).toBe('create_voice')
+    expect(body.input.target_model).toBe('cosyvoice-v3-flash')
+    expect(body.input.prefix).toBe('myvoice')
+    // mime 按后缀定：写错一个 mime 对方解不出音频，回的那句「参数错误」看不出问题在这一格
+    expect(body.input.audio).toBe(`data:audio/wav;base64,${Buffer.from([9, 8, 7]).toString('base64')}`)
+    expect(body.input.language_hints).toBeUndefined()
+
+    expect(() =>
+      buildVoiceCloneRequest('dashscope', {
+        apiBase: 'https://dashscope.aliyuncs.com',
+        apiKey: 'k',
+        name: 'myvoice',
+        model: '  ',
+        fileName: 'a.wav',
+        bytes: Buffer.from([1]),
+      })
+    ).toThrow(/模型那格是空的/)
+    expect(() =>
+      buildVoiceCloneRequest('dashscope', {
+        apiBase: 'https://dashscope.aliyuncs.com',
+        apiKey: 'k',
+        name: 'myvoice',
+        model: 'cosyvoice-v3-flash',
+      })
+    ).toThrow(/要把音频本身递过去/)
+  })
+
+  it('用户照文档粘完整端点也认：两条复刻路径都走 appendApiPath，不接第二层', () => {
+    expect(uploadReq('https://api.minimax.cn/v1/files/upload').url).toBe(
+      'https://api.minimax.cn/v1/files/upload'
+    )
+    expect(cloneReq('minimax', 'https://api.minimax.cn/v1/voice_clone').url).toBe(
+      'https://api.minimax.cn/v1/voice_clone'
+    )
+  })
+
+  it('读上传回执：file_id 是纯数字也按字符串回给上层（下一步会自己判要不要转数字）', async () => {
+    await expect(
+      readVoiceCloneUpload('minimax', uploadReq(), json(200, { file: { file_id: 123 }, base_resp: { status_code: 0 } }))
+    ).resolves.toBe('123')
+  })
+
+  it('上传失败：HTTP 200 但 base_resp 报错，是失败不是「没给 file_id」', async () => {
+    const err = await rejected(
+      readVoiceCloneUpload(
+        'minimax',
+        uploadReq(),
+        json(200, { base_resp: { status_code: 1008, status_msg: 'insufficient balance' } })
+      )
+    )
+    expect(err).toBeInstanceOf(TtsVendorError)
+    expect(err.message).toContain('上传复刻音频回了错误码 1008')
+    expect(err.message).toContain('insufficient balance')
+  })
+
+  it('上传回了 401：状态码与打出去的那条地址都在这一句里', async () => {
+    const err = await rejected(
+      readVoiceCloneUpload(
+        'minimax',
+        uploadReq(),
+        new Response('{"base_resp":{"status_msg":"invalid api key"}}', {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    )
+    expect(err.message).toContain('HTTP 401')
+    expect(err.message).toContain('POST https://api.minimax.cn/v1/files/upload')
+    expect(err.message).toContain('invalid api key')
+  })
+
+  it('上传回了一份 HTML：说的是没读出回执，不是「没读出音频」', async () => {
+    const err = await rejected(
+      readVoiceCloneUpload(
+        'minimax',
+        uploadReq(),
+        new Response('<html>404</html>', { status: 200, headers: { 'content-type': 'text/html' } })
+      )
+    )
+    expect(err.message).toContain('没读出上传回执')
+    expect(err.message).not.toContain('没读出音频')
+  })
+
+  it('上传成功了却没给 file_id：下一步复刻拿不到这段音频，就地停下', async () => {
+    const err = await rejected(
+      readVoiceCloneUpload('minimax', uploadReq(), json(200, { file: {}, base_resp: { status_code: 0 } }))
+    )
+    expect(err.message).toContain('没给 file_id')
+  })
+
+  it('MiniMax 复刻成功：回执里不重复 voice_id，答案就是用户自己填的那一个', async () => {
+    await expect(
+      readVoiceCloneResult('minimax', cloneReq('minimax'), json(200, { base_resp: { status_code: 0 } }), 'MiniMax001')
+    ).resolves.toBe('MiniMax001')
+  })
+
+  it('MiniMax 复刻回了错误码：对方原话在前，我们只补一句「多半是哪一格」', async () => {
+    const err = await rejected(
+      readVoiceCloneResult(
+        'minimax',
+        cloneReq('minimax'),
+        json(200, { base_resp: { status_code: 1002, status_msg: 'voice_id already exists' } }),
+        'MiniMax001'
+      )
+    )
+    expect(err.message).toContain('voice_id already exists')
+    expect(err.message).toContain('音色 id 与已有的重复')
+  })
+
+  it('百炼复刻成功：音色名是对方拼的，只能从回执里读', async () => {
+    await expect(
+      readVoiceCloneResult(
+        'dashscope',
+        cloneReq('dashscope'),
+        json(200, { output: { voice_id: 'cosyvoice-v3-flash-myvoice-abc123' } }),
+        'myvoice'
+      )
+    ).resolves.toBe('cosyvoice-v3-flash-myvoice-abc123')
+  })
+
+  it('百炼复刻回了 code：这是失败，不能把前缀当音色 id 交上去', async () => {
+    const err = await rejected(
+      readVoiceCloneResult('dashscope', cloneReq('dashscope'), json(200, { code: 'InvalidParameter', message: 'audio too short' }), 'myvoice')
+    )
+    expect(err.message).toContain('InvalidParameter')
+    expect(err.message).toContain('audio too short')
+  })
+
+  it('百炼回了成功却没给 voice_id：读不到就等于没复刻成', async () => {
+    const err = await rejected(
+      readVoiceCloneResult('dashscope', cloneReq('dashscope'), json(200, { output: {} }), 'myvoice')
+    )
+    expect(err.message).toContain('别拿前缀当音色用')
+  })
+
+  it('复刻回了一份 HTML：说的是没读出回执', async () => {
+    const err = await rejected(
+      readVoiceCloneResult(
+        'minimax',
+        cloneReq('minimax'),
+        new Response('<html>502</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+        'MiniMax001'
+      )
+    )
+    expect(err.message).toContain('没读出复刻回执')
     expect(err.message).not.toContain('没读出音频')
   })
 })

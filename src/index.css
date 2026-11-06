@@ -2799,6 +2799,69 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   text-align: center;
 }
 
+/* 声音复刻（#330）：收起时只剩一行抬头，展开后是「起名 + 选录音 + 一句原厂口径 + 一颗按钮」。
+   刻意不给底色和光晕——它是这一页里的次级动作，做成一块独立卡片会让人以为配音必须先复刻。
+   上面那条虚线只用来跟「音色」那格分开，实线会和面板边框撞成两层盒子。 */
+.voice-studio__clone {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.voice-studio__clone-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* __link 原本靠 margin-left:auto 贴到行尾，在这儿它是行首那颗开关，得把这一下撤掉 */
+.voice-studio__clone-head .voice-studio__link {
+  margin-left: 0;
+}
+
+.voice-studio__clone-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 文件名只报最后一段，长名字省略号收住：完整路径对认「我刚选的是哪个文件」没有帮助 */
+.voice-studio__clone-pick code {
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-studio__clone-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--error-color);
+}
+
+/* 图标不许跟着多行文字一起被拉伸，也不许在首行里飘高 */
+.voice-studio__clone-error svg {
+  flex: none;
+  margin-top: 3px;
+}
+
+.voice-studio__clone-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 /* 合成中复用转写的 processing 视觉，但状态页那张卡是「整页居中」的绝对定位 + 固定 620x360。
    工作台里它只是右列的一块，所以只拆外壳，动画与排版原样保留。 */
 .voice-studio .status-card {

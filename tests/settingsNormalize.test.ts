@@ -15,7 +15,12 @@ import {
 } from '../electron/main/services/settingsService'
 import { buildAsrRequest } from '../electron/main/services/asr/asrVendor'
 import { buildIflytekResult, buildIflytekUpload } from '../electron/main/services/asr/iflytekAsr'
-import { buildSpeechRequest, buildVoiceListRequest } from '../electron/main/services/ttsVendor'
+import {
+  buildSpeechRequest,
+  buildVoiceCloneRequest,
+  buildVoiceCloneUploadRequest,
+  buildVoiceListRequest,
+} from '../electron/main/services/ttsVendor'
 import {
   DEFAULT_LOCAL_TTS_ENGINE,
   LOCAL_TTS_ENGINES,
@@ -116,6 +121,44 @@ describe('normalizeApiBase', () => {
     expect(
       buildVoiceListRequest('minimax', { apiBase: normalizeApiBase(voiceListPasted), apiKey: 'k' }).url
     ).toBe(voiceListPasted)
+
+    // 声音复刻那三条尾巴（#330）：MiniMax 分两步（先上传换 file_id，再复刻），百炼一条走完。
+    // 用户照文档粘的正是这三条完整端点，漏登记的症状与 #327 一模一样——一句 404，而他填的是原话
+    const uploadPasted = buildVoiceCloneUploadRequest('minimax', {
+      apiBase,
+      apiKey: 'k',
+      fileName: 'a.mp3',
+      bytes: Buffer.from([1]),
+    }).url
+    expect(uploadPasted).toBe(`${apiBase}/v1/files/upload`)
+    expect(normalizeApiBase(uploadPasted)).toBe(apiBase)
+    const mmClone = (base: string) =>
+      buildVoiceCloneRequest('minimax', {
+        apiBase: base,
+        apiKey: 'k',
+        name: 'MiniMax001',
+        model: '',
+        fileId: '1',
+      }).url
+    const dsClone = (base: string) =>
+      buildVoiceCloneRequest('dashscope', {
+        apiBase: base,
+        apiKey: 'k',
+        name: 'myvoice',
+        model: 'cosyvoice-v3-flash',
+        fileName: 'a.wav',
+        bytes: Buffer.from([1]),
+      }).url
+
+    // 粘的是上传那条、发的是复刻那条：同一家两条端点共用一格地址。这一步必须先过归一化——
+    // appendApiPath 只认「用户填的就是这一条端点」（判据是段数），跨端点的串档是归一化那张尾巴表的活
+    expect(mmClone(normalizeApiBase(uploadPasted))).toBe(`${apiBase}/v1/voice_clone`)
+    for (const build of [mmClone, dsClone]) {
+      const pasted = build(apiBase)
+      const rooted = normalizeApiBase(pasted)
+      expect(rooted).toBe(apiBase)
+      expect(build(rooted)).toBe(pasted)
+    }
 
     // 讯飞那两趟的路径不在适配层的固定形状里（每趟现算签名），但尾巴表照样要认下它们：
     // 用户照文档粘的正是 `.../v2/upload` 与 `.../v2/getResult` 这两条。

@@ -151,6 +151,24 @@ const TTS_VENDOR_UI: Record<
     voiceListUrl: string
     /** 「资源编号」那格的灰字举例；空串＝这一家没有这一项，那一格整个不出现 */
     resourceIdExample: string
+    /**
+     * 这一家能不能在应用里复刻音色（1.1.2 #330）。`null`＝不支持，配音页那一块面板整个不出现——
+     * 摆一个「点了注定失败」的入口比不给入口更糟。判据与主进程 `ttsVendor.VENDOR_VOICE_CLONE`
+     * 同源，`tests/ttsVendor.test.ts` 里有一条对账。
+     *
+     * 这几句照抄的是原厂当前口径，而**两家都没在本机发过一次真复刻请求**（没有百炼的 Key，
+     * MiniMax 那把只验过合成与列音色），所以界面上任何一句都不许说「验证过」。
+     */
+    clone: {
+      /** 要不要先把音频传上去换 file_id（MiniMax 两步，百炼一步）：那句「正在…」按它分叉 */
+      twoStep: boolean
+      /** 那一格叫什么：MiniMax 是用户自己起整个音色 id，百炼只给一个前缀 */
+      nameLabel: string
+      nameExample: string
+      nameRule: string
+      /** 这一家收什么样的音频，原话摆出来（时长这类本机测不准的只说不拦） */
+      audioRule: string
+    } | null
   }
 > = {
   openai: {
@@ -163,6 +181,9 @@ const TTS_VENDOR_UI: Record<
     modelExample: 'tts-1',
     voiceListUrl: '',
     resourceIdExample: '',
+    // OpenAI 规范里没有「复刻音色」这一条端点；OpenAI 自家那个要单独申请资格并录一段本人同意声明，
+    // 兼容网关各自加不加更没法假定
+    clone: null,
   },
   minimax: {
     label: 'MiniMax',
@@ -174,6 +195,14 @@ const TTS_VENDOR_UI: Record<
     modelExample: 'speech-2.8-hd',
     voiceListUrl: 'https://platform.minimax.cn/docs/faq/system-voice-id',
     resourceIdExample: '',
+    clone: {
+      twoStep: true,
+      nameLabel: '音色 ID',
+      nameExample: 'MiniMax001',
+      nameRule:
+        '8–256 个字符，首字符是英文字母，只能用字母、数字、横线和下划线，末位不能是横线或下划线，且不能与已有的音色 id 重复',
+      audioRule: 'mp3 / m4a / wav，10 秒到 5 分钟，不超过 20MB，一段连续清楚的朗读（别有背景音乐、噪声或别人的声音）',
+    },
   },
   dashscope: {
     label: '阿里云百炼（CosyVoice）',
@@ -187,6 +216,14 @@ const TTS_VENDOR_UI: Record<
     modelExample: 'cosyvoice-v3-flash',
     voiceListUrl: 'https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list',
     resourceIdExample: '',
+    clone: {
+      twoStep: false,
+      nameLabel: '音色名前缀',
+      nameExample: 'myvoice',
+      nameRule: '只用数字和英文字母，不超过 10 个字符；对方拼出来的完整音色名是「模型-前缀-唯一标识」',
+      audioRule:
+        'wav / mp3 / m4a，建议 10–20 秒、最长 60 秒，采样率 ≥16 kHz，编码后不超过 10MB（所以这一格按原文件 7.5MB 拦）',
+    },
   },
   // 豆包这一档同样**没本机实测过**（手上没有豆包语音的 Key），按 #224 拍板先照原厂规范设计、后验。
   // probeVoice 用的是官方 2.0 音色表里的 vivi 2.0（`zh_female_vv_uranus_bigtts`），
@@ -205,6 +242,9 @@ const TTS_VENDOR_UI: Record<
     modelExample: 'seed-tts-2.0-standard',
     voiceListUrl: 'https://www.volcengine.com/docs/6561/1257544',
     resourceIdExample: 'seed-tts-2.0',
+    // 复刻要先在控制台买一个「音色槽位」，那一步不是配音这把 API Key 能做的（接口侧只能查某个
+    // speaker 的训练状态）。槽位买不到就复刻不了，所以这一档连按钮都不摆
+    clone: null,
   },
 }
 
@@ -269,6 +309,22 @@ export function ttsModelExample(raw: unknown): string {
 /** 厂商提供的系统音色列表页 URL；空串＝这一家没有公开清单 */
 export function ttsVoiceListUrl(raw: unknown): string {
   return TTS_VENDOR_UI[ttsVendorOf(raw)].voiceListUrl
+}
+
+/** 这一家能不能在应用里复刻音色（与主进程 `ttsVendorClonesVoices` 同源，tests/ttsVendor.test.ts 对账） */
+export function ttsVendorClonesVoices(raw: unknown): boolean {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].clone !== null
+}
+
+/**
+ * 复刻那一块面板要念的那几句（`null`＝这一家不支持，面板整个不摆）。
+ * 名字规矩与音频要求都是**对方文档的口径**，不是我们自己的判据：本机拦不拦由主进程
+ * `voiceCloneProblem` 说了算，这里只负责把规矩先说给人听，免得他填完才被拒。
+ */
+export function ttsCloneSpec(
+  raw: unknown
+): { twoStep: boolean; nameLabel: string; nameExample: string; nameRule: string; audioRule: string } | null {
+  return TTS_VENDOR_UI[ttsVendorOf(raw)].clone
 }
 
 /**

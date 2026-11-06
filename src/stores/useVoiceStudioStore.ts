@@ -91,6 +91,17 @@ interface VoiceStudioState {
   /** 非空＝这家有列表接口、但这一次没问到（Key 空、网络、对方回错误码）。界面换成一行灰字，不弹红条 */
   vendorVoicesError: string | null
 
+  /**
+   * 声音复刻那一块（1.1.2 #330）的四个值。它们是「这一次工作台上的动作」，所以与音色/倍速同一档：
+   * 不写回 settings.json，切走再回来也不该留着一个已经复刻完的名字让人以为还要再点一次。
+   * `cloneFile` 存的是完整路径（主进程要读它），界面上只显示文件名。
+   */
+  cloneFile: string
+  cloneName: string
+  cloning: boolean
+  /** 非空＝这一次没成，原因照原话摆在那一块里（复刻失败往往要说清是哪一格，toast 一句话装不下） */
+  cloneError: string | null
+
   phase: VoicePhase
   /** 这一批实际提交出去的段，进行中按段号回显文本用；用户中途改输入不影响它 */
   queue: VoiceSegment[]
@@ -111,6 +122,13 @@ interface VoiceStudioState {
   setSpeed: (speed: number) => void
   loadConfig: () => Promise<void>
   refreshVendorVoices: () => Promise<void>
+  setCloneName: (name: string) => void
+  /** 弹原生面板选一段要拿去复刻的音频；取消或这一家不支持时什么都不改 */
+  pickCloneAudio: () => Promise<void>
+  /** 真发一次复刻。成功后把回执里的 voiceId 填进「音色」那一格，并重取一次候选 */
+  runVoiceClone: () => Promise<void>
+  /** 收起那一块（连同它这一次的文件与名字）；已经复刻出来的音色在账号里，不受这一条影响 */
+  resetClone: () => void
   setProfile: (profileId: string) => Promise<void>
   previewOne: () => Promise<void>
   buildQueue: () => VoiceSegment[]
@@ -210,6 +228,10 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   engineModelPresent: {},
   vendorVoices: [],
   vendorVoicesError: null,
+  cloneFile: '',
+  cloneName: '',
+  cloning: false,
+  cloneError: null,
 
   phase: 'idle',
   queue: [],
@@ -308,6 +330,60 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     set({ vendorVoices: result.voices ?? [], vendorVoicesError: null })
   },
 
+  setCloneName: (name) => set({ cloneName: name, cloneError: null }),
+
+  /**
+   * 选一段要拿去复刻的音频。这一条不自己判「这一家支不支持」：主进程按已保存的方案判，
+   * 不支持就回 null，界面那一块本来也不摆（按 `ttsVendorClonesVoices`）。
+   * 换了文件就清掉上一次的失败原因——那句话说的多半是**上一个文件**哪里不合规矩，
+   * 留着它等于让新选的这个文件背一句不属于它的诊断。
+   */
+  pickCloneAudio: async () => {
+    const api = getElectronAPI()
+    if (!api || get().cloning) return
+    const picked = await api.pickCloneAudio()
+    if (!picked) return
+    set({ cloneFile: picked, cloneError: null })
+  },
+
+  /**
+   * 真发一次复刻。两件收尾都不能省：
+   * - 「音色」那一格填的是**回执里的** voiceId：百炼那一家它是对方拼出来的（模型-前缀-唯一标识），
+   *   拿用户刚填的前缀当音色用，后面每次合成都会失败在「没有这个音色」上；
+   * - 重取一次候选：MiniMax 复刻出来的那把会出现在列音色接口的 `voice_cloning` 里（#340 标成「自己复刻」），
+   *   重取之后用户在候选里看得见自己刚建的那一条，而不是只信我们一句 toast。
+   *
+   * 复刻本身在两家都不收合成费（MiniMax 按音色数量算资产、百炼建音色不收费，收的是之后用它合成那些字），
+   * 所以这里不做配音批次那种费用确认；但它**不可逆**——账号里多出来的那把音色只能去对方控制台删，
+   * 那一道确认在界面上（点「开始复刻」前先确认）。
+   */
+  runVoiceClone: async () => {
+    const api = getElectronAPI()
+    if (!api) return
+    const { cloneFile, cloneName, cloning } = get()
+    if (cloning) return
+    if (!cloneFile) {
+      set({ cloneError: '先选一段要拿去复刻的音频' })
+      return
+    }
+    if (!cloneName.trim()) {
+      set({ cloneError: '先给这一把复刻音色起个名' })
+      return
+    }
+    set({ cloning: true, cloneError: null })
+    const result = await api.cloneVoice({ filePath: cloneFile, name: cloneName.trim() })
+    if (!result?.ok || !result.voiceId) {
+      set({ cloning: false, cloneError: result?.error ?? '复刻没成功，主进程没给原因' })
+      toast.error(result?.error ?? '复刻没成功，主进程没给原因', 10000)
+      return
+    }
+    set({ cloning: false, cloneError: null, cloneFile: '', cloneName: '', voice: result.voiceId })
+    toast.success(`复刻好了，「音色」那一格已经填上 ${result.voiceId}`, 8000)
+    await get().refreshVendorVoices()
+  },
+
+  resetClone: () => set({ cloneFile: '', cloneName: '', cloning: false, cloneError: null }),
+
   /**
    * 这一页的「配音方案」下拉：选中的那条＝把配音档的**当前使用**换过去。
    * 落盘、话术、失败分支都在 useProfileStore.setProfile 那一个动作里（校对那一格走的是
@@ -327,7 +403,9 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     // 已经不属于新这一套；音色不在方案里（1.1.0 起它是全局那一份），清空只是把手输的覆盖收回，
     // 改由下面这次 loadConfig 重读的那一份接管。留着就会出现「下拉里挂着 A 套挑的音色、
     // 实际按 B 套跑」这种最难解释的分歧。倍速不在方案字段里，是这一页自己的参数，留着。
-    set({ voice: '', engine: '', speakers: 0 })
+    // 复刻那一块也一起收：它是照着**原来那家**的规矩填的（MiniMax 要一个 8–256 的音色 id，
+    // 百炼只要一个 ≤10 字符的前缀），换到另一家那些值全不成立，留着就是让人拿旧名字点一次注定被拒的复刻
+    set({ voice: '', engine: '', speakers: 0, cloneFile: '', cloneName: '', cloneError: null })
     // 换完必须重读设置：下面那行「配音引擎：云端/本地 · 模型 X」和 checkVoiceReady 走的都是这一份
     await get().loadConfig()
   },

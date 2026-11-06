@@ -17,6 +17,7 @@ import { getTTSConfig, resolveProfileId, type TtsEngineMode } from '../services/
 import type { TTSConfig, TTSProgress, TTSSegmentInput, VoiceTrack } from '../services/ttsService'
 import {
   cancelTTSSynthesis,
+  cloneVoice,
   composeVoiceTrack,
   getVoiceTrack,
   hasActiveTTSSynthesis,
@@ -26,7 +27,13 @@ import {
   releasePreview,
   synthesizeSegments,
 } from '../services/ttsService'
-import { ttsVendorListsVoices, type VendorVoice } from '../services/ttsVendor'
+import {
+  ttsVendorCloneSpec,
+  ttsVendorClonesVoices,
+  ttsVendorListsVoices,
+  TTS_VENDOR_NAMES,
+  type VendorVoice,
+} from '../services/ttsVendor'
 import {
   getLocalTtsDetail,
   isLocalTtsEngineRunning,
@@ -107,6 +114,19 @@ export interface LocalTtsStatusResult extends LocalTtsDetail {
 export interface VoiceListResult {
   ok: boolean
   voices: VendorVoice[]
+  error: string | null
+}
+
+/**
+ * 声音复刻那一条（`tts:voiceClone`）的返回值。
+ *
+ * `voiceId` 是这一趟之后要填进「音色」那一格的东西：MiniMax 那一家的它就是用户刚起的名字，
+ * 百炼的是对方拼出来的（形如 `cosyvoice-v2-myprefix-xxxxxx`）——所以哪怕用户记得自己填了什么，
+ * 也必须从回执里拿，不能拿界面上那一格的值当结论。失败时给空串，界面只看 `ok` 与 `error`。
+ */
+export interface VoiceCloneIpcResult {
+  ok: boolean
+  voiceId: string
   error: string | null
 }
 
@@ -444,6 +464,65 @@ export function registerTTSHandlers() {
     // 抛到这里就是「问过了但没问到」（Key 空、网络、对方回错误码）。voices 给空数组不是谎：
     // error 非空时界面念的是这句原因，不会把空数组读成「这家一个音色都没有」
     (message) => ({ ok: false, voices: [], error: message })
+  )
+
+  /**
+   * 选一段要拿去复刻的音频（1.1.2 #330）。
+   *
+   * 过滤器按**这一家收什么**给（MiniMax 是 mp3/m4a/wav，百炼是 wav/mp3/m4a），
+   * 而不是把转写那份「音视频全收」的白名单搬过来：复刻收的是音频本身，
+   * 让人选一个 .mp4 进来，再在下一步报「这一家只收 mp3 / m4a / wav」是把话说明得太晚。
+   *
+   * 回 null＝用户按了取消，与 `dialog:selectFile` 同一个口径；这一家不支持复刻时也回 null，
+   * 因为那颗按钮本来就不该被点到（界面上按 `ttsVendorClonesVoices` 决定摆不摆）。
+   */
+  ipcHandle(
+    'tts:pickCloneAudio',
+    async (_event, requestedProfile?: unknown): Promise<string | null> => {
+      const config = await getTTSConfig(trimArg(requestedProfile) || undefined)
+      if (config.engine !== 'cloud' || !ttsVendorClonesVoices(config.vendor)) return null
+      const spec = ttsVendorCloneSpec(config.vendor)
+      logger.userAction('Clone audio dialog opened', { vendor: config.vendor })
+      const result = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          {
+            name: `${TTS_VENDOR_NAMES[config.vendor]} 复刻音频`,
+            extensions: [...spec.formats],
+          },
+        ],
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      logger.userAction('Clone audio selected', { name: basename(result.filePaths[0]) })
+      return result.filePaths[0]
+    },
+    () => null
+  )
+
+  /**
+   * 用一段本机音频复刻一把音色（1.1.2 #330）。
+   *
+   * 只读已保存的方案（与 `tts:voiceList` 同一条口径）：复刻是往用户账号里**写**一把音色，
+   * 拿一个没保存的厂商去写等于把东西写到另一家账号里，那比读错严重得多。
+   *
+   * 与配音批次不同，这一步**不做费用确认**：两家复刻本身不收合成费（MiniMax 按音色数量算资产，
+   * 百炼建音色不收费，收的是之后用它合成那些字），而界面上那颗按钮已经写明了要花哪一把 Key。
+   * 它是不可逆的——账号里多出来的那把音色在本应用删不掉，只能去对方控制台删——所以那句话由面板
+   * 写在按钮旁边；这里不再套一层确认弹窗：走到那颗按钮要先展开面板、选录音、起名，三步都是有意为之。
+   */
+  ipcHandle(
+    'tts:voiceClone',
+    async (_event, args?: unknown): Promise<VoiceCloneIpcResult> => {
+      const input = (args ?? {}) as Record<string, unknown>
+      const filePath = trimArg(input.filePath)
+      const name = trimArg(input.name)
+      if (!filePath) return { ok: false, voiceId: '', error: '先选一段要拿去复刻的音频' }
+      if (!name) return { ok: false, voiceId: '', error: '先给这一把复刻音色起个名' }
+      const config = await getTTSConfig(trimArg(input.profileId) || undefined)
+      const result = await cloneVoice(config, { filePath, name })
+      return { ok: true, voiceId: result.voiceId, error: null }
+    },
+    (message) => ({ ok: false, voiceId: '', error: message })
   )
 
   /**

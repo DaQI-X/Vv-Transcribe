@@ -617,6 +617,23 @@ export interface ElectronAPI {
     voices: Array<{ id: string; name: string; source: 'system' | 'clone' }>
     error: string | null
   }>
+  /**
+   * 选一段要拿去复刻的音频（1.1.2 #330）。面板的过滤器按「这一家收什么」给，
+   * 不是转写那份音视频白名单。回 null＝用户按了取消，或当前这一家不支持复刻
+   * （四家里只有 MiniMax 与百炼收，理由见主进程 `ttsVendor.VENDOR_VOICE_CLONE` 那段注释）。
+   */
+  pickCloneAudio: (profileId?: string) => Promise<string | null>
+  /**
+   * 用那段音频在这一家复刻一把音色。`voiceId` 是这一趟之后该填进「音色」那一格的值：
+   * MiniMax 那一家它就是用户刚起的名字，百炼是对方拼出来的（形如 `cosyvoice-v2-myprefix-xxxx`），
+   * 所以必须用回执里的这一个，不能拿界面上那一格当结论。
+   * 失败时 `ok:false` + `error`（服务商原话照递，不包一层「请求失败」）。
+   */
+  cloneVoice: (args: { filePath: string; name: string; profileId?: string }) => Promise<{
+    ok: boolean
+    voiceId: string
+    error: string | null
+  }>
 
   /**
    * 按需组件：只读磁盘在场情况与占用体积，不联网。打开「关于与更新」先吃这一份，

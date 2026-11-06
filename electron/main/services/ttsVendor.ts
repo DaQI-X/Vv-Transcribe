@@ -21,6 +21,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { appendApiPath } from './apiPath'
+// 体积走全仓那一把尺（#282）：主进程这条 build 链没装 `@/` 别名，所以走相对路径，与 localTtsEngine 同一写法
+import { formatBytes } from '../../../src/utils/formatBytes'
 
 /** 界面上「厂商」那格的取值；`openai` 同时是「留空/不认识」的落点 */
 export type TtsVendorId = 'openai' | 'minimax' | 'dashscope' | 'volc'
@@ -616,4 +618,320 @@ export async function readVoiceList(
   push(json.voice_cloning, 'clone')
   push(json.voice_generation, 'clone')
   return voices
+}
+
+/**
+ * 「这一家能不能在应用里复刻音色」（1.1.2 #330）。四家里两家收，两家**刻意不接**：
+ *
+ * - **MiniMax**：两步——`POST /v1/files/upload`（multipart，`purpose=voice_clone`）换 `file_id`，
+ *   再 `POST /v1/voice_clone` 把它与自己起的 `voice_id` 绑起来。两步用的都是配音那把 Key。
+ * - **百炼**：一步——`POST /api/v1/services/audio/tts/customization`，`model=voice-enrollment`，
+ *   `input.audio` 收**公网 URL 或 Base64 Data URI**，所以本机那段音频不必先传到哪儿就能递过去。
+ * - **豆包**：复刻要先在控制台买一个「音色槽位」，那一步不是这把 API Key 能做的，接口侧只能查
+ *   某个 speaker 的训练状态。槽位买不到就复刻不了，所以界面上这一档连按钮都不摆——
+ *   摆一个「点了注定失败」的入口比不给入口更糟。
+ * - **OpenAI 兼容**：规范里没有「复刻音色」这一条端点。OpenAI 自家那个要单独申请资格并录一段
+ *   本人同意声明，而兼容网关各自加不加更没法假定。
+ *
+ * **两家都没在本机发过一次真复刻请求**（MiniMax 那把 Key 只验过合成与列音色，百炼连 Key 都没有），
+ * 形状全部抄自原厂文档。按 #224 拍板的口径先设计上、后验，所以界面上任何一句都不许说「验证过」。
+ */
+export interface VendorCloneSpec {
+  /** 先把音频换成 file_id 的那条端点；`null`＝这一家不分两步，音频直接进复刻请求体 */
+  uploadPath: string | null
+  clonePath: string
+  /** 这一家收的音频后缀（本机预检与「选文件」框的过滤器都按它） */
+  formats: readonly string[]
+  /** 本机按字节数拦的上限（百炼那一家拦的是「编码后仍 ≤10MB」换算回原文件的数，见那一行注释） */
+  maxBytes: number
+  /**
+   * 同一个上限**照厂商文档原话**的那个数，只用于报错时念给用户听。
+   * 它和 `maxBytes` 是一把上限的两种写法（一个是原话、一个是字节数），改一个必须改另一个。
+   * 为什么不直接拿 `maxBytes` 现算：全仓那把尺（`formatBytes`）按 1000 进位，念一个按 1024 定的
+   * 上限会得到「21.0MB 超过 20MB」这种自己打自己的句子（#282 收拾的正是这一类）。
+   */
+  sizeLimit: string
+  /**
+   * 一句话交代这一家收什么样的音频，界面上照原话摆出来。
+   * 时长只写在这里、不进预检：ffprobe 对 mp3 报的是按码率估的容器长度（含 LAME 前后填充，
+   * 见 ttsService 头），拿它当判据会把一段合规音频判成「太短」；对方自己会拦，
+   * 而它那句话里带的是真数字，比我们在本机估一个更可信。
+   */
+  audioRule: string
+  /** `voiceId`＝用户自己起一个音色 id（MiniMax）；`prefix`＝只给前缀，完整 id 由对方拼（百炼） */
+  nameKind: 'voiceId' | 'prefix'
+  nameLabel: string
+  nameRule: string
+  /** 本机预检名字用的判式；`null`＝不检，交给对方 */
+  namePattern: RegExp | null
+  /** 复刻请求要不要带「配音模型」那一格（百炼的 target_model 必须与之后合成用的模型一致） */
+  needsTargetModel: boolean
+}
+
+/** 厂商文档里那些「MB」按二进制理解：宁可放过一点，也别把对方本来会收的文件在本机拦下 */
+const MIB = 1024 * 1024
+
+export const VENDOR_VOICE_CLONE: Partial<Record<TtsVendorId, VendorCloneSpec>> = {
+  minimax: {
+    uploadPath: '/v1/files/upload',
+    clonePath: '/v1/voice_clone',
+    formats: ['mp3', 'm4a', 'wav'],
+    maxBytes: 20 * MIB,
+    sizeLimit: '20MB',
+    audioRule: 'mp3 / m4a / wav，10 秒到 5 分钟，不超过 20MB，一段连续清楚的朗读（别有背景音乐、噪声或别人的声音）',
+    nameKind: 'voiceId',
+    nameLabel: '音色 ID',
+    nameRule:
+      '8–256 个字符，首字符是英文字母，只能用字母、数字、横线和下划线，末位不能是横线或下划线，且不能与已有的音色 id 重复',
+    namePattern: /^[A-Za-z][A-Za-z0-9_-]{6,254}[A-Za-z0-9]$/,
+    needsTargetModel: false,
+  },
+  dashscope: {
+    uploadPath: null,
+    clonePath: '/api/v1/services/audio/tts/customization',
+    formats: ['wav', 'mp3', 'm4a'],
+    // 对方那份「≤10MB」说的是 **Base64 编码后**（文档原话：编码会增大体积，确保编码后仍小于 10MB），
+    // 编码要涨三分之一，所以按原文件 7.5MB 拦——拦在编码前才拦得住，编码后再发现超了已经白传一趟
+    maxBytes: 7.5 * MIB,
+    sizeLimit: '7.5MB',
+    audioRule:
+      'wav / mp3 / m4a，建议 10–20 秒、最长 60 秒，采样率 ≥16 kHz，编码后不超过 10MB（所以这一格按原文件 7.5MB 拦）',
+    nameKind: 'prefix',
+    nameLabel: '音色名前缀',
+    nameRule: '只用数字和英文字母，不超过 10 个字符；对方拼出来的完整音色名是「模型-前缀-唯一标识」',
+    namePattern: /^[A-Za-z0-9]{1,10}$/,
+    needsTargetModel: true,
+  },
+}
+
+/** 这一家能不能在应用里复刻音色；界面按它决定那一块面板摆不摆 */
+export function ttsVendorClonesVoices(vendor: TtsVendorId): boolean {
+  return !!VENDOR_VOICE_CLONE[vendor]
+}
+
+export function ttsVendorCloneSpec(vendor: TtsVendorId): VendorCloneSpec {
+  const spec = VENDOR_VOICE_CLONE[vendor]
+  if (!spec) vendorError(`${TTS_VENDOR_NAMES[vendor]} 不支持在应用里复刻音色`)
+  return spec
+}
+
+/** Base64 Data URI 的 mediatype 按后缀定：写错一个 mime，对方解不出音频，回的是「参数错误」 */
+const CLONE_AUDIO_MIME: Record<string, string> = {
+  wav: 'audio/wav',
+  mp3: 'audio/mpeg',
+  m4a: 'audio/mp4',
+}
+
+function extOf(fileName: string): string {
+  const dot = fileName.lastIndexOf('.')
+  return dot < 0 ? '' : fileName.slice(dot + 1).toLowerCase()
+}
+
+/**
+ * 复刻前的本机预检：只拦**能测准的**三样（名字形状、后缀、字节数），返回 null 就是可以发。
+ * 时长为什么不拦，见 `VendorCloneSpec.audioRule` 那段注释。
+ */
+export function voiceCloneProblem(
+  vendor: TtsVendorId,
+  input: { name: string; fileName: string; bytes: number }
+): string | null {
+  const spec = ttsVendorCloneSpec(vendor)
+  const name = input.name.trim()
+  if (!name) return `先给这一把复刻音色填一个「${spec.nameLabel}」`
+  if (spec.namePattern && !spec.namePattern.test(name)) {
+    return `「${spec.nameLabel}」不合这一家的规矩：${spec.nameRule}（现在填的是 ${name}）`
+  }
+  const ext = extOf(input.fileName)
+  if (!spec.formats.includes(ext)) {
+    return `这一家复刻只收 ${spec.formats.join(' / ')}，你选的是 ${ext ? `.${ext}` : '一个认不出后缀的文件'}`
+  }
+  if (input.bytes === 0) return '这个音频文件是空的（0 字节），换一个'
+  if (input.bytes > spec.maxBytes) {
+    // 量出来的那一半走全仓那把尺（与访达、与「按需组件」列表同一个数），上限那一半念厂商文档的原话。
+    // 两边刻意不同源：拿 SI 的尺去念一个按二进制定的上限，会得到「21.0MB 超过 21.0MB」这种自己打自己的句子
+    return `这段音频 ${formatBytes(input.bytes)}，超过这一家复刻收的 ${spec.sizeLimit}，换一段短一点或先压一压`
+  }
+  return null
+}
+
+/** 「上传复刻音频」这一次请求：body 是 FormData，所以与 `TtsVendorRequest` 不是一个形状 */
+export interface TtsVendorUploadRequest {
+  url: string
+  headers: Record<string, string>
+  form: FormData
+}
+
+/**
+ * 拼「上传复刻音频」这一步（只有分两步的那一家用得上）。
+ *
+ * 头部**刻意不给 Content-Type**：multipart 的 boundary 是 fetch 序列化 FormData 时现算的，
+ * 手写一个 `multipart/form-data` 上去就等于发一个没有 boundary 的请求体，对方解不开，
+ * 回的那句多半是「参数缺失」——看着像少填了什么，其实是头写多了一行。
+ */
+export function buildVoiceCloneUploadRequest(
+  vendor: TtsVendorId,
+  input: { apiBase: string; apiKey: string; fileName: string; bytes: Buffer }
+): TtsVendorUploadRequest {
+  const spec = ttsVendorCloneSpec(vendor)
+  if (!spec.uploadPath) vendorError(`${TTS_VENDOR_NAMES[vendor]} 的复刻不用先上传音频`)
+  const form = new FormData()
+  // purpose 决定这一家把文件当什么用：写成别的值 file_id 照样拿得到，
+  // 但下一步 voice_clone 会回「这个 file_id 不是复刻用的」，用户看不出问题出在上一步
+  form.set('purpose', 'voice_clone')
+  form.set('file', new Blob([input.bytes]), input.fileName)
+  return {
+    url: appendApiPath(input.apiBase, spec.uploadPath),
+    headers: { Authorization: `Bearer ${input.apiKey}` },
+    form,
+  }
+}
+
+/**
+ * 拼「复刻」这一步请求。两家的差别全在这里收口：MiniMax 递上一步换到的 file_id 与自己起的
+ * voice_id，百炼把音频本身编成 Data URI 塞进 `input.audio`，并要求 `target_model`
+ * 与之后合成用的模型一致——不一致对方直接拒，而那一格里填的就是配音方案的「配音模型」。
+ */
+export function buildVoiceCloneRequest(
+  vendor: TtsVendorId,
+  input: {
+    apiBase: string
+    apiKey: string
+    /** 用户填的那一格：MiniMax 当 voice_id 用，百炼当 prefix 用 */
+    name: string
+    /** 配音模型那一格的值；只有 `needsTargetModel` 的那一家看它 */
+    model: string
+    /** 上一步换到的 file_id（分两步的那一家必给） */
+    fileId?: string
+    /** 本机那段音频与它的文件名（一步到位的那一家必给） */
+    fileName?: string
+    bytes?: Buffer
+  }
+): TtsVendorRequest {
+  const spec = ttsVendorCloneSpec(vendor)
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${input.apiKey}`,
+  }
+  const url = appendApiPath(input.apiBase, spec.clonePath)
+
+  if (spec.uploadPath) {
+    if (!input.fileId) vendorError(`${TTS_VENDOR_NAMES[vendor]} 的复刻要先上传音频换 file_id，这一步没做`)
+    // 文档里 file_id 是 int64：上传回来是纯数字时就按数字发，别把 "123" 这种字符串塞进请求体
+    const fileId = /^\d+$/.test(input.fileId) ? Number(input.fileId) : input.fileId
+    return { url, headers, body: JSON.stringify({ file_id: fileId, voice_id: input.name.trim() }) }
+  }
+
+  if (!input.bytes || !input.fileName) {
+    vendorError(`${TTS_VENDOR_NAMES[vendor]} 的复刻要把音频本身递过去，这一步没拿到文件`)
+  }
+  if (spec.needsTargetModel && !input.model.trim()) {
+    vendorError(
+      `${TTS_VENDOR_NAMES[vendor]} 复刻要求「配音模型」与之后合成用的是同一个，` +
+      '而这一套方案的模型那格是空的：先去设置里把配音模型填上'
+    )
+  }
+  const mime = CLONE_AUDIO_MIME[extOf(input.fileName)] ?? 'application/octet-stream'
+  return {
+    url,
+    headers,
+    body: JSON.stringify({
+      model: 'voice-enrollment',
+      input: {
+        action: 'create_voice',
+        target_model: input.model.trim(),
+        prefix: input.name.trim(),
+        audio: `data:${mime};base64,${input.bytes.toString('base64')}`,
+      },
+      // language_hints 刻意不发：它只是给对方一个提示，发错一个语种比不发更容易让复刻跑偏，
+      // 而用户在界面上没有这一格可填
+    }),
+  }
+}
+
+/** 读回上传那一步的 file_id。与 `readVoiceList` 同一套口径：错误可能带着 HTTP 200 回来 */
+export async function readVoiceCloneUpload(
+  vendor: TtsVendorId,
+  request: TtsVendorUploadRequest,
+  response: Response
+): Promise<string> {
+  const name = TTS_VENDOR_NAMES[vendor]
+  if (!response.ok) {
+    const raw = await textOf(response)
+    vendorError(
+      `${name} 上传复刻音频失败：HTTP ${String(response.status)}（POST ${request.url}）${
+        raw ? `：${errorSnippet(raw)}` : ''
+      }${statusHint(vendor, response.status)}`
+    )
+  }
+  const raw = await textOf(response)
+  const json = parseJsonBody(raw)
+  if (!json) vendorError(notJsonMessage(name, request.url, raw).replace('没读出音频', '没读出上传回执'))
+
+  const baseResp = asObject(json.base_resp)
+  const statusCode = Number(baseResp.status_code ?? 0)
+  if (statusCode !== 0) {
+    const message = String(baseResp.status_msg ?? '').trim()
+    vendorError(
+      `${name} 上传复刻音频回了错误码 ${String(statusCode)}${message ? `：${message}` : '（没有附带说明）'}`
+    )
+  }
+  const fileId = String(asObject(json.file).file_id ?? '').trim()
+  if (!fileId) vendorError(`${name} 上传成功了但没给 file_id，下一步复刻拿不到这段音频`)
+  return fileId
+}
+
+/**
+ * 读回复刻结果，也就是那把新音色的 id。
+ *
+ * `requestedName` 是用户刚填的那一格：MiniMax 的 voice_id 就是用户自己起的，回执里不再重复一遍，
+ * 所以那一家的答案是「你填的那个」；百炼的 id 由对方拼（模型-前缀-唯一标识），只能从回执里读，
+ * 读不到就是没复刻成——这时候拿前缀当 id 用，后面每次合成都会失败在「没有这个音色」上。
+ */
+export async function readVoiceCloneResult(
+  vendor: TtsVendorId,
+  request: TtsVendorRequest,
+  response: Response,
+  requestedName: string
+): Promise<string> {
+  const name = TTS_VENDOR_NAMES[vendor]
+  if (!response.ok) {
+    const raw = await textOf(response)
+    vendorError(
+      `${name} 复刻音色失败：HTTP ${String(response.status)}（POST ${request.url}）${
+        raw ? `：${errorSnippet(raw)}` : ''
+      }${statusHint(vendor, response.status)}`
+    )
+  }
+  const raw = await textOf(response)
+  const json = parseJsonBody(raw)
+  if (!json) vendorError(notJsonMessage(name, request.url, raw).replace('没读出音频', '没读出复刻回执'))
+
+  if (ttsVendorCloneSpec(vendor).uploadPath) {
+    const baseResp = asObject(json.base_resp)
+    const statusCode = Number(baseResp.status_code ?? 0)
+    if (statusCode !== 0) {
+      const message = String(baseResp.status_msg ?? '').trim()
+      // 这一家把「voice_id 与已有的重复」「音频不合规矩」「账号没实名」都塞在错误码里，
+      // 对方原话是唯一能分清的东西，所以它必须在前，我们只补一句「多半是哪一格」
+      vendorError(
+        `${name} 复刻音色回了错误码 ${String(statusCode)}${message ? `：${message}` : '（没有附带说明）'}。` +
+          '音色 id 与已有的重复、或那段音频不合这一家的规矩时都会走到这一步'
+      )
+    }
+    return requestedName.trim()
+  }
+
+  const code = String(json.code ?? '').trim()
+  const message = String(json.message ?? '').trim()
+  if (code) {
+    vendorError(`${name} 复刻音色失败（${code}）${message ? `：${message}` : ''}`)
+  }
+  const voiceId = String(asObject(json.output).voice_id ?? '').trim()
+  if (!voiceId) {
+    vendorError(
+      `${name} 回了成功但没给 voice_id${message ? `：${message}` : ''}。` +
+        '这一家的音色名是它自己拼的，读不到就等于没复刻成，别拿前缀当音色用'
+    )
+  }
+  return voiceId
 }

@@ -31,6 +31,7 @@
  *
  * 这一页不改字幕、不动时间轴，产物是一条独立的音轨。
  */
+import { useState } from 'react'
 import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
@@ -41,6 +42,8 @@ import { switchableProfiles, useProfileStore } from '@/stores/useProfileStore'
 import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
 import {
   profileRowTitle,
+  ttsCloneSpec,
+  ttsVendorClonesVoices,
   ttsVendorLabel,
   ttsVendorNeedsVoice,
   ttsVoiceExample,
@@ -298,6 +301,108 @@ function ResultCard() {
         )}
       </div>
       <p className="voice-studio__note">不保存的话，清空或重开一批就把这一版产物删掉。</p>
+    </div>
+  )
+}
+
+/**
+ * 声音复刻面板（#330）。默认收起：这一页的主线是「把这批稿子念出来」，而复刻是「拿自己一把嗓子
+ * 换一个音色 id」的一次性动作，摊开摆着会让人以为配音必须先复刻。
+ *
+ * 只有当前那家真支持时才挂上来（父层按 `ttsVendorClonesVoices` 把关）：`clone: null` 的两家连按钮
+ * 都不给——摆一个点了注定失败的入口，比不给入口更糟。
+ *
+ * 复刻出来的音色 id 不存进设置，只填回上面那格「音色」：它是这一批要用的参数，跟手输一个 id
+ * 完全等价（1.1.0 起音色就不在方案里了）。
+ */
+function VoiceClonePanel({ vendor }: { vendor: string }) {
+  const [open, setOpen] = useState(false)
+  const spec = ttsCloneSpec(vendor)
+  const cloneFile = useVoiceStudioStore((s) => s.cloneFile)
+  const cloneName = useVoiceStudioStore((s) => s.cloneName)
+  const cloning = useVoiceStudioStore((s) => s.cloning)
+  const cloneError = useVoiceStudioStore((s) => s.cloneError)
+  const setCloneName = useVoiceStudioStore((s) => s.setCloneName)
+  const pickCloneAudio = useVoiceStudioStore((s) => s.pickCloneAudio)
+  const runVoiceClone = useVoiceStudioStore((s) => s.runVoiceClone)
+
+  if (!spec) return null
+
+  /** 只显示文件名：完整路径是主进程读的，摆在界面上除了长没别的作用 */
+  const fileName = cloneFile.split(/[\\/]/).pop() || cloneFile
+  const ready = cloneFile !== '' && cloneName.trim() !== '' && !cloning
+  const vendorLabel = ttsVendorLabel(vendor)
+
+  return (
+    <div className="voice-studio__clone">
+      <div className="voice-studio__clone-head">
+        <span className="voice-studio__label">声音复刻</span>
+        {/* 复刻进行中也能收起：收起不取消任何事，`cloneError` 还在，重新展开就看得见 */}
+        <button className="voice-studio__link" onClick={() => setOpen((value) => !value)}>
+          {open ? '收起' : '用自己的录音建一把音色'}
+        </button>
+      </div>
+
+      {open && (
+        <>
+          <label className="voice-studio__field">
+            <span className="voice-studio__label">{spec.nameLabel}</span>
+            <input
+              className="settings-form-input"
+              type="text"
+              value={cloneName}
+              placeholder={spec.nameExample}
+              onChange={(e) => setCloneName(e.target.value)}
+              disabled={cloning}
+            />
+          </label>
+
+          <div className="voice-studio__clone-pick">
+            <button
+              className="settings-modal__cancel-btn"
+              onClick={() => void pickCloneAudio()}
+              disabled={cloning}
+            >
+              <AudioLines size={14} />
+              {cloneFile ? '换一个文件' : '选一段录音'}
+            </button>
+            {cloneFile && <code>{fileName}</code>}
+          </div>
+
+          <p className="voice-studio__hint">
+            {/* 这几句都是照抄原厂当前口径：能本机测准的（名字长什么样、收什么格式、多大）
+                主进程会在发请求前当场拦，测不准的（时长、采样率）只说不拦，交给接口回原话。 */}
+            {`${spec.nameLabel}：${spec.nameRule}。`}
+            {`音频：${spec.audioRule}。`}
+            {spec.twoStep
+              ? '这家是两步：先把录音传上去换一个文件号，再拿它复刻。'
+              : '这家是一步：录音直接编码进复刻请求发过去。'}
+            {'复刻好的音色留在你自己的账号里，本应用不存它，想删只能去对方控制台删。'}
+            {'建好后 id 会填回上面「音色」那一格，这一批就能直接用它开跑。'}
+          </p>
+
+          {cloneError && (
+            <p className="voice-studio__clone-error">
+              <AlertTriangle size={13} />
+              {cloneError}
+            </p>
+          )}
+
+          <div className="voice-studio__clone-actions">
+            <button
+              className="settings-modal__save-btn"
+              onClick={() => void runVoiceClone()}
+              disabled={!ready}
+            >
+              {cloning ? (spec.twoStep ? '上传录音并复刻中…' : '复刻中…') : '开始复刻'}
+            </button>
+          </div>
+
+          <p className="voice-studio__hint">
+            {`这条链路照「${vendorLabel}」当前的原厂规范写，但本机没发过一次真复刻请求，所以被拒时这里摆的是接口回的原话。`}
+          </p>
+        </>
+      )}
     </div>
   )
 }
@@ -589,6 +694,11 @@ export function VoiceStudio() {
           </p>
 
           {local && engineCaveat && <p className="voice-studio__hint">{engineCaveat}</p>}
+
+          {/* 本地档没有复刻这回事（引擎只会念随包的那几把嗓子），所以只在云端档、且这一家真支持时挂 */}
+          {!local && ttsVendorClonesVoices(configProvider) && (
+            <VoiceClonePanel vendor={configProvider} />
+          )}
 
           <div className="voice-studio__config">
             {/* 本地档不提配音方案：那条下拉只在云端档出现，方案里那四项凭据（厂商/地址/Key/模型）
