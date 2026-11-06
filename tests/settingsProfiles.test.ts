@@ -330,7 +330,8 @@ describe('取值按 id 挑方案', () => {
     // 凭据照各自那条投，投给界面的方案形状里也没有那三项
     expect((await service.getASRConfig('asr-y')).model).toBe('m-y')
     const view = await service.listProfiles()
-    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel'])
+    // asrVendor 是 1.1.1 新认的厂商书签：老方案里没有，投出来是空串（界面按 OpenAI 兼容显示）
+    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel', 'asrVendor'])
   })
 
   it('配音留空回落的「校对那套」固定是校对档当前默认那条，不跟配音的 id 走', async () => {
@@ -545,7 +546,12 @@ describe('方案列表：一次给全的脱敏形状', () => {
     // 三档都只剩「这家网关的参数」（Key 走状态位）：模式 / 档位 / 语言 / 引擎是全局段，不在方案里
     // tts 也从 v3 起不再带音色——用户事先不知道模型支持哪些音色，那是这一批怎么选的问题
     // 1.1.1 起 tts 多带一个「厂商」书签：它决定这次发的请求长什么样，所以是方案的一部分，不是全局偏好
-    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual(['asrApiBase', 'asrModel'])
+    // asr 同一格叫 asrVendor 而不是 asrProvider：后者是「去不去云端」，一个名字不能同时说两件事
+    expect(Object.keys(view.profiles.asr[0].values).sort()).toEqual([
+      'asrApiBase',
+      'asrModel',
+      'asrVendor',
+    ])
     expect(Object.keys(view.profiles.ai[0].values).sort()).toEqual(['aiApiBase', 'aiModel', 'aiProvider'])
     expect(view.profiles.ai[1].values.aiModel).toBe('gpt-b')
     expect(Object.keys(view.profiles.tts[0].values).sort()).toEqual([

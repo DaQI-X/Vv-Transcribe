@@ -26,7 +26,10 @@ function createCloudProvider(config: Record<string, unknown>): CloudASRProvider 
   return new CloudASRProvider({
     apiKey,
     apiBase: (config.apiBase as string) || 'https://api.openai.com',
-    model: (config.model as string) || 'whisper-1',
+    // 模型名不在这里兜底：留空时该落哪一档由厂商说了算（OpenAI 兼容是 whisper-1，
+    // MiniMax 是 asr-1.0），在这儿写死一个 whisper-1 就等于替 MiniMax 猜它的清单
+    model: (config.model as string) || '',
+    vendor: (config.vendor as string) || '',
   })
 }
 

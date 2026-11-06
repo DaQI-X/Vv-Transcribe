@@ -873,7 +873,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
       const payload =
         kind === 'asr'
           ? {
+              // 这一格是「云端还是本地」那档，不是厂商——厂商另走 vendor，理由同配音那一腿：
+              // 不带的话「当前使用」那条是 MiniMax、自检却按 OpenAI 兼容的端点发，绿了也不作数
               provider: values.asrProvider,
+              vendor: fields.asrVendor ?? '',
               apiBase: fields.asrApiBase ?? '',
               apiKey: '',
               model: fields.asrModel ?? '',

@@ -7,7 +7,8 @@
  * - 磁盘上（配置格式 v2，1.0.9 起）按能力存三份**云端方案**列表（profiles.asr / ai / tts）
  *   加一个 defaultProfileId，其余没进方案的键平铺在文档根上（内存里叫 store.globals），
  *   形状与迁移都在 settingsSchema。
- * - 对外的 AppSettings 仍是那 17 个扁平键，含义是「全局段 + 这一档当前那条方案的投影」。
+ * - 对外的 AppSettings 仍是那批扁平键（1.1.1 起多了 `ttsProvider` / `asrVendor` 两个厂商书签），
+ *   含义是「全局段 + 这一档当前那条方案的投影」。
  *   这么分的理由是增量落地：转写、校对、配音的取值点，设置表单，preload 与 IPC 全都按
  *   扁平字段读，先把内部形状换成方案列表、契约不动，界面那一半才不用跟着返工（#222 第①步）。
  *   第②步把 profileId 接到了 getter 与增删改上（#222 第②步）：外面那套字段名仍然没改，
@@ -29,6 +30,7 @@ import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { normalizeLocalTtsEngine, type LocalTtsEngineId } from './localTtsEngine'
 import { normalizeTtsVendor, type TtsVendorId } from './ttsVendor'
+import { normalizeAsrVendor } from './asr/asrVendor'
 import {
   CORRUPT_SETTINGS_PREFIX,
   atomicWriteJson,
@@ -66,6 +68,14 @@ import {
  */
 export interface AppSettings {
   asrProvider: string
+  /**
+   * 云端转写去哪家网关（1.1.1，#224 转写侧）。和上面那一项**不是一回事**：
+   * `asrProvider` 是「走不走云端」，`asrVendor` 是「走云端时发成哪一家的形状」。
+   * 名字没法统一（前者从 1.0.5 就叫这个了），取值点各自看清自己在问哪一项。
+   * 它跟着方案走，这里的默认值只在「这一档还没建过方案」时投出来——那时按 OpenAI 兼容发，
+   * 也就是 1.1.1 之前唯一的形状。
+   */
+  asrVendor: string
   asrApiKey: string
   asrApiBase: string
   asrModel: string
@@ -199,6 +209,7 @@ export type SettingsPatch = Partial<Omit<AppSettings, SecretField>> &
 
 const DEFAULT_SETTINGS: AppSettings = {
   asrProvider: 'local',
+  asrVendor: 'openai',
   asrApiKey: '',
   asrApiBase: '',
   asrModel: '',
@@ -809,7 +820,7 @@ function normalizeStore(doc: SettingsDocument): SettingsStore {
 export type ProfileSelection = Partial<DefaultProfileId>
 
 /**
- * store 投成对外那 17 个扁平键：全局段原样铺上，每档再按 selection 取一条方案盖上去
+ * store 投成对外那批扁平键：全局段原样铺上，每档再按 selection 取一条方案盖上去
  * （取不到落回该档当前默认，那条也没有就留默认值）。密钥按它的 id 从解密表里取。
  * 这是「磁盘形状」与「对外契约」唯一的交界处——别处再各自拼 store 就会出现
  * 「转写读默认方案、界面读第一条」这种两边不一致的分歧。
@@ -1252,7 +1263,9 @@ export function normalizeApiBase(raw: string): string {
 /**
  * 转写配置。`profileId` 是界面「这次用哪套转写配置」传下来的那条；空或指不到人时
  * 落回该档当前默认方案（与没长出选择器时同一结果）；该档一条方案都没有时投出来的是空凭据，
- * 而 `provider` / `localModel` 走的是全局段，不受有没有方案影响——本地转写照样能跑。
+ * 而 `provider`（云端／本地那一份）/ `localModel` 走的是全局段，不受有没有方案影响——本地转写照样能跑。
+ * 1.1.1 起的 `vendor` 是**另一件事**：它是方案里那一项（去云端哪家网关），没方案时投成 OpenAI 兼容，
+ * 也就是这一条链路 1.1.1 之前的唯一形状。这两个键名挨得太像，取值点别当同一个用。
  * 真正用到的那条 id 用 resolveProfileId 再问一次——历史记录要按 id 记（#247），
  * 拿传进来的那个记会在落回默认时记错。
  */
@@ -1262,6 +1275,10 @@ export async function getASRConfig(
   const settings = await loadSettings({ asr: profileId ?? undefined })
   return {
     provider: settings.asrProvider,
+    // 云端那一腿发成哪家的形状（路径 / 字段名 / 默认模型）。本地档不看这一项，
+    // 但和配音一样投得出来，免得调用方自己判断「这一项什么时候有意义」——那正是
+    // #220/#227 那种「判松判严都拦错人」的源头
+    vendor: normalizeAsrVendor(settings.asrVendor),
     apiKey: settings.asrApiKey,
     apiBase: normalizeApiBase(settings.asrApiBase),
     model: settings.asrModel,

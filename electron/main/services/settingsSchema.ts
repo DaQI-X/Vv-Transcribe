@@ -109,8 +109,15 @@ export interface SettingsStore {
  * 和「哪些配置全局共用」两件事仍然只有这一处定义，读盘、落盘、投给界面的扁平视图都按它走。
  *
  * 三档都按「换一家网关要换的东西」这条线收窄：
- * - asr 三项：地址 / Key / 模型。「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，
+ * - asr 四项：厂商 / 地址 / Key / 模型。「用本地还是云端」「本地档位」「转写语言」是这次任务怎么选的问题，
  *   不是这家网关的参数。
+ *   厂商这一项是这三档里**唯一**名字不统一的：扁平键叫 `asrVendor`、方案字段叫 `vendor`，
+ *   而 ai／tts 那两档同一格叫 `provider`。原因是 asr 这一档已经被 `provider` 这个词占了——
+ *   `asrProvider` 从 1.0.5 起是全局段那份「转写模式＝云端／本地」，而方案里沿用 `provider`
+ *   会让「模式不许漏进方案」那几条回归测试（筛 `['provider','localModel','language']`）
+ *   读起来像已经漏了。宁可名字不一致，也不要一个键在同一份文件里说两件事。
+ *   它和 tts 那一项一样**被主进程读取**（`asrVendor.buildAsrRequest` 按它选路径与字段名）；
+ *   老方案里没有这一项，读出来是空串，取值时按 OpenAI 兼容处理，所以不需要一次迁移。
  * - tts 四项：厂商 / 地址 / Key / 模型。**音色从 v3 起不在方案里**：它和「本地档位」「转写语言」一样，
  *   是这一批怎么选的问题，不是这家网关的参数。理由写在 v2→v3 那条迁移上——用户事先并不知道
  *   某个模型支持哪些音色，各家网关的字段名与取值也不一样，把它钉死在方案里等于替用户猜一份清单。
@@ -127,6 +134,7 @@ export const CAPABILITY_FIELDS: Record<
   ReadonlyArray<readonly [string, string]>
 > = {
   asr: [
+    ['asrVendor', 'vendor'],
     ['asrApiKey', 'apiKey'],
     ['asrApiBase', 'apiBase'],
     ['asrModel', 'model'],

@@ -1,15 +1,19 @@
 /**
  * 云端 ASR 转写提供者
- * 调用 OpenAI Whisper API 兼容接口进行语音转写
- * 支持自定义 apiBase，可对接任何 OpenAI 兼容的 ASR 服务
+ * 调服务商的转写接口；这一家发成什么形状由 `asrVendor.buildAsrRequest` 决定，
+ * 设置里那颗「测试连接」走的是同一个函数。
+ * 默认档仍是 OpenAI 兼容（`/v1/audio/transcriptions`），可自定义 apiBase 对接任何兼容服务。
  */
 import type { ASRProvider, ASRSegment, ASRProgress } from './types'
 import { toSimplified } from './simplifyChinese'
+import { buildAsrRequest } from './asrVendor'
 
 interface CloudASRConfig {
   apiKey: string
   apiBase: string
   model: string
+  /** 厂商书签（`asrVendor` 归一化后的值）；留空按 OpenAI 兼容发 */
+  vendor?: string
 }
 
 interface OpenAISegment {
@@ -62,19 +66,23 @@ export class CloudASRProvider implements ASRProvider {
     const audioBuffer = await readFile(audioFilePath)
     const fileName = basename(audioFilePath)
 
+    // 一家的字段名与路径都在这一个调用里问出来，两个调用点（这里 + 测试连接）不许各拼一遍
+    const shape = buildAsrRequest(this.config.vendor, {
+      apiBase: this.config.apiBase,
+      model: this.config.model,
+      language: options.language ?? '',
+    })
+
     const formData = new FormData()
     const blob = new Blob([audioBuffer])
     formData.append('file', blob, fileName)
-    formData.append('model', this.config.model || 'whisper-1')
-    formData.append('response_format', 'verbose_json')
-    formData.append('timestamp_granularities[0]', 'segment')
-    if (options.language) {
-      formData.append('language', options.language)
+    for (const [key, value] of Object.entries(shape.fields)) {
+      formData.append(key, value)
     }
 
     options.onProgress?.({ percent: 10 })
 
-    const response = await fetch(`${this.config.apiBase}/v1/audio/transcriptions`, {
+    const response = await fetch(shape.url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.config.apiKey}`,

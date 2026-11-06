@@ -36,6 +36,12 @@ import {
   TTS_VENDOR_NAMES,
   type TtsAudioResult,
 } from './ttsVendor'
+import {
+  ASR_VENDOR_DEFAULT_MODEL,
+  ASR_VENDOR_NAMES,
+  buildAsrRequest,
+  normalizeAsrVendor,
+} from './asr/asrVendor'
 import { engineBinaryInManifest } from './componentService'
 import { DEFAULT_PROMPT } from './ai/openaiCompatible'
 // 相对路径而非 @/ 别名：主进程这条 build 链（vite.config.ts 里 electron 那两项）没有配别名，
@@ -54,7 +60,13 @@ export interface TestOutcome {
 }
 
 export interface AsrTestValues {
+  /** 云端／本地这一档（不是厂商）——名字沿用界面那格，别和下面的 vendor 混 */
   provider: string
+  /**
+   * 云端走哪一家（'openai' | 'minimax'），决定这次自检发的请求长什么样。
+   * 表单里带了这一格就按它测；没带（空串）落回 OpenAI 兼容——与真转写的取值口径同一个函数。
+   */
+  vendor?: string
   apiBase: string
   apiKey: string
   model: string
@@ -260,19 +272,26 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
     }
   }
 
-  const model = values.model.trim() || 'whisper-1'
-  const url = `${base}/v1/audio/transcriptions`
+  const vendor = normalizeAsrVendor(values.vendor)
+  const model = values.model.trim() || ASR_VENDOR_DEFAULT_MODEL[vendor]
+  // 路径与字段名问同一层：这里只要自己拼一次，「自检报可用、一转写就 404」就回来了
+  const shape = buildAsrRequest(vendor, {
+    apiBase: base,
+    model: values.model,
+    // 不带语言：这一格在设置页是全局那一项，不在方案表单里，表单里没有的值不该替用户猜一份发出去
+    language: '',
+  })
 
   const form = new FormData()
   form.append('file', new Blob([buildSilentWav()], { type: 'audio/wav' }), 'vv-probe.wav')
-  form.append('model', model)
-  form.append('response_format', 'verbose_json')
-  form.append('timestamp_granularities[0]', 'segment')
+  for (const [key, value] of Object.entries(shape.fields)) {
+    form.append(key, value)
+  }
 
   const started = Date.now()
   let response: Response
   try {
-    response = await fetch(url, {
+    response = await fetch(shape.url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${values.apiKey.trim()}` },
       body: form,
@@ -292,28 +311,30 @@ export async function testASRConfig(values: AsrTestValues): Promise<TestOutcome>
     return {
       level: 'fail',
       title: '返回的不是 JSON',
-      message: '接口 200 但响应体无法解析成 JSON，这个地址大概率不是 OpenAI 兼容的转写接口',
+      message: `接口 200 但响应体无法解析成 JSON，这个地址大概率不是 ${ASR_VENDOR_NAMES[vendor]} 的转写接口`,
     }
   }
 
-  logger.info('ConnTest', 'cloud asr probe done', { model, latencyMs, keys: Object.keys(body) })
+  logger.info('ConnTest', 'cloud asr probe done', { vendor, model, latencyMs, keys: Object.keys(body) })
 
   if (typeof body.text !== 'string') {
     return {
       level: 'fail',
       title: '响应结构不对',
-      message: '没有拿到 text 字段，这个服务的返回格式和 OpenAI 转写接口不一致，转写结果无法解析',
+      message: `没有拿到 text 字段，这个服务的返回格式和 ${ASR_VENDOR_NAMES[vendor]} 的转写接口不一致，转写结果无法解析`,
     }
   }
 
   const usedDefault = !values.model.trim()
-  const originNote = usedDefault ? '（模型留空，本次用的是默认值 whisper-1）' : ''
+  const originNote = usedDefault
+    ? `（模型留空，本次用的是${ASR_VENDOR_NAMES[vendor]}的默认值 ${model}）`
+    : ''
   // 静音样本本来就转不出字，segments 是空数组不代表不支持分段；字段在不在才是判据
   if (!Array.isArray(body.segments)) {
     return {
       level: 'warn',
       title: '能转写，但不返回分段时间戳',
-      message: `${originNote}耗时 ${formatLatency(latencyMs)}。这个服务忽略了 verbose_json 的 segment 粒度，字幕会整条压在时间 0 上、播放器逐句高亮也会失效，建议换成支持分段的服务（如 whisper-1）`,
+      message: `${originNote}耗时 ${formatLatency(latencyMs)}。这个服务忽略了分段粒度，字幕会整条压在时间 0 上、播放器逐句高亮也会失效，建议换成支持分段的服务（如 whisper-1）`,
     }
   }
   return {

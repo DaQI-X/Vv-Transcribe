@@ -172,6 +172,51 @@ export function ttsModelExample(raw: unknown): string {
   return TTS_VENDOR_UI[ttsVendorOf(raw)].modelExample
 }
 
+/**
+ * 转写厂商在界面上的样子（1.1.1，#224 转写侧）。和配音那一份一样，这一张只管「界面怎么说、
+ * 灰字举什么例」，请求形状由主进程 `asr/asrVendor.ts` 说了算；两边不同步的症状仍是
+ * 「提示写得松、请求照样被正确拦下」，而不是发坏请求。
+ *
+ * 只有两家：阿里百炼的录音文件识别**本版没接**。它不收本机音频，要先有一个公网可访问的音频 URL，
+ * 再走「提交任务 → 轮询任务 → 下载结果 JSON」那条异步链路，而官方给「本机文件换临时 URL」的
+ * 那条通道自己写着「请勿用于生产环境」（48 小时过期、上传凭证 100 QPS 不可扩容）。
+ * 与其在下拉里挂一个「选了大概率失败」的选项，不如先不列它——这一格不许说做不到的小事。
+ */
+const ASR_VENDOR_UI: Record<
+  string,
+  { label: string; apiBaseExample: string; modelExample: string }
+> = {
+  openai: {
+    label: 'OpenAI 兼容接口',
+    apiBaseExample: 'https://api.openai.com',
+    modelExample: 'whisper-1',
+  },
+  minimax: {
+    label: 'MiniMax',
+    apiBaseExample: 'https://api.minimax.cn',
+    modelExample: 'asr-1.0',
+  },
+}
+
+/** 认不出的一律按 OpenAI 兼容显示（与主进程 `normalizeAsrVendor` 同口径） */
+export function asrVendorOf(raw: unknown): string {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  return ASR_VENDOR_UI[value] ? value : 'openai'
+}
+
+/** 这一家在界面上的说法（列表行与转写页横幅都要点名网关，光看模型名认不出是谁家） */
+export function asrVendorLabel(raw: unknown): string {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].label
+}
+
+export function asrApiBaseExample(raw: unknown): string {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].apiBaseExample
+}
+
+export function asrModelExample(raw: unknown): string {
+  return ASR_VENDOR_UI[asrVendorOf(raw)].modelExample
+}
+
 export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
   asr: {
     listLabel: '云端转写方案',
@@ -180,27 +225,44 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
     baseKey: 'asrApiBase',
     fields: [
       {
+        key: 'asrVendor',
+        label: '厂商',
+        kind: 'select',
+        // 1.1.1 之前建出来的方案磁盘上没有这一项，读出来是空串；不显示成 OpenAI 兼容那一档，
+        // 界面就是一格空白，而主进程那边正按它发请求
+        fallback: 'openai',
+        hint:
+          '决定这次转写的请求长什么样。换一家的下面三格（接口地址、API Key、模型）会一起清空，不替你猜值——灰字只是举例。这一版可选的是 OpenAI 兼容与 MiniMax；阿里云百炼的转写没收（它只吃公网音频地址，还要走任务轮询），校对里那家「通义千问」管的是文字，转写接不上。',
+        options: [
+          { value: 'openai', label: 'OpenAI 兼容接口' },
+          { value: 'minimax', label: 'MiniMax' },
+        ],
+        clears: ['asrApiBase', 'asrApiKey', 'asrModel'],
+      },
+      {
         key: 'asrApiBase',
         label: 'API Base URL',
         kind: 'text',
-        placeholder: 'https://api.openai.com',
-        hint: '网关的接口地址；列表那一行显示的域名就是它',
+        placeholderFrom: (fields) => asrApiBaseExample(fields.asrVendor),
+        hint:
+          '网关的接口地址，只填到域名根为止（后面的路径按上面的「厂商」接）；列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
       },
       { key: 'asrApiKey', label: 'API Key', kind: 'key' },
       {
         key: 'asrModel',
         label: '模型',
         kind: 'text',
-        placeholder: 'whisper-1',
-        hint: '转写接口要的模型名，建好后列表那一行显示的就是它',
+        placeholderFrom: (fields) => asrModelExample(fields.asrVendor),
+        hint:
+          '转写接口要的模型名，建好后列表那一行显示的就是它。各家型号以对方文档为准（OpenAI 兼容形如 whisper-1，MiniMax 是 asr-1.0）；留空时按这一家的默认档发。',
       },
     ],
     introNew:
-      '填这三格建一条云端转写方案。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '填这四格建一条云端转写方案：先选厂商，再按对方文档填地址、Key 和模型（选厂商会把这三格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
-      '一条都还没有：点下面「新建API接入」，填好三格点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
-    credSummary: '地址、模型',
+      '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
+    credSummary: '厂商、地址、模型',
     panelNote:
       '弹窗里的「保存」当场写盘，「删除」也是当场、撤不回来；右下角那颗「保存设置」只管上面的模式与语言。',
     keyHintNew: KEY_HINT_NEW,

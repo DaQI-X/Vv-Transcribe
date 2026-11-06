@@ -540,7 +540,15 @@ describe('多方案的两道闸门', () => {
     const onDisk = await readJson(file())
     expect(onDisk).toMatchObject({ asrProvider: 'cloud', asrLocalModel: 'small', asrLanguage: 'en' })
     for (const profile of diskProfiles(onDisk).asr) {
-      expect(Object.keys(profile).sort()).toEqual(['apiBase', 'apiKey', 'id', 'model', 'name'])
+      // 1.1.1 起多一个 vendor：它是「这套地址和 Key 是哪家」的书签，主进程按它选请求形状
+      expect(Object.keys(profile).sort()).toEqual([
+        'apiBase',
+        'apiKey',
+        'id',
+        'model',
+        'name',
+        'vendor',
+      ])
     }
     // 重灌一次模块当「重启应用」：磁盘上那份必须自己站得住
     await loadInto(dir)
