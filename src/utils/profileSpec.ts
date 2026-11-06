@@ -261,7 +261,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         kind: 'text',
         placeholderFrom: (fields) => asrApiBaseExample(fields.asrVendor),
         hint:
-          '网关的接口地址，只填到域名根为止（后面的路径按上面的「厂商」接）；列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
+          '网关的接口地址，填到域名根为止就行（后面的路径按上面的「厂商」接）；照对方文档粘完整端点也认，打的就是你填的这一条。列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
       },
       { key: 'asrApiKey', label: 'API Key', kind: 'key' },
       {
@@ -362,7 +362,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 就是让界面说一句和下拉相反的话
         placeholderFrom: (fields) => ttsApiBaseExample(fields.ttsProvider),
         hint:
-          '只填到域名根为止，不用带版本号：后面的路径按上面的「厂商」接（OpenAI 兼容接 /v1/audio/speech，MiniMax 接 /v1/t2a_v2，百炼接 /api/v1/services/audio/tts/SpeechSynthesizer）。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。',
+          '填到域名根为止就行，不用带版本号：后面的路径按上面的「厂商」接（OpenAI 兼容接 /v1/audio/speech，MiniMax 接 /v1/t2a_v2，百炼接 /api/v1/services/audio/tts/SpeechSynthesizer）；照对方文档粘整条端点也认，此时打的就是你填的这一条。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。',
       },
       { key: 'ttsApiKey', label: 'API Key', kind: 'key' },
       {
