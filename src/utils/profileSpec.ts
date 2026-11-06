@@ -421,7 +421,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 替它发（那等于把用户的音频 POST 到一个他没选过的服务商去），而是直接判云端不可用
         hintFrom: (fields) =>
           asrVendorWantsAppCredentials(fields.asrVendor)
-            ? '这一家的接口地址，填到域名根为止就行（后面的 /v2/upload 与 /v2/getResult 由应用自己接）；照对方文档粘完整端点也认，打的就是你填的这一条。这一格**不能留空**：留空时应用不会拿别家的地址替它发，云端转写直接不可用、落回本地引擎。列表那一行显示的域名就是它。'
+            ? '这一家的接口地址，填到域名根为止就行（后面的 /v2/upload 与 /v2/getResult 由应用自己接）；照对方文档粘完整端点也认，打的就是你填的这一条。这一格不能留空：留空时应用不会拿别家的地址替它发，云端转写直接不可用、落回本地引擎。列表那一行显示的域名就是它。'
             : '网关的接口地址，填到域名根为止就行（后面的路径按上面的「厂商」接）；照对方文档粘完整端点也认，打的就是你填的这一条。列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
       },
       {
@@ -431,7 +431,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 只有讯飞的签名要它：另两家请求里没有这一层，摆一格等于让人往没人读的地方填值
         visibleWhen: (fields) => asrVendorWantsAppCredentials(fields.asrVendor),
         hint:
-          '讯飞开放平台那个应用的 APPID（形如 12345678）。它不是密钥——签名与请求参数里都要带上它，所以按明文存。要和下面两把是**同一个应用**的，串着用得到的是一句 100009「签名校验不通过」。',
+          '讯飞开放平台那个应用的 APPID（形如 12345678）。它不是密钥——签名与请求参数里都要带上它，所以按明文存。要和下面两把是「同一个应用」的，串着用得到的是一句 100009「签名校验不通过」。',
       },
       {
         key: 'asrApiKey',
