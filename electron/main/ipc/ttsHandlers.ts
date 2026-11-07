@@ -28,6 +28,7 @@ import {
   synthesizeSegments,
 } from '../services/ttsService'
 import {
+  suggestCloneName,
   ttsVendorCloneSpec,
   ttsVendorClonesVoices,
   ttsVendorListsVoices,
@@ -129,6 +130,19 @@ export interface VoiceCloneIpcResult {
   ok: boolean
   voiceId: string
   error: string | null
+}
+
+/**
+ * 选完要复刻的那段录音之后的回执（`tts:pickCloneAudio`）。
+ *
+ * `suggestedName` 是这一家规则下一定能过预检的一个名字，界面在「新音色 ID」那一格空着时填进去。
+ * 放在主进程生成是因为判据在这边：`voiceCloneProblem` 认的那条 `namePattern` 与 `nameKind`
+ * 都不出渲染层，界面上自己拼一个就是第二个出处，而第二个出处拼出来的名字被拒，用户看到的是
+ * 「你给我的名字不行」——比不给建议更糟。
+ */
+export interface CloneAudioPickResult {
+  filePath: string
+  suggestedName: string
 }
 
 /**
@@ -488,10 +502,14 @@ export function registerTTSHandlers() {
    *
    * 回 null＝用户按了取消，与 `dialog:selectFile` 同一个口径；这一家不支持复刻时也回 null，
    * 因为那颗按钮本来就不该被点到（界面上按 `ttsVendorClonesVoices` 决定摆不摆）。
+   *
+   * 除了路径还带一个 `suggestedName`（#349）：这一格原本要用户自己想名字，而 2026-11-07 用户的
+   * 理解一直是「选完录音，id 自己就该出现在框里」。名字生成只有主进程一份判据能兜住（`voiceCloneProblem`
+   * 认的规则与 nameKind 都在这里），渲染层再拼一个就是第二个出处——所以随回执给，界面拿它填进那一格。
    */
   ipcHandle(
     'tts:pickCloneAudio',
-    async (_event, requestedProfile?: unknown): Promise<string | null> => {
+    async (_event, requestedProfile?: unknown): Promise<CloneAudioPickResult | null> => {
       const config = await getTTSConfig(trimArg(requestedProfile) || undefined)
       if (config.engine !== 'cloud' || !ttsVendorClonesVoices(config.vendor)) return null
       const spec = ttsVendorCloneSpec(config.vendor)
@@ -506,8 +524,9 @@ export function registerTTSHandlers() {
         ],
       })
       if (result.canceled || result.filePaths.length === 0) return null
-      logger.userAction('Clone audio selected', { name: basename(result.filePaths[0]) })
-      return result.filePaths[0]
+      const filePath = result.filePaths[0]
+      logger.userAction('Clone audio selected', { name: basename(filePath) })
+      return { filePath, suggestedName: suggestCloneName(config.vendor) }
     },
     () => null
   )
@@ -520,9 +539,9 @@ export function registerTTSHandlers() {
    *
    * 与配音批次不同，这一步**不做费用确认**：两家复刻本身不收合成费（MiniMax 按音色数量算资产，
    * 百炼建音色不收费，收的是之后用它合成那些字）。
-   * 它是不可逆的——账号里多出来的那把音色在本应用删不掉，只能去对方控制台删——所以那句话由面板
+   * 它是不可逆的——账号里多出来的那把音色在本应用删不掉，只能去对方控制台删——所以那句话由弹窗
    * 写在按钮旁边（同处还写明落在哪家账号、这一趟打哪几条地址）；这里不再套一层确认弹窗：
-   * 走到那颗按钮要先展开面板、选录音、起名，三步都是有意为之。
+   * 走到那颗按钮要先打开弹窗、选一段录音，两步都是有意为之（#349 之后名字是自动填的，不再算第三步）。
    */
   ipcHandle(
     'tts:voiceClone',
@@ -531,7 +550,7 @@ export function registerTTSHandlers() {
       const filePath = trimArg(input.filePath)
       const name = trimArg(input.name)
       if (!filePath) return { ok: false, voiceId: '', error: '先选一段要拿去复刻的音频' }
-      if (!name) return { ok: false, voiceId: '', error: '先给这一把复刻音色起个名' }
+      if (!name) return { ok: false, voiceId: '', error: '先把要建的那把音色名填上' }
       const config = await getTTSConfig(trimArg(input.profileId) || undefined)
       const result = await cloneVoice(
         { ...config, apiBase: cloneApiBase(config, trimArg(input.endpointOverride)) },

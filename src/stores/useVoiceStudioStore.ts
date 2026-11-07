@@ -18,7 +18,7 @@ import { toast } from '@/components/ui/Toast'
 import { checkVoiceReady, raiseReadinessBlock } from '@/utils/readiness'
 import { splitPlainText } from '@/utils/splitPlainText'
 import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS } from '@/utils/localTtsEngines'
-import { ttsVendorClonesVoices } from '@/utils/profileSpec'
+import { ttsCloneSpec, ttsVendorClonesVoices } from '@/utils/profileSpec'
 import { frontendLogger } from '@/utils/logger'
 import type { VoiceProgress, VoiceSegment, VoiceSynthesizeResult } from '@/types/voice'
 import { useProfileStore } from './useProfileStore'
@@ -104,6 +104,13 @@ interface VoiceStudioState {
   /** 非空＝这一次没成，原因照原话摆在那一块里（复刻失败往往要说清是哪一格，toast 一句话装不下） */
   cloneError: string | null
   /**
+   * 非空＝上一趟成了，摆的是厂商回执里的音色 id。#347 原本一成功就关窗（理由是「id 已经填进背后那格，
+   * 窗里再摆一份是第二个出处」），2026-11-07 用户实测推翻了它：窗一关，人只剩一条几秒的 toast，
+   * 当场要核对的那个 id 反而没地方看——而复刻是唯一一个「产物是一串别人给的编号」的动作。
+   * 所以成功态留在这扇窗里，直到用户自己关。
+   */
+  cloneResult: string
+  /**
    * 单独指定这一趟复刻打的地址（#346）。空串＝用配音方案那一格洗回根的那一份。
    * 它和音色、倍速同一档：只作用于这一次，不落盘，也不动配音方案里那一格。
    */
@@ -140,9 +147,11 @@ interface VoiceStudioState {
   pickCloneAudio: () => Promise<void>
   /**
    * 真发一次复刻。成功后把回执里的 voiceId 填进「音色」那一格，并重取一次候选。
-   * 回的是「这一次成没成」——#347 那扇弹窗只在成了之后才自己关掉，失败要留着那行原话给用户看。
+   * 回的是「这一次成没成」——成与没成都由弹窗自己决定收场：成了留着显示那个 id，没成留着那句原话。
    */
   runVoiceClone: () => Promise<boolean>
+  /** 重新打开弹窗时清掉上一趟的回执：那一串 id 说的是**上一次**复刻，别让新一次开局就挂着一个旧答案 */
+  resetCloneResult: () => void
   setProfile: (profileId: string) => Promise<void>
   previewOne: () => Promise<void>
   buildQueue: () => VoiceSegment[]
@@ -246,6 +255,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   cloneName: '',
   cloning: false,
   cloneError: null,
+  cloneResult: '',
   cloneEndpoint: '',
   cloneTargets: [],
 
@@ -353,7 +363,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     set({ vendorVoices: result.voices ?? [], vendorVoicesError: null })
   },
 
-  setCloneName: (name) => set({ cloneName: name, cloneError: null }),
+  setCloneName: (name) => set({ cloneName: name, cloneError: null, cloneResult: '' }),
 
   /**
    * 问主进程「这一趟会打到哪几条」（#346）。这一条从不弹 toast、也从不拦复刻：那一行只是把主进程
@@ -383,13 +393,22 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
    * 不支持就回 null，界面那一块本来也不摆（按 `ttsVendorClonesVoices`）。
    * 换了文件就清掉上一次的失败原因——那句话说的多半是**上一个文件**哪里不合规矩，
    * 留着它等于让新选的这个文件背一句不属于它的诊断。
+   *
+   * 顺手把主进程给的建议名填进「新音色 ID」那一格，但只在格子空着时填：用户已经自己起了名，
+   * 再选一次文件不该把他的名字换掉。这一步是 #349 的交互核心——2026-11-07 用户的理解一直是
+   * 「选完录音，id 就该出现在框里」，而原本这一格要他先自己想一个名字。
    */
   pickCloneAudio: async () => {
     const api = getElectronAPI()
     if (!api || get().cloning) return
     const picked = await api.pickCloneAudio()
     if (!picked) return
-    set({ cloneFile: picked, cloneError: null })
+    set({
+      cloneFile: picked.filePath,
+      cloneError: null,
+      cloneResult: '',
+      cloneName: get().cloneName.trim() === '' ? picked.suggestedName : get().cloneName,
+    })
   },
 
   /**
@@ -407,17 +426,26 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   runVoiceClone: async () => {
     const api = getElectronAPI()
     if (!api) return false
-    const { cloneFile, cloneName, cloneEndpoint, cloning } = get()
+    const { cloneFile, cloneName, cloneEndpoint, cloning, configProvider } = get()
     if (cloning) return false
+    // 这两句在 #347 之后一直是走不到的死话：那颗按钮原本 `disabled={!ready}`，而 ready 收的就是
+    // 同样这两项——缺什么的时候按钮根本点不动，于是用户看到的只有「点了没反应」（2026-11-07 实测）。
+    // 现在按钮只在真的在跑时禁用，缺项由这两句当场说，界面上不再有一层默默吞掉点击的闸门。
+    // 两句都点名界面上的那个控件或那一格，因为「先起个名」这种说法在#349 之后已经不属于界面：
+    // 名字选完录音就自动填好了，格子空着只可能是用户自己清掉的
     if (!cloneFile) {
-      set({ cloneError: '先选一段要拿去复刻的音频' })
+      const reason = '先点「选一段录音」挑一个文件——这一步只在本地挑，还没发出去'
+      set({ cloneError: reason, cloneResult: '' })
+      toast.error(reason, 6000)
       return false
     }
     if (!cloneName.trim()) {
-      set({ cloneError: '先给这一把复刻音色起个名' })
+      const reason = `先把「${ttsCloneSpec(configProvider)?.nameLabel ?? '新音色 ID'}」那一格填上`
+      set({ cloneError: reason, cloneResult: '' })
+      toast.error(reason, 6000)
       return false
     }
-    set({ cloning: true, cloneError: null })
+    set({ cloning: true, cloneError: null, cloneResult: '' })
     const result = await api.cloneVoice({
       filePath: cloneFile,
       name: cloneName.trim(),
@@ -428,11 +456,22 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       toast.error(result?.error ?? '复刻没成功，主进程没给原因', 10000)
       return false
     }
-    set({ cloning: false, cloneError: null, cloneFile: '', cloneName: '', voice: result.voiceId })
+    // 草稿清空、但把回执留在 cloneResult 里给弹窗摆：这一趟的输入已经不欠什么了，
+    // 而那个 id 是用户接下来要抄去别处用的东西
+    set({
+      cloning: false,
+      cloneError: null,
+      cloneFile: '',
+      cloneName: '',
+      cloneResult: result.voiceId,
+      voice: result.voiceId,
+    })
     toast.success(`复刻好了，「音色」那一格已经填上 ${result.voiceId}`, 8000)
     await get().refreshVendorVoices()
     return true
   },
+
+  resetCloneResult: () => set({ cloneResult: '', cloneError: null }),
 
   /**
    * 这一页的「配音方案」下拉：选中的那条＝把配音档的**当前使用**换过去。
@@ -462,6 +501,7 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
       cloneFile: '',
       cloneName: '',
       cloneError: null,
+      cloneResult: '',
       cloneEndpoint: '',
     })
     // 换完必须重读设置：下面那行「配音引擎：云端/本地 · 模型 X」和 checkVoiceReady 走的都是这一份

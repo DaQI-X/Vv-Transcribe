@@ -32,7 +32,7 @@
  * 这一页不改字幕、不动时间轴，产物是一条独立的音轨。
  */
 import { useState } from 'react'
-import { AlertTriangle, AudioLines, Download, Volume2 } from 'lucide-react'
+import { AlertTriangle, AudioLines, Download, Loader2, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
@@ -327,6 +327,9 @@ export function VoiceStudio() {
   const engineModelPresent = useVoiceStudioStore((s) => s.engineModelPresent)
   const vendorVoices = useVoiceStudioStore((s) => s.vendorVoices)
   const vendorVoicesError = useVoiceStudioStore((s) => s.vendorVoicesError)
+  // 复刻进行中要让入口那颗按钮自己变脸：弹窗关掉之后（用户说「关掉这扇窗不会取消它」）
+  // 页面得留着「这件事还在跑」的痕迹，否则看起来就是什么都没发生
+  const cloning = useVoiceStudioStore((s) => s.cloning)
   const profiles = useProfileStore((s) => s.slice.tts.profiles)
   const profileId = useProfileStore((s) => s.slice.tts.profileId)
   const setProfile = useVoiceStudioStore((s) => s.setProfile)
@@ -590,15 +593,27 @@ export function VoiceStudio() {
 
             {/* 本地档没有复刻这回事（引擎只会念随包的那几把嗓子），所以只在云端档、且这一家真支持时挂。
                 这里只留一颗入口（#347）：复刻那几格摊开比这一列剩下的都高，摆进页面就把「开始配音」
-                挤到折叠线以下，所以挪进弹窗，用完就关。 */}
+                挤到折叠线以下，所以挪进弹窗。弹窗不再「用完就关」——#349 要的就是那串新音色 id
+                得在窗里摆出来，用户才知道这一趟真成了。 */}
             {!local && ttsVendorClonesVoices(configProvider) && (
               <div className="voice-studio__clone-entry">
                 <span className="voice-studio__label">声音复刻</span>
-                <button className="settings-modal__cancel-btn" onClick={() => setCloneDialogOpen(true)}>
-                  <AudioLines size={14} />
-                  用自己的录音建一把音色
+                <button
+                  className="settings-modal__cancel-btn"
+                  onClick={() => {
+                    // 上一次的回执得清掉：那串 id 说的是上一次，重开一扇带着旧答案的窗会让人以为这一次也成了
+                    useVoiceStudioStore.getState().resetCloneResult()
+                    setCloneDialogOpen(true)
+                  }}
+                >
+                  {cloning ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
+                  {cloning ? '复刻进行中…' : '用自己的录音建一把音色'}
                 </button>
-                <span className="voice-studio__hint">建好的音色填进上面那格「音色」，不写回设置。</span>
+                <span className="voice-studio__hint">
+                  {cloning
+                    ? '请求已经在对方那边跑了，关掉这扇窗不会取消它。建好了把那串音色 id 填进上面那格「音色」，不写回设置。'
+                    : '建好的音色填进上面那格「音色」，不写回设置。'}
+                </span>
               </div>
             )}
 

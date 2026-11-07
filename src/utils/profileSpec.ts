@@ -197,7 +197,7 @@ const TTS_VENDOR_UI: Record<
     resourceIdExample: '',
     clone: {
       twoStep: true,
-      nameLabel: '音色 ID',
+      nameLabel: '新音色 ID',
       nameExample: 'MiniMax001',
       nameRule:
         '8–256 个字符，字母开头、字母或数字结尾，只用字母/数字/-/_，且不能与已有音色重名',
@@ -218,7 +218,7 @@ const TTS_VENDOR_UI: Record<
     resourceIdExample: '',
     clone: {
       twoStep: false,
-      nameLabel: '音色名前缀',
+      nameLabel: '新音色名前缀',
       nameExample: 'myvoice',
       nameRule: '只用数字和字母、不超过 10 个字符；建好的完整音色名由对方拼（模型-前缀-唯一标识）',
       audioRule:

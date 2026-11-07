@@ -2865,21 +2865,34 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   flex: 1 1 100%;
 }
 
-/* 「名字」与「选录音」并排一行（#345）：两样都是这一趟的输入，各占一行只是把面板撑高。
-   那颗按钮按内容宽，剩下的宽度全给输入格。 */
-.voice-studio__clone-row {
+/* 两步按号排（#349）：这一趟用户真正要做的只有「选录音」和「认下那个音色名」两件事，
+   编号把先后写在结构里，比再来一段「下一步做什么」的说明短，也不会说过期。 */
+.voice-clone__step {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 10px;
   min-width: 0;
 }
 
-.voice-studio__clone-row .voice-studio__field {
-  flex: 1 1 auto;
+/* 那颗圆形号只当锚点：描一圈、不带底色，别跟输入格抢视觉 */
+.voice-clone__step-no {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--text-secondary);
 }
 
-.voice-studio__clone-row .voice-studio__clone-pick {
-  flex: 0 0 auto;
+.voice-clone__step-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 .voice-studio__clone-pick {
@@ -2943,6 +2956,64 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .voice-studio__clone-error svg {
   flex: none;
   margin-top: 3px;
+}
+
+/* 复刻弹窗里那一摞（#349）：Tailwind 的 preflight 把所有 p 的默认外边距清成 0，
+   这扇窗 body 里连排着五块文字与两块输入，全零就糊成一段读不下去的话。
+   只在这一扇窗里收口，别的弹窗维持原样（它们用的是 .settings-form-group 自己带的间距）。 */
+.voice-clone-dialog .settings-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 这三块都是「这一趟的状态」：下一步缺什么 / 正在跑 / 跑成了。
+   做成带边的盒子，而不是继续用 hint 那一片灰字——同样的灰里再塞一句同样的灰等于没有说。 */
+.voice-clone__next,
+.voice-clone__pending,
+.voice-clone__done {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-page);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.voice-clone__pending svg,
+.voice-clone__done svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.voice-clone__pending svg {
+  color: var(--brand-blue);
+}
+
+/* 复刻成功：id 摆在这里，不只靠一条会自己消失的 toast（#349） */
+.voice-clone__done svg {
+  color: var(--success-color);
+}
+
+.voice-clone__done > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.voice-clone__done code {
+  padding: 1px 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  color: var(--text-primary);
+  /* 这个 id 是用户接下来要抄走的东西：给 selectable 与 anywhere，让它能被选中且断得开 */
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 /* 合成中复用转写的 processing 视觉，但状态页那张卡是「整页居中」的绝对定位 + 固定 620x360。

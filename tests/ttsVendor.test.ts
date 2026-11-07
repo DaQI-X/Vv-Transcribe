@@ -19,6 +19,7 @@ import {
   readVoiceCloneResult,
   readVoiceCloneUpload,
   readVoiceList,
+  suggestCloneName,
   ttsVendorCloneSpec,
   ttsVendorClonesVoices,
   ttsVendorListsVoices,
@@ -830,8 +831,18 @@ describe('声音复刻：哪家支持、按什么形状发', () => {
     expect(voiceCloneProblem('minimax', { ...ok, bytes: 21 * 1024 * 1024 })).toMatch(
       /这段音频 22\.0MB，超过这一家复刻收的 20MB/
     )
-    // 空名字这一条是主进程自己的兜底：界面上那颗按钮本来就该是灰的
-    expect(voiceCloneProblem('minimax', { ...ok, name: '  ' })).toMatch(/先给这一把复刻音色填一个「音色 ID」/)
+    // 空名字这一条是主进程自己的兜底：界面上那一格正常是选完录音自动填好的，空着只可能是用户自己清掉的
+    expect(voiceCloneProblem('minimax', { ...ok, name: '  ' })).toMatch(/先把「新音色 ID」那一格填上/)
+  })
+
+  it('选完录音自动填的那个建议名，两家都得当场过预检（#349：这一格不再要用户自己想名字）', () => {
+    for (const vendor of ['minimax', 'dashscope'] as const) {
+      const name = suggestCloneName(vendor)
+      // 后缀取时间戳的 36 进制末 8 位：同一账号里重名会被对方直接拒，而 8 位刚好卡在百炼那 10 个字符的上限内
+      expect(name).toMatch(/^[a-z0-9-]+$/)
+      expect(name.length).toBeLessThanOrEqual(10 + 7)
+      expect(voiceCloneProblem(vendor, { name, fileName: 'me.mp3', bytes: 1024 })).toBeNull()
+    }
   })
 
   it('百炼那一格是前缀：只收字母数字、最长 10 个，7.5 MB 按原文件拦', () => {
@@ -870,6 +881,17 @@ describe('声音复刻：哪家支持、按什么形状发', () => {
     expect(request.url).toBe('https://api.minimax.cn/v1/voice_clone')
     expect(request.headers['Content-Type']).toBe('application/json')
     expect(JSON.parse(request.body)).toEqual({ file_id: 123, voice_id: 'MiniMax001' })
+    // 18 位那种真 id：过一遍 Number() 尾数就被 IEEE754 收掉（…890 变 …900），
+    // 发出去是一个不存在的文件号，对方只会回「文件找不到」，所以数字串必须一字不差
+    const big = buildVoiceCloneRequest('minimax', {
+      apiBase: 'https://api.minimax.cn',
+      apiKey: 'sk-test',
+      name: 'MiniMax003',
+      model: '',
+      fileId: '202611071234567890',
+    })
+    expect(JSON.parse(big.body)).toEqual({ file_id: 202611071234567890, voice_id: 'MiniMax003' })
+    expect(big.body).toContain('"file_id":202611071234567890')
     // 回执给的不是纯数字时原样发：转成 NaN 比发一个字符串更糟
     const other = buildVoiceCloneRequest('minimax', {
       apiBase: 'https://api.minimax.cn',

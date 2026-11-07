@@ -680,7 +680,7 @@ export const VENDOR_VOICE_CLONE: Partial<Record<TtsVendorId, VendorCloneSpec>> =
     sizeLimit: '20MB',
     audioRule: 'mp3 / m4a / wav，10 秒–5 分钟，≤20MB，一段连续清楚的朗读（无背景音乐、噪声或别人的声音）',
     nameKind: 'voiceId',
-    nameLabel: '音色 ID',
+    nameLabel: '新音色 ID',
     nameRule:
       '8–256 个字符，字母开头、字母或数字结尾，只用字母/数字/-/_，且不能与已有音色重名',
     namePattern: /^[A-Za-z][A-Za-z0-9_-]{6,254}[A-Za-z0-9]$/,
@@ -697,7 +697,7 @@ export const VENDOR_VOICE_CLONE: Partial<Record<TtsVendorId, VendorCloneSpec>> =
     audioRule:
       'wav / mp3 / m4a，10–20 秒（最长 60 秒），采样率 ≥16kHz，原文件 ≤7.5MB（对方那 10MB 限的是编码后）',
     nameKind: 'prefix',
-    nameLabel: '音色名前缀',
+    nameLabel: '新音色名前缀',
     nameRule: '只用数字和字母、不超过 10 个字符；建好的完整音色名由对方拼（模型-前缀-唯一标识）',
     namePattern: /^[A-Za-z0-9]{1,10}$/,
     needsTargetModel: true,
@@ -713,6 +713,21 @@ export function ttsVendorCloneSpec(vendor: TtsVendorId): VendorCloneSpec {
   const spec = VENDOR_VOICE_CLONE[vendor]
   if (!spec) vendorError(`${TTS_VENDOR_NAMES[vendor]} 不支持在应用里复刻音色`)
   return spec
+}
+
+/**
+ * 选完录音顺手填进「新音色 ID」那一格的建议值。
+ *
+ * 之所以由主进程生成、跟着 `pickCloneAudio` 的回执一起给：这一格原本要用户自己想一个名字，
+ * 而「想名字」是复刻里唯一一件对方没要求、我们却把负担挪给用户的事——MiniMax 那条规则
+ * （字母开头、字母或数字结尾、8–256 字符）光读就要看一眼，填错了一趟 120 秒的请求换回一句被拒。
+ * 后缀取 `Date.now()` 的 36 进制末 8 位：同一个账号里重名会直接被拒，时间戳比 `Math.random` 好复现，
+ * 长度也刚好卡在百炼那条「≤10 字符」的上限内（`vv` + 8）。
+ */
+export function suggestCloneName(vendor: TtsVendorId): string {
+  const spec = ttsVendorCloneSpec(vendor)
+  const tail = Date.now().toString(36).slice(-8)
+  return spec.nameKind === 'prefix' ? `vv${tail}` : `vv-clone-${tail}`
 }
 
 /**
@@ -752,7 +767,7 @@ export function voiceCloneProblem(
 ): string | null {
   const spec = ttsVendorCloneSpec(vendor)
   const name = input.name.trim()
-  if (!name) return `先给这一把复刻音色填一个「${spec.nameLabel}」`
+  if (!name) return `先把「${spec.nameLabel}」那一格填上`
   if (spec.namePattern && !spec.namePattern.test(name)) {
     return `「${spec.nameLabel}」不合这一家的规矩：${spec.nameRule}（现在填的是 ${name}）`
   }
@@ -831,9 +846,16 @@ export function buildVoiceCloneRequest(
 
   if (spec.uploadPath) {
     if (!input.fileId) vendorError(`${TTS_VENDOR_NAMES[vendor]} 的复刻要先上传音频换 file_id，这一步没做`)
-    // 文档里 file_id 是 int64：上传回来是纯数字时就按数字发，别把 "123" 这种字符串塞进请求体
-    const fileId = /^\d+$/.test(input.fileId) ? Number(input.fileId) : input.fileId
-    return { url, headers, body: JSON.stringify({ file_id: fileId, voice_id: input.name.trim() }) }
+    // 文档里 file_id 是 int64：上传回来是纯数字时就按数字发，别把 "123" 这种字符串塞进请求体。
+    // 但它不能走 `Number()`：原厂给的是 18 位时间戳样的 id，超过 2^53 就被 IEEE754 收掉尾数
+    // （202611071234567890 发出去成 …900，那是一个不存在的文件号，对方只会回「文件找不到」）。
+    // 所以纯数字直接把数字串接进 JSON、其余情况按字符串发，两条都保持对方文档里的类型。
+    const fileId = /^\d+$/.test(input.fileId) ? input.fileId : JSON.stringify(input.fileId)
+    return {
+      url,
+      headers,
+      body: `{"file_id":${fileId},"voice_id":${JSON.stringify(input.name.trim())}}`,
+    }
   }
 
   if (!input.bytes || !input.fileName) {

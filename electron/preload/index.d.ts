@@ -621,8 +621,11 @@ export interface ElectronAPI {
    * 选一段要拿去复刻的音频（1.1.2 #330）。面板的过滤器按「这一家收什么」给，
    * 不是转写那份音视频白名单。回 null＝用户按了取消，或当前这一家不支持复刻
    * （四家里只有 MiniMax 与百炼收，理由见主进程 `ttsVendor.VENDOR_VOICE_CLONE` 那段注释）。
+   * `suggestedName` 是这一家规则下一定能过预检的一个名字（#349）：选完录音就填进「新音色 ID」
+   * 那一格，用户想改再改——原本这一格要他自己想名字，而「想名字」是复刻里唯一一件对方没要求、
+   * 我们却把负担挪给用户的事。
    */
-  pickCloneAudio: (profileId?: string) => Promise<string | null>
+  pickCloneAudio: (profileId?: string) => Promise<{ filePath: string; suggestedName: string } | null>
   /**
    * 用那段音频在这一家复刻一把音色。`voiceId` 是这一趟之后该填进「音色」那一格的值：
    * MiniMax 那一家它就是用户刚起的名字，百炼是对方拼出来的（形如 `cosyvoice-v2-myprefix-xxxx`），

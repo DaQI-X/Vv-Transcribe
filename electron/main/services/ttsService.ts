@@ -317,10 +317,26 @@ export async function listVendorVoices(config: TTSConfig): Promise<VendorVoice[]
  */
 const VOICE_CLONE_TIMEOUT_MS = 120_000
 
-/** 复刻那两步各发一次请求；错误措辞要按「哪一步」分叉，所以这一步的名字由调用方给 */
+/**
+ * 复刻那两步各发一次请求；错误措辞要按「哪一步」分叉，所以这一步的名字由调用方给。
+ *
+ * 发出去之前先落一行 `clone request sent`：这一条是「到底有没有打到厂商服务器」的唯一判据。
+ * 原先这条链路只在成功时留一句 `TTS voice cloned`，失败靠 guard 那条 IPC WARN——两头都不沾的中间态
+ * （请求压根没发出去、或者发出后卡在那 120 秒里）在 app.log 上和「没发生」长得一模一样，
+ * 2026-11-07 用户报「选完录音没反应」时就只能靠反证推。
+ *
+ * 地址记成 `host + pathname` 连起来的一个字段，不是 `path: '/v1/files/upload'`：日志出口那道
+ * redact 会把斜杠开头的多段字符串当成本机路径收成 basename（logRedact 的 POSIX_PATH），实测落成
+ * `path: "upload"`——判据被自家闸门改写了，所以喂给它一个端口/域名挨着斜杠的形状，那条规则刻意放过。
+ */
 async function cloneFetch(step: string, url: string, init: RequestInit): Promise<Response> {
+  const { host, pathname } = new URL(url)
+  const endpoint = `${host}${pathname}`
+  logger.info('TTS', 'clone request sent', { step, endpoint })
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(VOICE_CLONE_TIMEOUT_MS) })
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(VOICE_CLONE_TIMEOUT_MS) })
+    logger.info('TTS', 'clone response', { step, endpoint, status: response.status })
+    return response
   } catch (err) {
     if (err instanceof Error && err.name === 'TimeoutError') {
       throw new Error(`${step} ${VOICE_CLONE_TIMEOUT_MS / 1000} 秒没响应，已中断`)
