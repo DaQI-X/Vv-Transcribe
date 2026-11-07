@@ -28,6 +28,7 @@ import {
   ttsVendorWantsResourceId,
   TTS_VENDOR_RESOURCE_ID,
   TtsVendorError,
+  voiceCloneEndpoints,
   voiceCloneProblem,
   type TtsSpeechInput,
   type TtsVendorId,
@@ -922,6 +923,31 @@ describe('声音复刻：哪家支持、按什么形状发', () => {
     expect(cloneReq('minimax', 'https://api.minimax.cn/v1/voice_clone').url).toBe(
       'https://api.minimax.cn/v1/voice_clone'
     )
+  })
+
+  it('界面那一行「这一趟打到」与真发出去的是同一份推导（#346）', () => {
+    // 复刻走的从来不是配音那一条端点，所以这一行的全部价值在「与请求同源」上：
+    // 渲染层再拼一遍就是第二个出处，症状正是界面念一句、请求打另一句（#327 那一类）
+    expect(voiceCloneEndpoints('minimax', 'https://api.minimax.cn')).toEqual([uploadReq().url, cloneReq('minimax').url])
+    // 顺序按发出去的先后：先上传换 file_id，再拿它复刻；百炼没有第二步
+    expect(voiceCloneEndpoints('dashscope', 'https://dashscope.aliyuncs.com')).toEqual([cloneReq('dashscope').url])
+    // 不支持的两家要说清「这家不支持」，而不是回一份空名单让界面摆一条空地址
+    for (const vendor of ['openai', 'volc'] as const) {
+      expect(() => voiceCloneEndpoints(vendor, 'https://api.openai.com')).toThrow(/不支持在应用里复刻音色/)
+    }
+  })
+
+  it('那一格填什么就打什么：路径前缀底下的网关照样接两条，应用不替你改道（#346）', () => {
+    // 挂在自己路径前缀底下的网关（归一化后不到两段）仍当它是根
+    expect(voiceCloneEndpoints('minimax', 'https://gw.example.com/proxy')).toEqual([
+      'https://gw.example.com/proxy/v1/files/upload',
+      'https://gw.example.com/proxy/v1/voice_clone',
+    ])
+    // 只转发了配音那一条的中转网关，接上复刻路径就是一条不存在的路由。应用不改道、也不猜，
+    // 把它原样摆出来——用户看得见真打的那一条，界面上那句「地址不对？改一个」才有落点
+    expect(voiceCloneEndpoints('dashscope', 'https://gw.example.com/proxy')).toEqual([
+      'https://gw.example.com/proxy/api/v1/services/audio/tts/customization',
+    ])
   })
 
   it('读上传回执：file_id 是纯数字也按字符串回给上层（下一步会自己判要不要转数字）', async () => {

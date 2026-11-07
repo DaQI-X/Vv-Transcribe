@@ -200,8 +200,8 @@ const TTS_VENDOR_UI: Record<
       nameLabel: '音色 ID',
       nameExample: 'MiniMax001',
       nameRule:
-        '8–256 个字符，首字符是英文字母，只能用字母、数字、横线和下划线，末位不能是横线或下划线，且不能与已有的音色 id 重复',
-      audioRule: 'mp3 / m4a / wav，10 秒到 5 分钟，不超过 20MB，一段连续清楚的朗读（别有背景音乐、噪声或别人的声音）',
+        '8–256 个字符，字母开头、字母或数字结尾，只用字母/数字/-/_，且不能与已有音色重名',
+      audioRule: 'mp3 / m4a / wav，10 秒–5 分钟，≤20MB，一段连续清楚的朗读（无背景音乐、噪声或别人的声音）',
     },
   },
   dashscope: {
@@ -220,9 +220,9 @@ const TTS_VENDOR_UI: Record<
       twoStep: false,
       nameLabel: '音色名前缀',
       nameExample: 'myvoice',
-      nameRule: '只用数字和英文字母，不超过 10 个字符；对方拼出来的完整音色名是「模型-前缀-唯一标识」',
+      nameRule: '只用数字和字母、不超过 10 个字符；建好的完整音色名由对方拼（模型-前缀-唯一标识）',
       audioRule:
-        'wav / mp3 / m4a，建议 10–20 秒、最长 60 秒，采样率 ≥16 kHz，编码后不超过 10MB（所以这一格按原文件 7.5MB 拦）',
+        'wav / mp3 / m4a，10–20 秒（最长 60 秒），采样率 ≥16kHz，原文件 ≤7.5MB（对方那 10MB 限的是编码后）',
     },
   },
   // 豆包这一档同样**没本机实测过**（手上没有豆包语音的 Key），按 #224 拍板先照原厂规范设计、后验。
@@ -460,7 +460,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 界面就是一格空白，而主进程那边正按它发请求
         fallback: 'openai',
         hint:
-          '决定这次转写的请求长什么样。换一家的下面几格（接口地址、凭据、模型）会一起清空，不替你猜值——灰字只是举例。这一版可选 OpenAI 兼容、MiniMax 与讯飞。讯飞是「上传音频换订单号、再轮询取结果」的异步接口，收 5 小时以内的长音频，但要三样凭据（AppID / APIKey / APISecret）且没有模型那一格。豆包和阿里云百炼的转写都没收，它们只吃「公网可访问的音频地址」，本机文件换不到一个能递给对方的地址（官方那条换临时地址的通道自己写着「请勿用于生产环境」）。豆包的配音是收的，在配音那一档里。校对里那家「通义千问」管的是文字，转写接不上。',
+          '决定这次转写的请求长什么样。换一家会把下面几格清空，不替你猜值（灰字只是举例）。讯飞是「上传换订单号、再轮询结果」的异步接口，要三样凭据（AppID / APIKey / APISecret），没有模型那一格。豆包与百炼的转写没接（它们只收公网可访问的音频地址，本机文件给不出这样的地址），豆包的配音在配音那一档。',
         options: [
           { value: 'openai', label: 'OpenAI 兼容接口' },
           { value: 'minimax', label: 'MiniMax' },
@@ -477,8 +477,8 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 替它发（那等于把用户的音频 POST 到一个他没选过的服务商去），而是直接判云端不可用
         hintFrom: (fields) =>
           asrVendorWantsAppCredentials(fields.asrVendor)
-            ? '这一家的接口地址，填到域名根为止就行（后面的 /v2/upload 与 /v2/getResult 由应用自己接）；照对方文档粘完整端点也认，打的就是你填的这一条。这一格不能留空：留空时应用不会拿别家的地址替它发，云端转写直接不可用、落回本地引擎。列表那一行显示的域名就是它。'
-            : '网关的接口地址，填到域名根为止就行（后面的路径按上面的「厂商」接）；照对方文档粘完整端点也认，打的就是你填的这一条。列表那一行显示的域名就是它。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
+            ? '填到域名根就行，后面的 /v2/upload 与 /v2/getResult 由应用接上；照对方文档粘完整端点也认，打的就是你填的这一条。这一格不能留空：留空时应用不会拿别家的地址替它发，云端转写直接不可用。'
+            : '填到域名根就行，后面的路径按上面的「厂商」接；照对方文档粘完整端点也认，打的就是你填的这一条。留空时按 OpenAI 的官方地址发——只有 OpenAI 兼容那一档能这么省，换成 MiniMax 时空着多半就是 404/401。',
       },
       {
         key: 'asrAppId',
@@ -487,7 +487,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 只有讯飞的签名要它：另两家请求里没有这一层，摆一格等于让人往没人读的地方填值
         visibleWhen: (fields) => asrVendorWantsAppCredentials(fields.asrVendor),
         hint:
-          '讯飞开放平台那个应用的 APPID（形如 12345678）。它不是密钥——签名与请求参数里都要带上它，所以按明文存。要和下面两把是「同一个应用」的，串着用得到的是一句 100009「签名校验不通过」。',
+          '讯飞开放平台那个应用的 APPID（形如 12345678）。它不是密钥，按明文存。要和下面两把属于同一个应用，串着用得到的是一句 100009「签名校验不通过」。',
       },
       {
         key: 'asrApiKey',
@@ -495,7 +495,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         kind: 'key',
         hintFrom: (fields) =>
           asrVendorWantsAppCredentials(fields.asrVendor)
-            ? '讯飞控制台里那把 APIKey——它在请求参数里叫 accessKeyId。它不是 AppID，也不是下面那把 APISecret，三样填串了得到的都是同一句签名不通过。'
+            ? '讯飞控制台里那把 APIKey（在请求参数里叫 accessKeyId）。三样凭据填串了，得到的都是同一句签名不通过。'
             : undefined,
       },
       {
@@ -506,7 +506,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         secretHintNew: '填一把，跟着「保存」一起存进这一条；不填＝这条没有 APISecret，讯飞的转写跑不起来',
         secretHintEdit: '这一套还没有 APISecret：填一把，点「保存」才存进来',
         hint:
-          '讯飞控制台里那把 APISecret，只用来算这一趟请求的签名，一个字节都不会发出去（所以它和 API Key 一样加密存）。少了它，对方回的是 100009「签名校验不通过」。',
+          '讯飞控制台里那把 APISecret，只用来算这一趟请求的签名，一个字节都不发出去（所以和 API Key 一样加密存）。少了它对方回 100009「签名校验不通过」。',
       },
       {
         key: 'asrModel',
@@ -516,14 +516,14 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         visibleWhen: (fields) => asrVendorWantsModel(fields.asrVendor),
         placeholderFrom: (fields) => asrModelExample(fields.asrVendor),
         hint:
-          '转写接口要的模型名，建好后列表那一行显示的就是它。各家型号以对方文档为准（OpenAI 兼容形如 whisper-1，MiniMax 是 asr-1.0）；留空时按这一家的默认档发。',
+          '转写接口要的模型名，各家以对方文档为准（OpenAI 兼容形如 whisper-1，MiniMax 是 asr-1.0）；留空按这一家的默认档发。建好后列表那一行显示的就是它。',
       },
     ],
     introNew:
-      '建一条云端转写方案：先选厂商，再按对方文档填接口地址、Key 和模型（选厂商会把这几格清空，不替你猜值；选了讯飞会多出 AppID 与 APISecret 两格、少掉模型那一格）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '建一条云端转写方案：先选厂商，再按对方文档填接口地址、Key 和模型（选厂商会把这几格清空，不替你猜值）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
-      '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
+      '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址和 Key，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
     credSummary: '厂商、地址、模型（讯飞那一档是 AppID）',
     panelNote:
       '弹窗里的「保存」当场写盘，「删除」也是当场、撤不回来；右下角那颗「保存设置」只管上面的模式与语言。',
@@ -592,7 +592,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 所以这一格必须显示成它，而不是留一格空白让用户以为「没选」
         fallback: 'openai',
         hint:
-          '决定这次配音的请求长什么样。换一家的下面几格（接口地址、API Key、配音模型，豆包还多一格资源编号）会一起清空，不替你猜值——这一家的地址和模型名只有对方文档说了算，猜错的地址要等请求失败才说话，空格子当场就拦得住。灰字只是举例。',
+          '决定这次配音的请求长什么样。换一家会把下面几格（接口地址、API Key、配音模型，豆包还多一格资源编号）清空，不替你猜值——灰字只是举例。',
         options: [
           { value: 'openai', label: 'OpenAI 兼容接口' },
           { value: 'minimax', label: 'MiniMax' },
@@ -609,7 +609,7 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 就是让界面说一句和下拉相反的话
         placeholderFrom: (fields) => ttsApiBaseExample(fields.ttsProvider),
         hint:
-          '填到域名根为止就行，不用带版本号：后面的路径按上面的「厂商」接（OpenAI 兼容接 /v1/audio/speech，MiniMax 接 /v1/t2a_v2，百炼接 /api/v1/services/audio/tts/SpeechSynthesizer，豆包接 /api/v3/tts/unidirectional）；照对方文档粘整条端点也认，此时打的就是你填的这一条。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。',
+          '填到域名根为止就行，不用带版本号：后面的路径按上面的「厂商」接；照对方文档粘整条端点也认，此时打的就是你填的这一条。留空＝沿用「校对配置」的地址，只有 OpenAI 兼容那一档能这么省。声音复刻走的是另一条端点，配音页那一块可以单独指定地址。',
       },
       { key: 'ttsApiKey', label: 'API Key', kind: 'key' },
       {
@@ -620,8 +620,8 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
         // 这一句在豆包那一档是假话：它的 req_params.model 只给复刻音色用，系统音色留空才是对的
         hintFrom: (fields) =>
           ttsVendorNeedsModel(fields.ttsProvider)
-            ? '这一家音频接口的模型 id，和校对模型是两回事——把校对模型填在这里会得到一句「模型不存在」。各家型号以对方文档为准（MiniMax 形如 speech-2.8-hd，百炼形如 cosyvoice-v3-flash）。留空时配音不会启动。'
-            : '豆包只有「声音复刻」的音色才需要模型名，用系统音色时留空即可——填了反而可能被回一句 InvalidModel。复刻音色形如 seed-tts-2.0-standard。',
+            ? '这一家音频接口的模型 id，和校对模型是两回事（填校对模型会得到一句「模型不存在」）。各家型号以对方文档为准（MiniMax 形如 speech-2.8-hd，百炼形如 cosyvoice-v3-flash）。留空时配音不会启动。'
+            : '豆包只有「声音复刻」的音色才需要模型名，用系统音色时留空即可（填了反而可能被回一句 InvalidModel）。复刻音色形如 seed-tts-2.0-standard。',
       },
       {
         key: 'ttsResourceId',
@@ -637,10 +637,10 @@ export const PROFILE_CAP_SPEC: Record<ProfileCapability, ProfileCapSpec> = {
       // 由服务商说了算、各家字段还不一样，绑进方案就成了「你以为这套自带了 alloy」。它在配音页那一格。
     ],
     introNew:
-      '建一条云端配音方案：先选厂商，再按对方文档填接口地址、Key 和配音模型（选厂商会把这几格清空，不替你猜值；选了豆包会多出一格资源编号，且配音模型那格可以留空）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
+      '建一条云端配音方案：先选厂商，再按对方文档填接口地址、Key 和配音模型（选厂商会把这几格清空，不替你猜值；豆包多一格资源编号）。这里点「保存」当场写盘，右下角那颗「保存设置」与弹窗无关。',
     introEdit: '只改这一套的凭据，点「保存」当场写盘，别的那几套不动。',
     emptyHint:
-      '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址、Key 和配音模型，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
+      '一条都还没有：点下面「新建API接入」，选好厂商、填好接口地址和 Key，点弹窗里的「保存」。第一条落盘就是当前使用的那一套。',
     credSummary: '厂商、地址、配音模型（豆包还有资源编号）',
     panelNote:
       '弹窗里的「保存」当场写盘，「删除」也是当场、撤不回来；右下角那颗「保存设置」只管上面的配音引擎。',

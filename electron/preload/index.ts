@@ -152,11 +152,14 @@ const api = {
   // 所以这一条从不影响配音本身。profileId 与其余通道同义：不传＝当前默认那套
   listVoices: (profileId?: string) => ipcRenderer.invoke('tts:voiceList', profileId),
   // 声音复刻（1.1.2 #330）：选音频与复刻分成两条，因为「选文件」是原生面板、可能取消，
-  // 而复刻是一次花钱/写账号的动作，两步之间界面上要有一道二次确认。
-  // 两条都只读已保存的方案：复刻是往账号里**写**一把音色，拿一个没保存的厂商去写就是写到另一家去了
+  // 而复刻是往用户账号里写一把音色。两条都只读已保存的方案：拿一个没保存的厂商去写就是写到另一家去了。
+  // 界面上没有二次确认（走到那颗按钮要先展开面板、选录音、起名），不可逆那一句写在按钮旁边。
   pickCloneAudio: (profileId?: string) => ipcRenderer.invoke('tts:pickCloneAudio', profileId),
-  cloneVoice: (args: { filePath: string; name: string; profileId?: string }) =>
+  cloneVoice: (args: { filePath: string; name: string; profileId?: string; endpointOverride?: string }) =>
     ipcRenderer.invoke('tts:voiceClone', args),
+  // 这一条只念「待会儿打到哪几条地址」（#346）：推导只有主进程一份，渲染层再拼一遍就是第二个出处
+  cloneEndpoints: (args?: { profileId?: string; endpointOverride?: string }) =>
+    ipcRenderer.invoke('tts:cloneEndpoints', args),
   // 一批要跑几分钟（每段一次网络请求，串行），invoke 只给最后结果；段号得推回来界面才不会像卡死
   onVoiceProgress: (callback: (data: VoiceProgressEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, data: VoiceProgressEvent) => callback(data)

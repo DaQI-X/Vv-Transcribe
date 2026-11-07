@@ -628,12 +628,24 @@ export interface ElectronAPI {
    * MiniMax 那一家它就是用户刚起的名字，百炼是对方拼出来的（形如 `cosyvoice-v2-myprefix-xxxx`），
    * 所以必须用回执里的这一个，不能拿界面上那一格当结论。
    * 失败时 `ok:false` + `error`（服务商原话照递，不包一层「请求失败」）。
+   * `endpointOverride`（#346）只改这一趟打的地址，留空＝用配音方案那一格洗回根的那一份；不落盘。
    */
-  cloneVoice: (args: { filePath: string; name: string; profileId?: string }) => Promise<{
+  cloneVoice: (args: {
+    filePath: string
+    name: string
+    profileId?: string
+    endpointOverride?: string
+  }) => Promise<{
     ok: boolean
     voiceId: string
     error: string | null
   }>
+  /**
+   * 复刻这一趟真会打到的那几条地址（#346），按发出去的先后：MiniMax 两条（先上传换文件号、再复刻），
+   * 百炼一条。判据与 `cloneVoice` 完全同构，所以这里念的就是待会儿真打的那几条；
+   * 本地档与不支持复刻的两家回空数组。
+   */
+  cloneEndpoints: (args?: { profileId?: string; endpointOverride?: string }) => Promise<{ urls: string[] }>
 
   /**
    * 按需组件：只读磁盘在场情况与占用体积，不联网。打开「关于与更新」先吃这一份，

@@ -18,6 +18,7 @@ import { toast } from '@/components/ui/Toast'
 import { checkVoiceReady, raiseReadinessBlock } from '@/utils/readiness'
 import { splitPlainText } from '@/utils/splitPlainText'
 import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS } from '@/utils/localTtsEngines'
+import { ttsVendorClonesVoices } from '@/utils/profileSpec'
 import type { VoiceProgress, VoiceSegment, VoiceSynthesizeResult } from '@/types/voice'
 import { useProfileStore } from './useProfileStore'
 import { useTranscriptionStore } from './useTranscriptionStore'
@@ -101,6 +102,13 @@ interface VoiceStudioState {
   cloning: boolean
   /** 非空＝这一次没成，原因照原话摆在那一块里（复刻失败往往要说清是哪一格，toast 一句话装不下） */
   cloneError: string | null
+  /**
+   * 单独指定这一趟复刻打的地址（#346）。空串＝用配音方案那一格洗回根的那一份。
+   * 它和音色、倍速同一档：只作用于这一次，不落盘，也不动配音方案里那一格。
+   */
+  cloneEndpoint: string
+  /** 待会儿真打的那几条地址，按发出的先后。由主进程算：那份推导不许有第二处 */
+  cloneTargets: string[]
 
   phase: VoicePhase
   /** 这一批实际提交出去的段，进行中按段号回显文本用；用户中途改输入不影响它 */
@@ -123,12 +131,17 @@ interface VoiceStudioState {
   loadConfig: () => Promise<void>
   refreshVendorVoices: () => Promise<void>
   setCloneName: (name: string) => void
+  /** 换那一格地址，并重取一次「待会儿打到哪几条」 */
+  setCloneEndpoint: (endpoint: string) => void
+  /** 问主进程这一趟会打到哪几条地址（#346，纯展示，不联网、不发消息） */
+  refreshCloneEndpoints: () => Promise<void>
   /** 弹原生面板选一段要拿去复刻的音频；取消或这一家不支持时什么都不改 */
   pickCloneAudio: () => Promise<void>
-  /** 真发一次复刻。成功后把回执里的 voiceId 填进「音色」那一格，并重取一次候选 */
-  runVoiceClone: () => Promise<void>
-  /** 收起那一块（连同它这一次的文件与名字）；已经复刻出来的音色在账号里，不受这一条影响 */
-  resetClone: () => void
+  /**
+   * 真发一次复刻。成功后把回执里的 voiceId 填进「音色」那一格，并重取一次候选。
+   * 回的是「这一次成没成」——#347 那扇弹窗只在成了之后才自己关掉，失败要留着那行原话给用户看。
+   */
+  runVoiceClone: () => Promise<boolean>
   setProfile: (profileId: string) => Promise<void>
   previewOne: () => Promise<void>
   buildQueue: () => VoiceSegment[]
@@ -232,6 +245,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   cloneName: '',
   cloning: false,
   cloneError: null,
+  cloneEndpoint: '',
+  cloneTargets: [],
 
   phase: 'idle',
   queue: [],
@@ -299,6 +314,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     }
     if (mode === 'local') await refreshLocalVoiceState(get().engine || requested)
     else await get().refreshVendorVoices()
+    // 「这一趟复刻打到哪几条」跟着方案与那一格地址变，读设置时顺手取一次；主进程纯算，不联网
+    await get().refreshCloneEndpoints()
     // 方案列表和设置是两回事：设置读不出（null）不代表列表读不出，反过来也一样。
     // 列表那份归 useProfileStore（三档共用，见那个文件头），换完方案必须跟着重读一次，
     // 否则下拉里挂的还是切之前的「当前使用」。
@@ -333,6 +350,29 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   setCloneName: (name) => set({ cloneName: name, cloneError: null }),
 
   /**
+   * 问主进程「这一趟会打到哪几条」（#346）。这一条从不弹 toast、也从不拦复刻：那一行只是把主进程
+   * 已经存在的那份推导念给人看。宁可问一次也不在渲染层拼，是因为拼法一旦有两处，界面就可能说一句
+   * 和请求不一致的话——而照着错的那句去排查，比不念更糟（#327 那轮的症状正是界面写着 A、发出去是 B）。
+   */
+  refreshCloneEndpoints: async () => {
+    const api = getElectronAPI()
+    if (!api) return
+    const { mode, cloneEndpoint, configProvider } = get()
+    // 本地档没有复刻这回事，不支持的那两家主进程也回空数组——两边都不用多问一次
+    if (mode !== 'cloud' || !ttsVendorClonesVoices(configProvider)) {
+      set({ cloneTargets: [] })
+      return
+    }
+    const result = await api.cloneEndpoints({ endpointOverride: cloneEndpoint.trim() })
+    set({ cloneTargets: result?.urls ?? [] })
+  },
+
+  setCloneEndpoint: (endpoint) => {
+    set({ cloneEndpoint: endpoint, cloneError: null })
+    void get().refreshCloneEndpoints()
+  },
+
+  /**
    * 选一段要拿去复刻的音频。这一条不自己判「这一家支不支持」：主进程按已保存的方案判，
    * 不支持就回 null，界面那一块本来也不摆（按 `ttsVendorClonesVoices`）。
    * 换了文件就清掉上一次的失败原因——那句话说的多半是**上一个文件**哪里不合规矩，
@@ -354,35 +394,39 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
    *   重取之后用户在候选里看得见自己刚建的那一条，而不是只信我们一句 toast。
    *
    * 复刻本身在两家都不收合成费（MiniMax 按音色数量算资产、百炼建音色不收费，收的是之后用它合成那些字），
-   * 所以这里不做配音批次那种费用确认；但它**不可逆**——账号里多出来的那把音色只能去对方控制台删，
-   * 那一道确认在界面上（点「开始复刻」前先确认）。
+   * 所以这里不做配音批次那种费用确认；但它**不可逆**——账号里多出来的那把音色只能去对方控制台删。
+   * `endpointOverride` 只作用于这一趟（#346）：中转网关常只转发配音那条端点，那一格留空就是把
+   * 「配音的地址」当成「复刻的地址」用。它不落盘，也不动配音方案里那一格。
    */
   runVoiceClone: async () => {
     const api = getElectronAPI()
-    if (!api) return
-    const { cloneFile, cloneName, cloning } = get()
-    if (cloning) return
+    if (!api) return false
+    const { cloneFile, cloneName, cloneEndpoint, cloning } = get()
+    if (cloning) return false
     if (!cloneFile) {
       set({ cloneError: '先选一段要拿去复刻的音频' })
-      return
+      return false
     }
     if (!cloneName.trim()) {
       set({ cloneError: '先给这一把复刻音色起个名' })
-      return
+      return false
     }
     set({ cloning: true, cloneError: null })
-    const result = await api.cloneVoice({ filePath: cloneFile, name: cloneName.trim() })
+    const result = await api.cloneVoice({
+      filePath: cloneFile,
+      name: cloneName.trim(),
+      endpointOverride: cloneEndpoint.trim(),
+    })
     if (!result?.ok || !result.voiceId) {
       set({ cloning: false, cloneError: result?.error ?? '复刻没成功，主进程没给原因' })
       toast.error(result?.error ?? '复刻没成功，主进程没给原因', 10000)
-      return
+      return false
     }
     set({ cloning: false, cloneError: null, cloneFile: '', cloneName: '', voice: result.voiceId })
     toast.success(`复刻好了，「音色」那一格已经填上 ${result.voiceId}`, 8000)
     await get().refreshVendorVoices()
+    return true
   },
-
-  resetClone: () => set({ cloneFile: '', cloneName: '', cloning: false, cloneError: null }),
 
   /**
    * 这一页的「配音方案」下拉：选中的那条＝把配音档的**当前使用**换过去。
@@ -405,7 +449,15 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     // 实际按 B 套跑」这种最难解释的分歧。倍速不在方案字段里，是这一页自己的参数，留着。
     // 复刻那一块也一起收：它是照着**原来那家**的规矩填的（MiniMax 要一个 8–256 的音色 id，
     // 百炼只要一个 ≤10 字符的前缀），换到另一家那些值全不成立，留着就是让人拿旧名字点一次注定被拒的复刻
-    set({ voice: '', engine: '', speakers: 0, cloneFile: '', cloneName: '', cloneError: null })
+    set({
+      voice: '',
+      engine: '',
+      speakers: 0,
+      cloneFile: '',
+      cloneName: '',
+      cloneError: null,
+      cloneEndpoint: '',
+    })
     // 换完必须重读设置：下面那行「配音引擎：云端/本地 · 模型 X」和 checkVoiceReady 走的都是这一份
     await get().loadConfig()
   },

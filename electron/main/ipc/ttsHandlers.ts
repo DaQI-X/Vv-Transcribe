@@ -13,7 +13,7 @@
 import { dialog, BrowserWindow } from 'electron'
 import { basename } from 'node:path'
 import { copyFile, stat } from 'node:fs/promises'
-import { getTTSConfig, resolveProfileId, type TtsEngineMode } from '../services/settingsService'
+import { getTTSConfig, normalizeApiBase, resolveProfileId, type TtsEngineMode } from '../services/settingsService'
 import type { TTSConfig, TTSProgress, TTSSegmentInput, VoiceTrack } from '../services/ttsService'
 import {
   cancelTTSSynthesis,
@@ -31,6 +31,7 @@ import {
   ttsVendorCloneSpec,
   ttsVendorClonesVoices,
   ttsVendorListsVoices,
+  voiceCloneEndpoints,
   TTS_VENDOR_NAMES,
   type VendorVoice,
 } from '../services/ttsVendor'
@@ -467,6 +468,18 @@ export function registerTTSHandlers() {
   )
 
   /**
+   * 复刻这一趟用哪一份地址（#346）。
+   *
+   * 默认就是配音方案那一格洗回根的那一份——原厂直连下这是对的，两家的复刻端点与配音端点同主机同前缀。
+   * 单独指定只治两类真会打错的：网关只转发了配音那一条路径（复刻打过去是一条不存在的路由），
+   * 以及那一格留空时 `getTTSConfig` 回落到校对那一份（百炼的校对预设正是 `.../compatible-mode`）。
+   * 覆盖值走同一套 `normalizeApiBase`，所以「粘整条端点」在这里也是同一个行为，不是第二套规则。
+   */
+  function cloneApiBase(config: { apiBase: string }, endpointOverride: string): string {
+    return endpointOverride ? normalizeApiBase(endpointOverride) : config.apiBase
+  }
+
+  /**
    * 选一段要拿去复刻的音频（1.1.2 #330）。
    *
    * 过滤器按**这一家收什么**给（MiniMax 是 mp3/m4a/wav，百炼是 wav/mp3/m4a），
@@ -506,9 +519,10 @@ export function registerTTSHandlers() {
    * 拿一个没保存的厂商去写等于把东西写到另一家账号里，那比读错严重得多。
    *
    * 与配音批次不同，这一步**不做费用确认**：两家复刻本身不收合成费（MiniMax 按音色数量算资产，
-   * 百炼建音色不收费，收的是之后用它合成那些字），而界面上那颗按钮已经写明了要花哪一把 Key。
+   * 百炼建音色不收费，收的是之后用它合成那些字）。
    * 它是不可逆的——账号里多出来的那把音色在本应用删不掉，只能去对方控制台删——所以那句话由面板
-   * 写在按钮旁边；这里不再套一层确认弹窗：走到那颗按钮要先展开面板、选录音、起名，三步都是有意为之。
+   * 写在按钮旁边（同处还写明落在哪家账号、这一趟打哪几条地址）；这里不再套一层确认弹窗：
+   * 走到那颗按钮要先展开面板、选录音、起名，三步都是有意为之。
    */
   ipcHandle(
     'tts:voiceClone',
@@ -519,10 +533,36 @@ export function registerTTSHandlers() {
       if (!filePath) return { ok: false, voiceId: '', error: '先选一段要拿去复刻的音频' }
       if (!name) return { ok: false, voiceId: '', error: '先给这一把复刻音色起个名' }
       const config = await getTTSConfig(trimArg(input.profileId) || undefined)
-      const result = await cloneVoice(config, { filePath, name })
+      const result = await cloneVoice(
+        { ...config, apiBase: cloneApiBase(config, trimArg(input.endpointOverride)) },
+        { filePath, name }
+      )
       return { ok: true, voiceId: result.voiceId, error: null }
     },
     (message) => ({ ok: false, voiceId: '', error: message })
+  )
+
+  /**
+   * 复刻这一趟会打到哪几条地址（#346，只给界面念，不做任何事）。
+   *
+   * 单开一条而不是让渲染层自己拼，是因为拼法那份独一性正是这一条链路的全部风险所在：
+   * `normalizeApiBase` 洗根 + `appendApiPath` 接尾巴，渲染层再实现一遍就是第二个出处，
+   * 而界面上一句和请求不一致的话，用户按它去排查方向就错了（#327 那轮踩过同一类）。
+   * 所以这里收的参数与 `tts:voiceClone` 完全同构，走的是同一个 `cloneApiBase`。
+   *
+   * 本地档、以及那两家不支持复刻的：回空数组，界面上那一行本来也不出现（按 `ttsVendorClonesVoices`）。
+   */
+  ipcHandle(
+    'tts:cloneEndpoints',
+    async (_event, args?: unknown): Promise<{ urls: string[] }> => {
+      const input = (args ?? {}) as Record<string, unknown>
+      const config = await getTTSConfig(trimArg(input.profileId) || undefined)
+      if (config.engine !== 'cloud' || !ttsVendorClonesVoices(config.vendor)) {
+        return { urls: [] }
+      }
+      return { urls: voiceCloneEndpoints(config.vendor, cloneApiBase(config, trimArg(input.endpointOverride))) }
+    },
+    () => ({ urls: [] })
   )
 
   /**

@@ -678,11 +678,11 @@ export const VENDOR_VOICE_CLONE: Partial<Record<TtsVendorId, VendorCloneSpec>> =
     formats: ['mp3', 'm4a', 'wav'],
     maxBytes: 20 * MIB,
     sizeLimit: '20MB',
-    audioRule: 'mp3 / m4a / wav，10 秒到 5 分钟，不超过 20MB，一段连续清楚的朗读（别有背景音乐、噪声或别人的声音）',
+    audioRule: 'mp3 / m4a / wav，10 秒–5 分钟，≤20MB，一段连续清楚的朗读（无背景音乐、噪声或别人的声音）',
     nameKind: 'voiceId',
     nameLabel: '音色 ID',
     nameRule:
-      '8–256 个字符，首字符是英文字母，只能用字母、数字、横线和下划线，末位不能是横线或下划线，且不能与已有的音色 id 重复',
+      '8–256 个字符，字母开头、字母或数字结尾，只用字母/数字/-/_，且不能与已有音色重名',
     namePattern: /^[A-Za-z][A-Za-z0-9_-]{6,254}[A-Za-z0-9]$/,
     needsTargetModel: false,
   },
@@ -695,10 +695,10 @@ export const VENDOR_VOICE_CLONE: Partial<Record<TtsVendorId, VendorCloneSpec>> =
     maxBytes: 7.5 * MIB,
     sizeLimit: '7.5MB',
     audioRule:
-      'wav / mp3 / m4a，建议 10–20 秒、最长 60 秒，采样率 ≥16 kHz，编码后不超过 10MB（所以这一格按原文件 7.5MB 拦）',
+      'wav / mp3 / m4a，10–20 秒（最长 60 秒），采样率 ≥16kHz，原文件 ≤7.5MB（对方那 10MB 限的是编码后）',
     nameKind: 'prefix',
     nameLabel: '音色名前缀',
-    nameRule: '只用数字和英文字母，不超过 10 个字符；对方拼出来的完整音色名是「模型-前缀-唯一标识」',
+    nameRule: '只用数字和字母、不超过 10 个字符；建好的完整音色名由对方拼（模型-前缀-唯一标识）',
     namePattern: /^[A-Za-z0-9]{1,10}$/,
     needsTargetModel: true,
   },
@@ -713,6 +713,21 @@ export function ttsVendorCloneSpec(vendor: TtsVendorId): VendorCloneSpec {
   const spec = VENDOR_VOICE_CLONE[vendor]
   if (!spec) vendorError(`${TTS_VENDOR_NAMES[vendor]} 不支持在应用里复刻音色`)
   return spec
+}
+
+/**
+ * 复刻这一趟真会打到的那几条地址，按发出去的先后（MiniMax 两条、百炼一条）。
+ *
+ * 摆出来是因为**它和配音不是同一条端点**：复刻用的是「配音那一格地址的根 + 这一家复刻那条路径」，
+ * 而这一格用户填过的原话可能是整条配音端点，也可能是只转发了配音那一条的中转地址——后者接上
+ * 复刻的路径就成了一条不存在的路由，而界面上一句都不说。真发请求那一条走的是同一个函数，
+ * 所以这里念的就是待会儿打的那几条，不是第二份推导。
+ */
+export function voiceCloneEndpoints(vendor: TtsVendorId, apiBase: string): string[] {
+  const spec = ttsVendorCloneSpec(vendor)
+  return [spec.uploadPath, spec.clonePath]
+    .filter((path): path is string => path !== null)
+    .map((path) => appendApiPath(apiBase, path))
 }
 
 /** Base64 Data URI 的 mediatype 按后缀定：写错一个 mime，对方解不出音频，回的是「参数错误」 */

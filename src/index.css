@@ -1972,6 +1972,12 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   width: 420px;
 }
 
+/* 声音复刻弹窗（#347）：宽一档不是图好看——「这一趟打到」那两条地址是这块的要害，
+   480 里最长那条（百炼 63 个字符）要断成三行，断到看不完就白摆 */
+.voice-clone-dialog {
+  width: 520px;
+}
+
 @keyframes settings-modal-in {
   from { opacity: 0; transform: scale(0.95) translateY(10px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
@@ -2166,6 +2172,9 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   cursor: pointer;
   transition: var(--app-transition);
   font-family: var(--font-sans);
+  /* 按钮不许把话说到一半换行：#347 之前「开始复刻」被同一行的长提示挤成「开始复／刻」，
+     那颗按钮的宽度该由字决定，让位的是文字不是按钮 */
+  white-space: nowrap;
 }
 
 .settings-modal__cancel-btn:hover {
@@ -2188,6 +2197,8 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   cursor: pointer;
   transition: var(--app-transition);
   font-family: var(--font-sans);
+  /* 同 __cancel-btn：按钮的宽度由字决定，不许被同一行的东西挤到换行 */
+  white-space: nowrap;
 }
 
 .settings-modal__save-btn:hover {
@@ -2552,6 +2563,45 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   overflow-y: auto;
 }
 
+/* 左列拆成「滚的那一段 + 钉住的那一段」（#345）。flex 项默认能缩，展开声音复刻那块之后内容比面板高：
+   先是最后一颗「开始配音」被挤成一条，改成整列一起滚又跟着滚出视野——那颗按钮是这一页的主动作，
+   复刻只是顺路做的事，不能做完才发现按钮没了。所以让字段自己滚，「试听 + 开始配音」始终留在底边。
+   右列不套这些：那几张进度卡的高度本来就由内容定，没必要跟着变。 */
+.voice-studio__panel--form {
+  overflow: hidden;
+}
+
+.voice-studio__panel--form > .voice-studio__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.voice-studio__panel--form > .voice-studio__footer {
+  flex-shrink: 0;
+}
+
+.voice-studio__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.voice-studio__body > * {
+  flex-shrink: 0;
+}
+
+.voice-studio__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.voice-studio__body .voice-studio__input,
+.voice-studio__body .voice-studio__readonly {
+  flex-shrink: 1;
+}
+
 .voice-studio__label {
   font-size: 12px;
   font-weight: 600;
@@ -2799,26 +2849,37 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   text-align: center;
 }
 
-/* 声音复刻（#330）：收起时只剩一行抬头，展开后是「起名 + 选录音 + 一句原厂口径 + 一颗按钮」。
+/* 声音复刻入口（#330；#347 起只剩这一行，那几格挪进弹窗）。
    刻意不给底色和光晕——它是这一页里的次级动作，做成一块独立卡片会让人以为配音必须先复刻。
    上面那条虚线只用来跟「音色」那格分开，实线会和面板边框撞成两层盒子。 */
-.voice-studio__clone {
+.voice-studio__clone-entry {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
   padding-top: 12px;
   border-top: 1px dashed var(--border-color);
 }
 
-.voice-studio__clone-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.voice-studio__clone-entry .voice-studio__hint {
+  flex: 1 1 100%;
 }
 
-/* __link 原本靠 margin-left:auto 贴到行尾，在这儿它是行首那颗开关，得把这一下撤掉 */
-.voice-studio__clone-head .voice-studio__link {
-  margin-left: 0;
+/* 「名字」与「选录音」并排一行（#345）：两样都是这一趟的输入，各占一行只是把面板撑高。
+   那颗按钮按内容宽，剩下的宽度全给输入格。 */
+.voice-studio__clone-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.voice-studio__clone-row .voice-studio__field {
+  flex: 1 1 auto;
+}
+
+.voice-studio__clone-row .voice-studio__clone-pick {
+  flex: 0 0 auto;
 }
 
 .voice-studio__clone-pick {
@@ -2850,16 +2911,38 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--error-color);
 }
 
+/* 这一趟真打到的地址（#346）：MiniMax 两条、百炼一条，按发出去的先后排。
+   宁可换行也不许省略到底看不全——用户要看的就是「到底打到哪一家哪条路径」。 */
+.voice-studio__clone-endpoints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.voice-studio__clone-endpoints code {
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-page);
+  color: var(--text-secondary);
+  font-size: 11px;
+  /* 折行而不是省略号：这条地址就是给用户核对「到底打到哪条路径」的，截断了就白摆。
+     网址没有空格，光靠 word-wrap 断不开，要 anywhere */
+  overflow-wrap: anywhere;
+}
+
+.voice-studio__clone-endpoints .voice-studio__link {
+  margin-left: 0;
+}
+
 /* 图标不许跟着多行文字一起被拉伸，也不许在首行里飘高 */
 .voice-studio__clone-error svg {
   flex: none;
   margin-top: 3px;
-}
-
-.voice-studio__clone-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 
 /* 合成中复用转写的 processing 视觉，但状态页那张卡是「整页居中」的绝对定位 + 固定 620x360。
