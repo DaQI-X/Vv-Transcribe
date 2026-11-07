@@ -2723,6 +2723,70 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   min-width: 250px;
 }
 
+/* 音色那格的自绘候选（#340 的跟进）。原来交给原生 <datalist>，可它钉哪、多高、滚不滚都不归样式管，
+   MiniMax 那几百条会翻到输入框上面把正在输入的格子盖住（2026-11-07 用户点名）。
+   宽度跟着输入框走、不往外探：这一格在 .voice-studio__body 那个滚动容器里，它的 overflow-x
+   被 overflow-y:auto 顶成了 auto，探出去的半截直接裁掉，还会顺手擦出一条横向滚动条。
+   高度钉死 168px（实测一行 24px、一屏 7 行）+ 竖向滚动，候选多少都不改变周围布局。
+   一行两段：左边音色 id（等宽，最长占 60%）、右边给人看的名字，各自省略号。 */
+.voice-studio__voice-box {
+  position: relative;
+  min-width: 0;
+}
+
+.voice-studio__voice-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-card);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+
+.voice-studio__voice-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.voice-studio__voice-option.is-active {
+  background: var(--bg-hover);
+}
+
+.voice-studio__voice-option code {
+  flex-shrink: 0;
+  max-width: 60%;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.voice-studio__voice-option span {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .voice-studio__config {
   display: flex;
   align-items: center;

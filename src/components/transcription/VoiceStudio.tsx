@@ -14,7 +14,7 @@
  * - 本地档同一格换成「配音模型」下拉（白名单里那两档）。这是这一次调用的参数，不写回设置。
  * - 音色两档都留着：本地能枚举（引擎报编号），云端能填什么由服务商决定，各家字段名与取值都不一样。
  *   云端这一格是「手输 + 边打边筛」（#340）：厂商自己给「列音色」接口时（四家里只有 MiniMax 给），
- *   进这一页就用用户那把 Key 现取一份挂成 <datalist>，自己复刻过的音色也在里面；取不到或这家没这条接口
+ *   进这一页就用用户那把 Key 现取一份，挂成自己画的下拉候选，自己复刻过的音色也在里面；取不到或这家没这条接口
  *   就退回纯手输，配一句文档链接的出路。OpenAI 兼容留空＝不指定，请求里干脆不带这一项；
  *   MiniMax 与百炼把音色当必填（1.1.1），留空会在点「开始配音」时被主进程当场拦下并点名这一家——
  *   这里不猜一个默认音色，因为猜错了用户听到的是另一把嗓子，比报错更难发现。
@@ -31,13 +31,17 @@
  *
  * 这一页不改字幕、不动时间轴，产物是一条独立的音轨。
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, AudioLines, Download, Loader2, Volume2 } from 'lucide-react'
 import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
 import { useSettingsModalStore } from '@/stores/useSettingsModalStore'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { toast } from '@/components/ui/Toast'
-import { useVoiceStudioStore, VOICE_SPEED_OPTIONS } from '@/stores/useVoiceStudioStore'
+import {
+  useVoiceStudioStore,
+  VOICE_SPEED_OPTIONS,
+  type VendorVoiceOption,
+} from '@/stores/useVoiceStudioStore'
 import { switchableProfiles, useProfileStore } from '@/stores/useProfileStore'
 import { ProfileSwitchSelect } from '@/components/settings/ProfileSwitchSelect'
 import {
@@ -305,6 +309,123 @@ function ResultCard() {
   )
 }
 
+/**
+ * 「音色」那一格 + 自己画的下拉候选（#340 的跟进）。
+ *
+ * 原本用的是原生 `<datalist>`：它把「边打边筛 + 键盘上下选」免费给我们，可面板钉在哪、多高、
+ * 溢出不溢出全部不归样式管——Chromium 觉得下方不够就翻到输入框**上面**，把正在输入的那一格盖住，
+ * 而 MiniMax 那份名单有几百条，它给的高度也不受控（2026-11-07 用户点名要「固定在下边、超出滚动」）。
+ * 定位、固定高度、滚动条这三样 datalist 一样都不开放，所以只能自己画。
+ */
+function VendorVoiceInput(props: {
+  value: string
+  candidates: VendorVoiceOption[]
+  placeholder: string
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(-1)
+  const rows = useRef<(HTMLDivElement | null)[]>([])
+
+  const query = props.value.trim().toLowerCase()
+  // 与 datalist 的口径一致：按输入的串在 id 与名字里做不区分大小写的子串筛
+  const filtered =
+    query === ''
+      ? props.candidates
+      : props.candidates.filter(
+          (item) =>
+            item.id.toLowerCase().includes(query) || item.name.toLowerCase().includes(query)
+        )
+
+  // 键盘选到第几行，得跟着滚进可视区：列表是定高的，不滚就等于箭头键选了一个看不见的候选
+  useEffect(() => {
+    if (active >= 0) rows.current[active]?.scrollIntoView({ block: 'nearest' })
+  }, [active])
+
+  const choose = (id: string) => {
+    props.onChange(id)
+    setOpen(false)
+    setActive(-1)
+  }
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      if (open) {
+        event.preventDefault()
+        setOpen(false)
+      }
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (filtered.length === 0) return
+      event.preventDefault()
+      if (!open) {
+        setOpen(true)
+        setActive(0)
+        return
+      }
+      setActive((current) =>
+        event.key === 'ArrowDown'
+          ? Math.min(current + 1, filtered.length - 1)
+          : Math.max(current - 1, 0)
+      )
+      return
+    }
+    if (event.key === 'Enter' && open && active >= 0 && filtered[active]) {
+      event.preventDefault()
+      choose(filtered[active].id)
+    }
+  }
+
+  return (
+    <div className="voice-studio__voice-box">
+      <input
+        className="settings-form-input"
+        type="text"
+        value={props.value}
+        placeholder={props.placeholder}
+        disabled={props.disabled}
+        onChange={(event) => {
+          props.onChange(event.target.value)
+          setActive(-1)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={onKeyDown}
+        role="combobox"
+        aria-expanded={open && filtered.length > 0}
+        aria-controls="voice-studio-vendor-voices"
+      />
+      {open && filtered.length > 0 && (
+        <div className="voice-studio__voice-list" id="voice-studio-vendor-voices" role="listbox">
+          {filtered.map((item, index) => (
+            <div
+              key={item.id}
+              ref={(node) => {
+                rows.current[index] = node
+              }}
+              className={`voice-studio__voice-option${index === active ? ' is-active' : ''}`}
+              role="option"
+              aria-selected={index === active}
+              // mousedown 里拦住默认行为：否则这一点先让输入框失焦，blur 抢先把列表关掉，
+              // 选择根本来不及发生（这是自己写的下拉最经典的一个坑）
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => choose(item.id)}
+            >
+              <code>{item.id}</code>
+              {/* 复刻过的标一下：账号里的复刻音色与厂商系统音色在这一格里长得一样 */}
+              <span>{item.source === 'clone' ? `${item.name}（自己复刻）` : item.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function VoiceStudio() {
   // 声音复刻弹窗（#347）。开合只活在这一页：复刻那几格本来就不落盘，关窗也不取消已经发出去的请求
   const [cloneDialogOpen, setCloneDialogOpen] = useState(false)
@@ -501,6 +622,14 @@ export function VoiceStudio() {
                       </option>
                     ))}
                   </select>
+                ) : hasVendorVoices ? (
+                  <VendorVoiceInput
+                    value={voice}
+                    candidates={vendorVoiceOptions}
+                    placeholder={voicePlaceholder}
+                    disabled={running}
+                    onChange={setVoice}
+                  />
                 ) : (
                   <input
                     className="settings-form-input"
@@ -509,10 +638,6 @@ export function VoiceStudio() {
                     onChange={(e) => setVoice(e.target.value)}
                     placeholder={voicePlaceholder}
                     disabled={running}
-                    // 用原生 <datalist> 而不是自己写一个下拉：它给的就是「边打边筛 + 键盘上下选」，
-                    // 而候选是厂商现取来的、可能几百条，自己那套要处理定位、溢出、失焦、Esc，
-                    // 换来的还是一个更差的输入框。没有候选时这个属性不写，输入框行为一字不变。
-                    list={hasVendorVoices ? 'voice-studio-vendor-voices' : undefined}
                   />
                 )}
               </label>
@@ -532,19 +657,6 @@ export function VoiceStudio() {
                 </select>
               </label>
             </div>
-
-            {!local && hasVendorVoices && (
-              <datalist id="voice-studio-vendor-voices">
-                {vendorVoiceOptions.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {/* <option> 的文本是候选行右边那列说明：填进输入框的只有 value，所以这里放名字，
-                        复刻过的额外标一下——用户账号里的复刻音色和厂商系统音色在这一格里长得一样，
-                        不标就分不出哪个是自己那把嗓子 */}
-                    {item.source === 'clone' ? `${item.name}（自己复刻）` : item.name}
-                  </option>
-                ))}
-              </datalist>
-            )}
 
             <p className="voice-studio__hint">
               {local
