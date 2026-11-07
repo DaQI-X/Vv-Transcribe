@@ -19,6 +19,7 @@ import { checkVoiceReady, raiseReadinessBlock } from '@/utils/readiness'
 import { splitPlainText } from '@/utils/splitPlainText'
 import { LOCAL_TTS_DEFAULT_ENGINE, LOCAL_TTS_ENGINE_OPTIONS } from '@/utils/localTtsEngines'
 import { ttsVendorClonesVoices } from '@/utils/profileSpec'
+import { frontendLogger } from '@/utils/logger'
 import type { VoiceProgress, VoiceSegment, VoiceSynthesizeResult } from '@/types/voice'
 import { useProfileStore } from './useProfileStore'
 import { useTranscriptionStore } from './useTranscriptionStore'
@@ -260,6 +261,11 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
   saving: false,
 
   setTab: (tab) => {
+    const from = get().tab
+    // 切页这件事以前只有结果（日志里 FileUploader 重新挂载），没有原因：
+    // 「谁把用户从配音页甩出去了」只能靠猜。加上 from→to 之后，这一行和 `App | Renderer document loaded`
+    // 是两条互斥的分叉——有这一行是先点了一下，只出现后者是渲染层自己重载了一次。
+    if (from !== tab) frontendLogger.userAction('Studio tab switched', { from, to: tab })
     set({ tab })
     // 每次进配音页都重读一次设置：用户可能刚在「配音配置」里换了方案，或换了本地引擎那一档的模型
     if (tab === 'voice') void get().loadConfig()
@@ -635,7 +641,8 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
 
   backToUpload: () => {
     if (get().phase === 'done') get().clearResult()
-    set({ tab: 'file' })
+    // 走 setTab 而不是直接 set：切页那条 from→to 日志只有一个出处，不会这一支记、那一支不记
+    get().setTab('file')
   },
 
   /**

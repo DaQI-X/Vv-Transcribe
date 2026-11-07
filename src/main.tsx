@@ -30,6 +30,25 @@ type AppState = 'loading' | 'ready' | 'error'
  */
 document.documentElement.dataset.platform = window.electronAPI?.platform ?? 'other'
 
+const RENDERER_BOOTS_KEY = 'vv_renderer_boots'
+
+/**
+ * 每加载一次这份文档记一行，并把「同一个窗口里已经加载了几次」一起写进去。
+ * 这是「界面自己跳回首页」唯一的分叉判据：有 `Studio tab switched` 在先＝一次点击；
+ * 只有这一行＝渲染层整个重载（开发期 HMR 走这一条），那时 tab、正在跑的批次、
+ * 复刻弹窗里刚选的音频路径全在内存里，跟着一起清零——而这正是用户看到的「回显没了」。
+ */
+const rendererBoots = Number(sessionStorage.getItem(RENDERER_BOOTS_KEY) ?? '0') + 1
+sessionStorage.setItem(RENDERER_BOOTS_KEY, String(rendererBoots))
+window.electronAPI
+  ?.log({
+    level: 'INFO',
+    module: 'App',
+    message: 'Renderer document loaded',
+    data: { boots: rendererBoots },
+  })
+  ?.catch(() => {})
+
 /**
  * 冷启动由主进程判定并随 URL 下发：应用没被完全杀掉时（macOS 关窗后从 Dock 重开）
  * 新窗口拿到的是 cold=0，不该重放动画。
