@@ -1854,6 +1854,130 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 /* ============================================
+ * 时间轴编辑（#361）：单段起止那格气泡 + 表头「轴偏移」
+ * 两格的输入都是「秒」这个纯数字，不是时码：见 src/utils/timelineEdit.ts 顶上那段说明。
+ * ============================================ */
+.time-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 232px;
+}
+
+.time-editor__field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.time-editor__label {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.time-editor__input,
+.axis-shift__input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+}
+
+.time-editor__input:focus,
+.axis-shift__input:focus {
+  border-color: var(--brand-blue);
+}
+
+.time-editor__capture {
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.time-editor__capture:hover {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+.time-editor__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 这行是「你填的数在界面上会读成什么」——数字填进去、时钟读出来，两边对得上才敢保存 */
+.time-editor__readout {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.time-editor__save,
+.axis-shift__apply {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--brand-blue);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.time-editor__save:hover,
+.axis-shift__apply:hover {
+  background: var(--brand-blue-hover);
+}
+
+.axis-shift {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 232px;
+}
+
+.axis-shift__field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.axis-shift__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+:root[data-theme="dark"] .time-editor__input,
+:root[data-theme="dark"] .axis-shift__input {
+  background: var(--bg-card);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+:root[data-theme="dark"] .time-editor__capture {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+/* ============================================
  * Diff 视图（校对差异）
  * ============================================ */
 .diff-view {
@@ -3509,6 +3633,32 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 .transcript-editor__voice-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 轴偏移：这一排里它是唯一「常驻的小工具」，其余几格都是点了就办事的动作。
+   描边收成中性灰，免得整排五个蓝框挤成一堵蓝墙；hover 才回品牌色。 */
+.transcript-editor__axis-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: var(--app-transition);
+  font-family: var(--font-sans);
+}
+
+.transcript-editor__axis-btn:hover {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+:root[data-theme="dark"] .transcript-editor__axis-btn:hover {
+  background: var(--bg-hover);
 }
 
 .segment-row--has-diff {

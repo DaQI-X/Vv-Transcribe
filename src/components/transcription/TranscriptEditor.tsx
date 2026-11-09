@@ -7,6 +7,7 @@
  * - 多格式字幕导出（SRT / VTT 字幕、台词表 TSV、TXT、JSON、Markdown）
  * - 一键字幕配音（跳到「字幕配音」工作台，这一段稿子按时间轴铺成一条独立音轨）
  * - 点击段落跳转到对应播放时间点
+ * - 整轴平移（表头「轴偏移」那一格，#361 范围①；单段的起止在每一行的时间那格）
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
@@ -19,6 +20,7 @@ import { useReferenceStore } from '@/stores/useReferenceStore'
 import { useVoiceStudioStore } from '@/stores/useVoiceStudioStore'
 import { useProfiles } from '@/hooks/useProfiles'
 import { SegmentRow } from './SegmentRow'
+import { TimelineShift } from './TimelineShift'
 import { ProofreadModeDialog, type ProofreadMode } from './ProofreadModeDialog'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
@@ -460,6 +462,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             <Pencil size={14} />
             {loading ? (proofreadMode === 'local' ? '本地校对中…' : 'AI 校对中…') : '校对'}
           </button>
+          <TimelineShift />
           <button
             onClick={() => setVoiceTab('voice')}
             disabled={loading}

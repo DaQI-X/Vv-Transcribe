@@ -29,7 +29,8 @@
  * 合成中那张卡复用转写的 processing 视觉（徽章 + 波形 + 进度 + 取消），因为它是同一件事：
  * 一个分钟级的活儿在后台跑。段号是主进程推回来的真实段号，不是编出来的百分比。
  *
- * 这一页不改字幕、不动时间轴，产物是一条独立的音轨。
+ * 这一页不改字幕、不动时间轴，产物是一条独立的音轨。轴本身在转写结果页改（#361），
+ * 所以这条轨配完之后用户又去挪过轴的话，结果卡上会点名说「这条是按旧轴铺的」。
  */
 import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, AudioLines, Download, Loader2, Volume2 } from 'lucide-react'
@@ -54,6 +55,7 @@ import {
 } from '@/utils/profileSpec'
 import { formatBytes } from '@/utils/formatBytes'
 import { formatTime } from '@/utils/formatTime'
+import { timelineSpan } from '@/utils/timelineEdit'
 import {
   LOCAL_TTS_ENGINE_OPTIONS,
   localTtsEngineCaveat,
@@ -203,9 +205,14 @@ function ResultCard() {
   const saving = useVoiceStudioStore((s) => s.saving)
   const save = useVoiceStudioStore((s) => s.save)
   const clearResult = useVoiceStudioStore((s) => s.clearResult)
+  const axisEnd = timelineSpan(useTranscriptionStore((s) => s.segments))?.end ?? null
   if (!result) return null
 
   const track = result.track
+  // 轴是 1.1.4 才放开编辑的（#361）：铺轴用的落点是点「开始配音」那一刻读的那份，
+  // 之后挪了轴这条轨不会自己跟着挪——不写出来，用户会把「轴改过了」当成「配音没改」
+  const axisMoved =
+    track && axisEnd !== null && Math.abs(axisEnd - track.originalEnd) >= 0.001 ? axisEnd : null
 
   return (
     <div className="voice-studio__result">
@@ -225,6 +232,16 @@ function ResultCard() {
               </li>
             ) : (
               <li>纯文本连续朗读，按顺序首尾相接，没有字幕时间轴</li>
+            )}
+            {/* 挪过轴之后这条轨落点就旧了：只说「重跑一遍」不够，得把「不花钱」说在前面，
+                否则用户以为重来一次又要按段数掏钱（#362 的片段缓存就是为这一步留的） */}
+            {axisMoved && source === 'subtitle' && (
+              <li className="voice-result__stat--warn">
+                <AlertTriangle size={13} />
+                字幕时间轴在这条轨之后又改过：这条按 {formatTime(track.originalEnd)} 铺，现在的轴到{' '}
+                {formatTime(axisMoved)}（{formatDrift(axisMoved - track.originalEnd)}）。
+                重跑一遍就按新轴铺，只有改过字的段才会重新调用接口
+              </li>
             )}
             {/* 这两条警告说的是「相对字幕槽位」的落点，纯文本没有时间轴，套上去就是自己编一个不存在的问题吓人 */}
             {source === 'subtitle' && track.pushedCount > 0 && (
