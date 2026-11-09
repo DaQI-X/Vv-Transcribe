@@ -104,6 +104,12 @@ interface SettingsValues {
   asrLocalModel: string
   asrLanguage: string
   /**
+   * 本地转写引擎那道访问校验（1.1.3 #353）：`require` | `off`。**界面上没有这一格**——它不改转写结果、
+   * 也不多发包，用户没有可决定的东西；要调的人手改 `settings.json` 里那一行（生效条件见 README
+   * 「本机引擎的访问边界」）。这一项之外，那串凭证本身由主进程每次应用运行随机生成，不落盘也不跨 IPC（同 API Key 那条规矩）。
+   */
+  asrEngineAuth: string
+  /**
    * 配音走哪一档，以及本地档用哪一款模型（连同它下面的默认音色编号）。
    * 云端档的四项凭据（厂商／地址／Key／配音模型）不在这里：它们属于某一条方案，见 `PROFILE_CAP_SPEC.tts`。
    * 厂商这一格 1.1.1 起才进方案——它决定这次发的请求长什么样，所以跟地址一样是「这一套是哪家」的一部分，
@@ -129,20 +135,25 @@ const DEFAULT_VALUES: SettingsValues = {
   asrProvider: 'local',
   asrLocalModel: 'base',
   asrLanguage: 'zh',
+  asrEngineAuth: 'require',
   ttsEngine: 'cloud',
   ttsLocalEngine: '',
   ttsLocalVoice: '',
 }
 
 /**
- * 这一次保存要带的全局段字段。它比屏幕上摊开的那几格多一项：`ttsLocalVoice` 在 1.1.0
- * 之后没有对应的格子（音色是「这一批听哪一个」，入口只剩配音页），但换本地模型时仍要把它
- * 归回第一个——磁盘上那份默认编号得跟着档位走，配音页起手读的就是它。
+ * 全局段那几个字段：表单开合时按这份名单从脱敏视图里回填（保存发的是整份 `values`，见 handleSave）。
+ * 它比屏幕上摊开的那几格多两项。`ttsLocalVoice` 在 1.1.0 之后没有对应的格子（音色是「这一批听哪一个」，
+ * 入口只剩配音页），但换本地模型时仍要把它归回第一个——磁盘上那份默认编号得跟着档位走，配音页起手读的就是它。
+ * `asrEngineAuth` 也没有格子（#353：这一项不值得让用户做一次决定），但仍要留在这份名单里：保存发的是整份
+ * `values`，没回填的键会带着 `DEFAULT_VALUES` 那个 `require` 一起发出去，于是每一次界面保存都会把排查时
+ * 手改进磁盘的那个 `off` 抹掉——那是「配了但没生效」的反面，改了却不留。
  */
 const GLOBAL_VALUE_KEYS: (keyof SettingsValues)[] = [
   'asrProvider',
   'asrLocalModel',
   'asrLanguage',
+  'asrEngineAuth',
   'ttsEngine',
   'ttsLocalEngine',
   'ttsLocalVoice',
@@ -736,8 +747,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
             }
           )
         } else if (Object.keys(saved).length > 0) {
-          // 只挑全局段那六格。脱敏视图里还带着各档「当前使用」那条投影出来的凭据
-          // （地址／模型／服务商），那些住在列表那一行上、要改走弹窗，
+          // 只挑全局段那几格（GLOBAL_VALUE_KEYS 那份名单）。脱敏视图里还带着各档「当前使用」
+          // 那条投影出来的凭据（地址／模型／服务商），那些住在列表那一行上、要改走弹窗，
           // 整份盖进表单就成了「屏幕上看不见、却跟着保存发出去」的值
           const picked: Partial<SettingsValues> = {}
           for (const key of GLOBAL_VALUE_KEYS) {
@@ -814,7 +825,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     if (!api) return
     setSaving(true)
     try {
-      // 这次保存只写全局段那六格。三档的凭据都住在「新建API接入／编辑API接入」那个弹窗里，
+      // 这次保存只写全局段那几格。三档的凭据都住在「新建API接入／编辑API接入」那个弹窗里，
       // 由它自己那颗「保存」当场写盘（#222 重写第⑥⑦⑧步）。跟着带上凭据键有一个真会撞的坑：
       // 某一档一条方案都没有时，主进程把「补丁带着凭据却没有方案」当成「你要存却没先建」，
       // 整次保存被拦下——本机 CDP 实测过：删掉最后一条方案后只改「转写语言」点保存，

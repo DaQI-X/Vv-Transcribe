@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   normalizeApiBase,
+  normalizeEngineAuth,
   normalizeLocalModel,
   normalizeLocalVoice,
   normalizeTtsEngine,
@@ -207,6 +208,27 @@ describe('normalizeLocalModel', () => {
     expect(normalizeLocalModel(undefined)).toBe('base')
     expect(normalizeLocalModel(null)).toBe('base')
     expect(normalizeLocalModel(2)).toBe('base')
+  })
+})
+
+describe('normalizeEngineAuth', () => {
+  it('两个合法值原样通过', () => {
+    expect(normalizeEngineAuth('require')).toBe('require')
+    expect(normalizeEngineAuth('off')).toBe('off')
+  })
+
+  /**
+   * 认不出的值一律落回「校验开着」：这一项管的是本机 8000 端口要不要认凭证，
+   * 落回 'off' 等于让一份读不懂的配置替用户把闸门关掉。老配置磁盘上根本没这一键（undefined）、
+   * 手改成 'false'、界面没发这一格，三种情况都必须继续校验，否则「升级」本身就等于防护失配。
+   */
+  it('白名单外一律落回 require：读不懂的时候不能当作「用户要求不校验」', () => {
+    expect(normalizeEngineAuth('')).toBe('require')
+    expect(normalizeEngineAuth('false')).toBe('require')
+    expect(normalizeEngineAuth('OFF')).toBe('require')
+    expect(normalizeEngineAuth(undefined)).toBe('require')
+    expect(normalizeEngineAuth(null)).toBe('require')
+    expect(normalizeEngineAuth(0)).toBe('require')
   })
 })
 

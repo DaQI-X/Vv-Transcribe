@@ -1,16 +1,22 @@
 /**
  * 本地 ASR 转写提供者
- * 通过 HTTP 调用本地 Python ASR 服务（faster-whisper + FastAPI，运行在 localhost:8000）
+ * 通过 HTTP 调用本地 Python ASR 服务（faster-whisper + FastAPI，运行在 127.0.0.1:8000）
  * 支持进度回调和任务取消
+ *
+ * 请求一律带 asrServiceManager 那份访问凭证（#353）：引擎只绑回环，但同一台机器上的
+ * 任何进程都能连上 8000 并让它在盘上任意路径取音频，所以那道校验默认开着。
+ * 凭证不落盘也不跨 IPC，由主进程这一个模块附带，具体原因写在 getLocalEngineAuthHeader 上。
  */
 import { basename } from 'node:path'
 import type { ASRModelInfo, ASRProvider, ASRSegment, ASRProgress, ASRStage } from './types'
 import { toSimplified } from './simplifyChinese'
+import { getLocalEngineAuthHeader } from '../asrServiceManager'
 import { logger } from '../logger'
 
 const TAG = 'LocalASR'
 
-const PYTHON_ASR_URL = 'http://localhost:8000'
+/** 写死 127.0.0.1 而不是 localhost：引擎只绑 IPv4 回环，而某些机器上 localhost 先解析到 ::1 */
+const PYTHON_ASR_URL = 'http://127.0.0.1:8000'
 
 /**
  * 首次转写要在 loading_model 阶段从 hf-mirror 拉权重，弱网/离线时 Python 抛回来的是
@@ -80,7 +86,7 @@ export class LocalASRProvider implements ASRProvider {
 
     const response = await fetch(`${PYTHON_ASR_URL}/transcribe`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getLocalEngineAuthHeader() },
       body: JSON.stringify({
         audio_path: audioFilePath,
         language: options.language || 'zh',
@@ -92,6 +98,15 @@ export class LocalASRProvider implements ASRProvider {
     if (this.cancelled) throw new Error('转写已取消')
 
     if (!response.ok) {
+      // 401 不能说成「服务挂了」，更不能只把英文原文甩给用户：它的意思是站在端口上的
+      // 那个引擎认的不是本次这份凭证——端口上坐着上一代残尸或别的程序，出路是重启引擎
+      if (response.status === 401) {
+        logger.warn(TAG, 'Engine rejected the bearer token', { status: response.status })
+        throw new Error(
+          '本地转写引擎拒绝了这次请求（访问凭证对不上）。到「设置 → 转写」点「重启本地引擎」，' +
+            '或完全退出 Vv Transcribe 后重新启动',
+        )
+      }
       const error = (await response.json().catch(() => null)) as { detail?: string } | null
       throw new Error(error?.detail || `Python ASR service error: ${response.status}`)
     }

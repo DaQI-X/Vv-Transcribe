@@ -5,14 +5,15 @@ Vv Transcribe 本地 ASR 服务
 - 使用 hf-mirror.com 镜像加速国内下载
 - 支持任意音频格式输入（内部通过 ffmpeg 转换为 16kHz WAV）
 - /transcribe 返回 NDJSON 流：每转完一句立刻吐一行，供上层显示真实进度并逐句上屏
+- 只绑 127.0.0.1，且宿主下发 VV_ASR_TOKEN 时 /transcribe 要求 Bearer 凭证（1.1.3 #353）
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Iterator
 import gc
+import hmac
 import json
 import os
 import sys
@@ -32,13 +33,11 @@ def log(msg: str):
 
 app = FastAPI(title="Vv Transcribe ASR Service")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 这里刻意**没有** CORS 中间件。调用方是 Electron 主进程用 fetch 直连，它不是浏览器，
+# 不吃同源策略——add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True)
+# 那一段唯一的实际效果，是让任意网站上的任意脚本都能读本机 8000 端口的应答。
+# 那个组合本身还不合法（浏览器会拒 * 与 credentials 同时出现），于是它既没给出可用的跨域，
+# 又把「装了这台电脑的人」之外的读者放了进来。
 
 model = None
 loaded_model_name = ""
@@ -57,6 +56,26 @@ TRANSCRIBE_PROTOCOL = 2
 # 否则端口上任何应答都可能是上一代没退干净的残尸——它能应答 /health，
 # 但 PyInstaller 的临时解包目录已经被父进程删掉，懒加载的模块必然报错。
 BOOT_ID = os.environ.get("ASR_BOOT_ID", "")
+
+# 访问凭证：宿主每次应用运行随机生成一份、经环境变量下发，只在开关打开时才有值
+# （开关是 settings.json 根上的 asrEngineAuth，界面上没有那一格）。
+# 关掉或手动起服务时它是空串，此时不校验——这是唯一的「不开门」例外，
+# 写清楚是为了让下一个读代码的人知道：空串不代表忘了配，代表这一趟故意不设防。
+#
+# 绝不能拿上面那个 BOOT_ID 顶替：它由 /health 原样回显，任何连得上端口的人问一次就拿到了，
+# 用它当凭证等于没修。BOOT_ID 答的是「端口上这个进程是不是我这次拉起来的」，
+# 和「谁有资格让我转写一段音频」是两件事。
+ASR_TOKEN = os.environ.get("VV_ASR_TOKEN", "")
+
+
+def require_token(request: Request) -> None:
+    """FastAPI 依赖：ASR_TOKEN 非空时，请求必须带 `Authorization: Bearer <ASR_TOKEN>`。"""
+    if not ASR_TOKEN:
+        return
+    scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not hmac.compare_digest(credential.strip(), ASR_TOKEN):
+        raise HTTPException(status_code=401, detail="Missing or invalid bearer token")
+
 
 def load_model(name: str):
     global model, loaded_model_name
@@ -167,7 +186,7 @@ def _transcribe_events(audio_path: str, language: Optional[str], model_name: str
         if wav_path and os.path.exists(wav_path):
             os.unlink(wav_path)
 
-@app.post("/transcribe")
+@app.post("/transcribe", dependencies=[Depends(require_token)])
 def transcribe(request: TranscribeRequest):
     if not os.path.exists(request.audio_path):
         raise HTTPException(status_code=400, detail=f"Audio file not found: {request.audio_path}")
@@ -189,6 +208,9 @@ def transcribe(request: TranscribeRequest):
 
 @app.get("/health")
 async def health():
+    # 这一条不设凭证，是刻意的：宿主要拿它认「端口上应答的是不是我这次拉起来的那一代」，
+    # 那次握手发生在引擎刚起来、宿主还没决定要不要发任何带凭证的请求之前。
+    # 它只回档位、协议号和本次 boot_id，一个字节的用户内容都没有。
     return {
         "status": "ok",
         "model_loaded": model is not None,
@@ -212,5 +234,9 @@ if __name__ == "__main__":
     # 加这一位是为了 tests/engineSmoke.test.ts：它要在开发者机器上拉起一份冻结二进制做握手校验，
     # 而 8000 很可能正被那个开着的应用占着——占着就得跳过，等于最该跑的那台机器上跑不到。
     port = int(os.environ.get("VV_ASR_PORT", "8000"))
-    log(f"[ASR] Starting Vv Transcribe ASR service on http://localhost:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    log(f"[ASR] Starting Vv Transcribe ASR service on http://127.0.0.1:{port}")
+    # 只绑回环：这里吃的是本机盘上的音频路径，绑 0.0.0.0 等于把「谁能读这台电脑的素材」
+    # 交给整个局域网。配音那边（python-tts/main.py）从第一天起就是 127.0.0.1。
+    # 改这一行的同时要改宿主那边的请求地址：http://localhost 在有些机器上先解析到 ::1，
+    # 而这份监听只覆盖 IPv4（宿主已跟着改成 127.0.0.1）。
+    uvicorn.run(app, host="127.0.0.1", port=port)

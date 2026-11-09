@@ -98,6 +98,19 @@ export interface AppSettings {
   asrLocalModel: string
   /** Whisper 语言码（zh/en/ja/…），同时决定校对走中文规则还是通用 prompt */
   asrLanguage: string
+  /**
+   * 本地转写引擎要不要校验访问凭证（1.1.3 #353）：`'require'`（默认）| `'off'`。
+   *
+   * 这里**只存开关**，凭证本身不落盘、也不跨 IPC：它是 asrServiceManager 每次应用运行
+   * 随机生成的一份，与 API Key 同一条「不过 IPC 传明文」的规矩。
+   *
+   * 这一项界面上没有格子（#353 收尾撤的：它只解决「同网段/同机别的程序能不能读这台电脑的素材」，
+   * 答案对该用户永远是「不能」，不值得做一次决定）。磁盘上那一个值是唯一的入口，
+   * 而配置缓在内存里，改完要重启应用才读到。
+   * 为什么还留 `'off'` 这一档：转写挂了的时候，排查手段是直接从命令行打那个 8000 端口
+   * （见 README 的本地引擎一节）；开着校验那条路就被自己堵死了，所以留一条不用改代码的出路。
+   */
+  asrEngineAuth: string
   aiProvider: string
   aiApiKey: string
   aiApiBase: string
@@ -258,6 +271,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   asrApiSecret: '',
   asrLocalModel: 'base',
   asrLanguage: 'zh',
+  asrEngineAuth: 'require',
   aiProvider: 'openai',
   aiApiKey: '',
   aiApiBase: '',
@@ -281,8 +295,8 @@ const DEFAULT_SETTINGS: AppSettings = {
  * 从两张表推出来而不是在这里再列一遍：那张表是「哪一档有哪几项」唯一的事实来源，
  * 这里抄一份就会出现「asr 已经把 provider 退回全局、全局段还当它是方案字段」这种分叉，
  * 而分叉的方向是把用户填过的值写进一个没人读的位置——读得到、写进去、东西没了。
- * 此刻是 asrProvider / asrLocalModel / asrLanguage / ttsEngine / ttsLocalEngine / ttsLocalVoice
- * / ttsVoice 七个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」
+ * 此刻是 asrProvider / asrLocalModel / asrLanguage / asrEngineAuth / ttsEngine / ttsLocalEngine
+ * / ttsLocalVoice / ttsVoice 八个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」
  * 都在这；配音音色从 v3 起也回到这里——它是这一批怎么选的问题，不是这家网关的参数）。
  */
 const GLOBAL_FLAT_KEYS: readonly string[] = (() => {
@@ -566,6 +580,19 @@ export type LocalModelTier = (typeof LOCAL_MODEL_TIERS)[number]
 
 export function normalizeLocalModel(raw: unknown): LocalModelTier {
   return LOCAL_MODEL_TIERS.includes(raw as LocalModelTier) ? (raw as LocalModelTier) : 'base'
+}
+
+/**
+ * 引擎凭证校验只有开/关两态，未知值落回**开**（与 normalizeLocalModel 同一个写法，
+ * 但默认方向相反：档位认不出只是转写慢一点，这一项认不出等于把闸门当没这回事）。
+ * 手改过的 settings.json 拼错了、老配置里根本没这一项，两种情况都必须是校验开着（这一项界面上
+ * 没有格子，磁盘上那一个值是唯一的入口；渲染层回填不到时带的也是 `require`，两边同向）。
+ */
+const ENGINE_AUTH_MODES = ['require', 'off'] as const
+export type EngineAuthMode = (typeof ENGINE_AUTH_MODES)[number]
+
+export function normalizeEngineAuth(raw: unknown): EngineAuthMode {
+  return ENGINE_AUTH_MODES.includes(raw as EngineAuthMode) ? (raw as EngineAuthMode) : 'require'
 }
 
 /**

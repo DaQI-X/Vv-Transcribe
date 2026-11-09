@@ -9,6 +9,13 @@
  * 启动流程：spawn 子进程 → 轮询 /health 直到「应答者确实是我拉起的那个」→ 标记服务可用
  * 关闭流程：对整个进程组 SIGTERM → 等待退出 → 超时升级 SIGKILL → 确认端口上不再有我这次的身份标识
  *
+ * 引擎只绑 127.0.0.1，所以这里请求也写死 127.0.0.1 而不是 localhost：绑定是 IPv4-only 的，
+ * 而某些机器上 localhost 先解析到 ::1。配音那边（localTtsEngine）一直是这个写法。
+ *
+ * 访问凭证（#353）：本次应用运行随机生成一份，spawn 时按磁盘上那一项 `asrEngineAuth` 决定给不给引擎。
+ * 它不落盘、也不跨 IPC 传给渲染层（与 API Key 同一条「不过 IPC 传明文」的规矩，见 settingsService），
+ * 渲染层要发什么都由主进程这一个模块代劳。
+ *
  * 应用内重启引擎（restartLocalEngine）也必须走同一套握手，所以 bootId 是每次 spawn 现生成的：
  * 一个进程内复用同一个身份标识的话，上一代没退干净的残尸照样能对上号被判成就绪，
  * 而它那份 PyInstaller 临时解包目录已经删了，用户第一次转写就会撞见看不懂的报错。
@@ -19,13 +26,13 @@ import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { existsSync, readdirSync } from 'node:fs'
 import { app } from 'electron'
-import { loadSettings, normalizeLocalModel, type LocalModelTier } from './settingsService'
+import { loadSettings, normalizeEngineAuth, normalizeLocalModel, type LocalModelTier } from './settingsService'
 import { logger } from './logger'
 
 const TAG = 'ASRService'
 
 const ASR_PORT = 8000
-const ASR_URL = `http://localhost:${ASR_PORT}`
+const ASR_URL = `http://127.0.0.1:${ASR_PORT}`
 /** 与 python-asr/main.py 的 TRANSCRIBE_PROTOCOL 对应：2 = NDJSON 逐句流式 */
 const ASR_PROTOCOL = 2
 const HEALTH_TIMEOUT_MS = 60_000
@@ -45,6 +52,26 @@ const FOREIGN_ANSWER_LIMIT = 3
  * 沿用同一个 id 等于把上面这道校验关掉，#128/#129 修的正是这个。
  */
 let bootId = randomUUID()
+
+/**
+ * 本次应用运行的访问凭证，spawn 时按磁盘上那一项决定给不给引擎。
+ *
+ * 与 bootId 相反，它**不随每次 spawn 换**：引擎活着的那段时间里宿主随时可能要发请求，
+ * 换掉就是把刚起来的引擎锁在门外。应用退出才作废（不落盘，所以也没有作废可言）。
+ */
+const engineToken = randomUUID()
+
+/**
+ * 打本地引擎的业务请求都带这一份头。
+ *
+ * 不看开关、恒发：引擎只在自己被下发过凭证时才校验它，多带一个头没有任何代价。这样这一头
+ * 就不必去问 spawn 那一刻 `asrEngineAuth` 是什么——那个值只活在 startASRService 的局部里，
+ * 真要让它跨两处对齐，就多了一条「改了开关忘了改另一处」的错法。
+ * 反过来说，开关关了（手改磁盘 + 重启）引擎压根不校验，这头照样无害。
+ */
+export function getLocalEngineAuthHeader(): Record<string, string> {
+  return { Authorization: `Bearer ${engineToken}` }
+}
 
 interface AsrHealth {
   status?: string
@@ -161,7 +188,7 @@ async function listPortPids(): Promise<number[]> {
     const out = await capture('netstat', ['-ano', '-p', 'tcp'])
     for (const line of out.split('\n')) {
       const cols = line.trim().split(/\s+/)
-      // TCP  0.0.0.0:8000  0.0.0.0:0  LISTENING  12345
+      // TCP  127.0.0.1:8000  0.0.0.0:0  LISTENING  12345
       if (cols[0] !== 'TCP' || !cols[1]?.endsWith(`:${ASR_PORT}`) || cols[3] !== 'LISTENING') continue
       const pid = Number(cols[cols.length - 1])
       if (Number.isInteger(pid) && pid > 0) pids.add(pid)
@@ -349,16 +376,24 @@ export async function startASRService(tierOverride?: LocalModelTier): Promise<bo
     ffprobe: !!ffprobePath,
   })
 
-  const tier = tierOverride ?? normalizeLocalModel((await loadSettings()).asrLocalModel)
+  const settings = await loadSettings()
+  const tier = tierOverride ?? normalizeLocalModel(settings.asrLocalModel)
+  // 关→开 与开→关 都要等下一次 spawn 才吃到：下发凭证这件事只有拉起那一刻能做。
+  // 这一项界面上没有格子（#353 收尾撤的），出路是手改 settings.json 再重启应用——配置缓在内存里，
+  // 不重启不会重读，而下一次 spawn 读的就是那一个新值。
+  const requireAuth = normalizeEngineAuth(settings.asrEngineAuth) === 'require'
   const modelCached = isModelCached(tier)
   // cached=false 意味着这次启动没给 HF_HUB_OFFLINE=1，首次转写会先去 hf-mirror 拉权重
   logger.info(TAG, 'Whisper tier', { tier, cached: modelCached, override: tierOverride !== undefined })
+  // 只报开关状态：那串凭证本身进日志等于把 8000 端口的钥匙抄进一个能被人读走的文件
+  logger.info(TAG, 'Engine auth handed to spawn', { requireAuth })
 
   asrProcess = spawn(binaryPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       ASR_BOOT_ID: bootId,
+      ...(requireAuth ? { VV_ASR_TOKEN: engineToken } : {}),
       HF_ENDPOINT: 'https://hf-mirror.com',
       ...(modelCached ? { HF_HUB_OFFLINE: '1' } : {}),
       ...(ffmpegPath ? { FFMPEG_PATH: ffmpegPath } : {}),

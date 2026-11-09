@@ -21,9 +21,10 @@
  *    先 `import sherpa_onnx`（:137）再查文件（require_files），所以缺文件报 503、缺 dll 报 500——
  *    拿到 503 就等于看到 `_sherpa_onnx.pyd` / `libonnxruntime` 已经加载成功。
  * 3. 请求未绑定的那档引擎要出 **409**：证「一个进程只服务一个引擎」这条契约在产物里还在。
- * 4. ASR 只到握手为止：`from faster_whisper import WhisperModel` 是懒加载（python-asr/main.py:73），
+ * 4. ASR 到握手 + 访问校验为止：`from faster_whisper import WhisperModel` 是懒加载（python-asr/main.py:73），
  *    不跑一次真转写就证不到 torch/faster-whisper。真转写要 138MB 起步的权重，不在 CI 里下，
- *    那条留给路径 B（用户手测）。
+ *    那条留给路径 B（用户手测）。#353 那道凭证闸门归在这一档：它拦在 handler 之前，
+ *    拿一个不存在的 audio_path 就能验完（带对凭证落到 400、带错落 401），一次权重都不下。
  * 5. 真出一段声：只有这台机器已经有模型目录时才跑（再给一个 `VV_ENGINE_SMOKE_MODEL_DIR`）。
  *    CI 不下模型，所以这一档在 CI 里恒为跳过——想在那边拿 RTF，得先接受 135MB/426MB 的下载。
  *
@@ -250,6 +251,23 @@ async function synthesize(s: Sidecar, body: Record<string, unknown>): Promise<Re
   })
 }
 
+/**
+ * 打给 ASR 的 /transcribe，可以指定要带哪串凭证。
+ * audio_path 一律给一个不存在的路径：#353 那道校验在 handler 之前，挡不挡得住跟文件在不在无关；
+ * 而万一这份产物是旧的（不认凭证），请求会走到「文件不存在 → 400」，
+ * 不会顺手去下 138MB 的 Whisper 权重——断言的代价因此和产物新旧无关。
+ */
+function transcribe(port: number, authorization?: string): Promise<Response> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (authorization) headers.authorization = authorization
+  return fetch(`http://127.0.0.1:${port}/transcribe`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ audio_path: join(tmpdir(), 'vv-engine-smoke-no-such-audio.wav'), model: 'base' }),
+    signal: AbortSignal.timeout(30_000),
+  })
+}
+
 const binsPresent = existsSync(TTS_BIN) && existsSync(ASR_BIN)
 const MODEL_PARENT = process.env.VV_ENGINE_SMOKE_MODEL_DIR || ''
 const AUDIO_ENGINE = process.env.VV_ENGINE_SMOKE_ENGINE || OTHER_ENGINE
@@ -404,6 +422,51 @@ describe('引擎冻结二进制冒烟：转写', () => {
         expect(info!.boot_id).toBe(asr.bootId)
         expect(info!.model_loaded, '启动不该把 Whisper 权重读进内存').toBe(false)
         expect(info!.model, '没加载过就该是空串').toBe('')
+      } finally {
+        await stopSidecar(asr)
+      }
+    },
+    START_TIMEOUT_MS + 30_000,
+  )
+
+  it.skipIf(!run)(
+    '/transcribe 认宿主下发的那串凭证：不带与带错都 401，带对才放进 handler；/health 照旧不设防',
+    async () => {
+      const token = randomUUID()
+      const asr = await startSidecar({
+        bin: ASR_BIN,
+        name: 'vv-asr-server',
+        port: ASR_PORT,
+        bootIdKey: 'ASR_BOOT_ID',
+        env: { VV_ASR_PORT: String(ASR_PORT), VV_ASR_TOKEN: token },
+      })
+      try {
+        // 握手那次 /health 已经是「不带任何凭证」打的了（startSidecar 里就是这么等的），
+        // 它成了这条用例的前提：凭证只关转写那扇门，不动宿主认身份的那一次问话。
+        const noAuth = await transcribe(ASR_PORT)
+        const noAuthBody = await noAuth.text()
+        expect(
+          noAuth.status,
+          `期望 401（不带凭证），实际 ${noAuth.status}：${noAuthBody.slice(0, 300)}。` +
+            '若这里是 400，说明这份冻结产物早于 #353、不认 VV_ASR_TOKEN，重新 pnpm build:asr 再跑。',
+        ).toBe(401)
+
+        const wrongAuth = await transcribe(ASR_PORT, `Bearer ${randomUUID()}`)
+        expect(wrongAuth.status, '凭证对不上也必须 401，不能只判「有没有这个头」').toBe(401)
+
+        // 带对了才放行到 handler，然后立刻在「文件不存在」上返回 400：
+        // 既证明这串凭证真的被接受，又不让它去下 138MB 的权重。
+        const goodAuth = await transcribe(ASR_PORT, `Bearer ${token}`)
+        const goodBody = await goodAuth.text()
+        expect(
+          goodAuth.status,
+          `期望 400（凭证已过、卡在文件不存在），实际 ${goodAuth.status}：${goodBody.slice(0, 300)}`,
+        ).toBe(400)
+        expect(goodBody).toContain('Audio file not found')
+
+        const info = await probeHealth(ASR_PORT)
+        expect(info!.boot_id, '开了校验之后 /health 仍应回显本次 boot_id').toBe(asr.bootId)
+        expect(info!.model_loaded, '被拒的三次请求不该把任何权重读进内存').toBe(false)
       } finally {
         await stopSidecar(asr)
       }
