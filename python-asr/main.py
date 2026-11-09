@@ -36,8 +36,9 @@ app = FastAPI(title="Vv Transcribe ASR Service")
 # 这里刻意**没有** CORS 中间件。调用方是 Electron 主进程用 fetch 直连，它不是浏览器，
 # 不吃同源策略——add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True)
 # 那一段唯一的实际效果，是让任意网站上的任意脚本都能读本机 8000 端口的应答。
-# 那个组合本身还不合法（浏览器会拒 * 与 credentials 同时出现），于是它既没给出可用的跨域，
-# 又把「装了这台电脑的人」之外的读者放了进来。
+# 「不合法」只对带凭证那一类请求成立（浏览器会拒 * 与 credentials 同时出现）；默认
+# credentials:'omit' 的 fetch 拿 * 是读得到的——那正是洞本身。对真正的调用方（主进程，
+# 不是浏览器）这段一点用都没有，却把「装了这台电脑的人」之外的读者放了进来。
 
 model = None
 loaded_model_name = ""
