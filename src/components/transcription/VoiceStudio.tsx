@@ -100,6 +100,8 @@ function RunningCard() {
     if (progress.stage === 'done') return '配音轨已拼好'
     if (progress.stage === 'failed') return `第 ${progress.index} 段失败：${progress.note || '未知原因'}`
     if (progress.stage === 'skipped') return `第 ${progress.index} 段是空的，没合成`
+    // 这一段没调接口（#362）：这一句是这批里最该被看见的一格——用户等的就是「这次少花了几段钱」
+    if (progress.stage === 'reused') return `第 ${progress.index} 段复用之前配好的音频，没调用接口`
     if (progress.index === 0) return `第 1 段还在${mode === 'local' ? '本机引擎' : '接口'}那边…`
     return `已合成 ${progress.index} / ${progress.total} 段`
   })()
@@ -167,6 +169,8 @@ function RunningCard() {
 
       <div className="voice-studio__tally">
         成功 {live.done} · 失败 {live.failed} · 跳过 {live.skipped}
+        {/* 这一段只在真复用过时出现：一路从零开始配的用户看到这行只会多出疑问 */}
+        {live.reused > 0 && ` · 复用 ${live.reused}`}
         {cancelRequested && '（已请求取消，正在收尾）'}
       </div>
 
@@ -237,6 +241,9 @@ function ResultCard() {
             )}
             <li>
               成功 {result.clipCount} 段
+              {/* 花没花钱是这一版功能唯一的可见结果，所以它跟段数并排写在同一行，另起一行反而像句注释 */}
+              {result.reused > 0 &&
+                `（复用 ${result.reused} 段没调用接口，新配 ${result.clipCount - result.reused} 段）`}
               {result.skipped.length > 0 && ` · 空段落跳过 ${result.skipped.length} 段`}
               {result.canceled && (mode === 'local' ? '（你取消了，后面的段没再念）' : '（你取消了，后面的段没调用）')}
             </li>

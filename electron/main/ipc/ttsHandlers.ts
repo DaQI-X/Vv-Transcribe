@@ -46,6 +46,7 @@ import {
   type LocalTtsDetail,
 } from '../services/localTtsEngine'
 import { logger } from '../services/logger'
+import { clearClipCache, clipCacheStats } from '../services/ttsClipCache'
 import { addHistoryRecord } from '../services/historyService'
 import { engineBinaryInManifest } from '../services/componentService'
 import { failOkError, failSuccessError, ipcHandle } from './guard'
@@ -60,6 +61,11 @@ export interface TTSSynthesizeResult {
   jobId: string | null
   track: VoiceTrack | null
   clipCount: number
+  /**
+   * 这几段是复用缓存里的旧音频（#362），没调接口、没花钱。它必须单独出来而不是藏在 clipCount 里：
+   * 界面拿 clipCount 说「配音完成 300 段」，用户真正要知道的却是「其中 297 段这次一分钱没花」。
+   */
+  reused: number
   failures: Array<{ segmentId: string; index: number; error: string }>
   skipped: string[]
   canceled: boolean
@@ -77,6 +83,7 @@ function emptySynthesizeResult(error: string | null): TTSSynthesizeResult {
     jobId: null,
     track: null,
     clipCount: 0,
+    reused: 0,
     failures: [],
     skipped: [],
     canceled: false,
@@ -265,6 +272,37 @@ export function registerTTSHandlers() {
   )
 
   /**
+   * 配音片段缓存占多少（#362）。缓存是「看不见但在长」的那类东西——它落在 userData 而不是临时目录，
+   * 启动清扫不会动它，所以它必须有一个能看见体积、也能一键清掉的地方，否则用户只能在盘满那天发现。
+   * error 非空时那两个数字不许读：`bytes: 0` 长成「没占地方」就是一句谎。
+   */
+  ipcHandle(
+    'tts:cacheStats',
+    async (): Promise<{ bytes: number; clips: number; error: string | null }> => {
+      const { bytes, clips } = await clipCacheStats()
+      return { bytes, clips, error: null }
+    },
+    (message) => ({ bytes: 0, clips: 0, error: message })
+  )
+
+  /**
+   * 清掉整层缓存。正在逐段配音时拒绝：那一轮的 clips 还指着缓存里的文件，
+   * 边跑边删会让拼接读到没落盘的音频（与 #241「测试连接不许打断配音」同一个理由）。
+   */
+  ipcHandle(
+    'tts:cacheClear',
+    async (): Promise<{ ok: boolean; freed: number; error: string | null }> => {
+      if (hasActiveTTSSynthesis()) {
+        return { ok: false, freed: 0, error: '正在配音，先等这一批跑完再清缓存' }
+      }
+      const freed = await clearClipCache()
+      logger.userAction('TTS clip cache cleared', { freed })
+      return { ok: true, freed, error: null }
+    },
+    (message) => ({ ok: false, freed: 0, error: message })
+  )
+
+  /**
    * 逐段合成 + 拼成一条轨。耗时是分钟级（每段一次网络请求，串行），
    * 所以真实段号走 PROGRESS_CHANNEL 推回来，不包一层渲染层就只剩一个转圈的按钮。
    */
@@ -293,6 +331,9 @@ export function registerTTSHandlers() {
       const batch = await synthesizeSegments(queue, config, sendProgress)
       const jobId = batch.job.id
       const result = batch.result
+      // 复用了几段在拼轨之前就得定下来：拼接失败那一条分支同样要报这个数，
+      // 否则「前面 297 段一分钱没花」这件事在失败时反而说不清
+      const reused = result.clips.filter((clip) => clip.reused).length
 
       if (result.clips.length === 0) {
         await releaseBatchById(jobId)
@@ -328,6 +369,9 @@ export function registerTTSHandlers() {
             voice: config.voice,
             speed: config.speed ?? 1,
             clips: result.clips.length,
+            // 这一批里几段是复用旧音频（#362）。记它是为了「事后还能答这一趟花没花钱」——
+            // 界面上那句只在结果卡活着的时候说得出，账本才是留到最后的证据
+            reusedCount: reused,
             queueTotal: queue.length,
             trackBytes: track.bytes,
             trackDuration: track.duration,
@@ -342,6 +386,7 @@ export function registerTTSHandlers() {
           jobId,
           track,
           clipCount: result.clips.length,
+          reused,
           failures: result.failures,
           skipped: result.skipped,
           canceled: result.canceled,
@@ -356,6 +401,7 @@ export function registerTTSHandlers() {
           jobId: null,
           track: null,
           clipCount: result.clips.length,
+          reused,
           failures: result.failures,
           skipped: result.skipped,
           canceled: result.canceled,

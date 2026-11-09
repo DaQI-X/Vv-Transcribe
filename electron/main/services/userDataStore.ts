@@ -68,6 +68,19 @@ export function recordsDir(): string {
   return userDataPath('records')
 }
 
+/**
+ * 配音片段缓存的落点（#362）：一句文本 + 一套参数 = 一个文件，改过的那几段才重新调接口。
+ *
+ * 它必须在这层、而不是 `transcribe-` 那个临时前缀下面，理由与 recordsDir 是同一条而更硬：
+ * 缓存的全部意义是「下一次还在」，落在临时目录里就是每次启动清扫把它清空——
+ * 那样代码写了一堆、一次复用都不会发生。同理它也不进 records 那层：那层是「用户勾了才留」的
+ * 交付物，缓存是可丢弃的派生物，混在一层会让「留住占多少」那个数字变成两回事。
+ * 界面必须能看见它占多少、能一键清掉，否则就是无声涨磁盘。
+ */
+export function ttsClipCacheDir(): string {
+  return userDataPath('tts-clips')
+}
+
 /** 解不开的历史账本改名留档时用的文件名前缀，套路与 settings 那份一致 */
 export const CORRUPT_HISTORY_PREFIX = 'history.json.corrupt-'
 

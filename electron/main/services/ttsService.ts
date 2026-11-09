@@ -13,13 +13,18 @@
  * 但「段与段之间怎么顺延」仍然每次都重新解一遍：VITS 同文本同音色连跑时长会抖 ±6%（2026-10-28 本机实测），
  * 没有 seed 可钉，缓存上一次的结论就是把误差累进时间轴。
  *
- * 四条踩过坑的口径写在这里：
+ * 五条踩过坑的口径写在这里：
  * - 配音的凭据（厂商、接口地址、Key、模型）整套住在「配音方案」里；地址与 Key 留空时沿用校对那套，
  *   但模型**绝不共用**（chat 模型调音频接口会被直接拒）。音色不在方案里（1.1.0 起）：
  *   它是「这一批怎么念」的问题，界面上每次调用可以覆盖，空着就干脆不发这一项。
  * - 这个文件不认得任何一家的响应形状。200 里装 JSON、十六进制音频、签名地址要二次 GET 这些差别
  *   全收在 ttsVendor 里——真实合成和「测试连接」走同一份，分叉过一次就是自检绿了配音挂了。
  * - 花费落在用户自己的 Key 上，所以任何一次调用前都得让他看清要调多少次。
+ *   1.1.4 起这条多一个具体形态：逐段循环每段先查片段缓存（ttsClipCache），同一句文本 + 同一套
+ *   「怎么念」的参数已经念过一次就直接复用旧音频，改几个字重出一版只花改过那几段的钱。缓存只在
+ *   逐段这一条路上生效——试听和「测试连接」照旧真打一次，那两处的用途就是把端点与音色当场验一遍，
+ *   缓存下来就等于把自检变成不看对面回什么。命中与否一路传到界面（`TTSClip.reused` → 结果卡那行
+ *   「复用 N 段、新合成 M 段」），因为「这一批花没花钱」是用户唯一真正关心的账。
  * - 配置校验必须跟着引擎档分叉：本地档根本没有 Key 和模型，拿云端那三条去问就是把用户拦在门外；
  *   反过来本地档真正会失败的是「音色不是编号」和「组件没下载」。判松判严都栽过（见 #220/#227）。
  */
@@ -30,6 +35,13 @@ import { mkdir, rm, writeFile, stat, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { probeFile, resolveFfmpegBinary } from './audioProcessor'
+import {
+  clipFingerprint,
+  clipFormat,
+  lookupCachedClip,
+  storeClip,
+  writeClipMeta,
+} from './ttsClipCache'
 import { parseLocalTtsSid, synthesizeLocally, type LocalTtsEngineId } from './localTtsEngine'
 import {
   buildSpeechRequest,
@@ -436,7 +448,7 @@ export interface TTSSegmentInput {
   text: string
 }
 
-export type TTSStage = 'synthesizing' | 'skipped' | 'failed' | 'assembling' | 'done'
+export type TTSStage = 'synthesizing' | 'reused' | 'skipped' | 'failed' | 'assembling' | 'done'
 
 /** 进度回传：index/total 是真实段号，不做假百分比 */
 export interface TTSProgress {
@@ -459,6 +471,12 @@ export interface TTSClip {
   filePath: string
   bytes: number
   duration: number
+  /**
+   * 这条是复用缓存里的旧音频（#362），还是这一趟真的调了接口。
+   * 它必须一路传到界面：用户判断「这一批有没有再花钱」只看这个数，
+   * 而报「配音完成，300 段」掩盖的是其中 297 段其实一分钱没花。
+   */
+  reused: boolean
 }
 
 export interface TTSFailure {
@@ -582,9 +600,54 @@ export async function synthesizeSegments(
       continue
     }
 
+    // #362：这一句、这一套「怎么念」的参数已经念过一次，就直接用那条旧音频——不再调接口、不再花钱。
+    // 作废判据全在 clipFingerprint 里（换厂商/模型/音色/倍速/引擎都换键），这里只管命中与回收。
+    const ext = clipFormat(config)
+    const fingerprint = clipFingerprint(config, segment.text)
+    const cached = await lookupCachedClip(fingerprint, ext)
+    if (cached) {
+      let duration = cached.meta?.duration ?? 0
+      if (!duration) {
+        // 时长是 0 有两种：元数据压根没落成，或当年 ffprobe 就没读出来。两种都重探一次——
+        // 音频已经在盘上了，探一下比重新花一次接口的钱便宜，而 0 会让界面上那句「有多长」显示成空
+        const probed = await probeFile(cached.filePath).catch(() => null)
+        duration = probed?.duration ?? 0
+        if (duration) await writeClipMeta(fingerprint, { duration, bytes: cached.bytes })
+      }
+      clips.push({
+        segmentId: segment.id,
+        index,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        filePath: cached.filePath,
+        bytes: cached.bytes,
+        duration,
+        reused: true,
+      })
+      // 命中**不**重置 consecutiveFailures：重置就会走成「失败一段、命中一段」交替跑完整批，
+      // 而每次失败都是真金白银——那正是这个计数器存在的理由。命中也不算失败，所以两个数都不动。
+      onProgress({ jobId, stage: 'reused', index, total, segmentId: segment.id })
+      continue
+    }
+
     try {
       const clip = await synthesizeSpeech(segment.text, config, tempDir)
-      clips.push({ segmentId: segment.id, index, startTime: segment.startTime, endTime: segment.endTime, ...clip })
+      // 收进缓存是把这条音频搬出临时目录，往后拼接读的就是缓存里这一份；
+      // 搬不动时 storeClip 原样回临时路径——这一批照旧成，只是下一轮没得复用（缓存永远不该让配音失败）。
+      const kept = await storeClip(clip.filePath, fingerprint, ext, {
+        duration: clip.duration,
+        bytes: clip.bytes,
+      })
+      clips.push({
+        segmentId: segment.id,
+        index,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        ...clip,
+        filePath: kept.filePath,
+        bytes: kept.bytes,
+        reused: false,
+      })
       consecutiveFailures = 0
       onProgress({ jobId, stage: 'synthesizing', index, total, segmentId: segment.id })
     } catch (err) {
@@ -593,12 +656,26 @@ export async function synthesizeSegments(
       consecutiveFailures++
       onProgress({ jobId, stage: 'failed', index, total, segmentId: segment.id, note: message })
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        abortedReason = `连续 ${consecutiveFailures} 段都失败，已停止整批（最后一条原因：${message}）`
+        // 这句原来写的是「连续 N 段」——#362 之后缓存命中既不重置也不累加这个计数器，
+        // 「连续」就不一定成立了（失败一段、命中一段交替出现也会攒到 3），说「累计」才是真话。
+        abortedReason = `累计 ${consecutiveFailures} 段合成失败，已停止整批（最后一条原因：${message}）`
         logger.error('TTS', 'Batch aborted on consecutive failures', { jobId, index, message })
         break
       }
     }
   }
+
+  // 花没花钱是这一批最重要的一件事，日志里必须能直接答出来：只记 clipCount 的话，
+  // 下一轮用户报「我明明重新配了一遍怎么还扣钱」就没证据可对。
+  const reusedCount = clips.filter((clip) => clip.reused).length
+  logger.info('TTS', 'Batch segments finished', {
+    jobId,
+    total,
+    synthesized: clips.length - reusedCount,
+    reused: reusedCount,
+    failed: failures.length,
+    skipped: skipped.length,
+  })
 
   // 逐段循环出界（跑完、被取消、被熔断）就不再占用引擎了。后面的拼接读的是已经落盘的
   // wav，不需要引擎，所以组件下载与「停止引擎」在这一步之后就可以放行。

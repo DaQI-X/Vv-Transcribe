@@ -39,7 +39,7 @@ interface VoiceCallOptions {
 /** 与 index.d.ts 的 VoiceProgress 对齐：index/total 是真实段号，不做假百分比 */
 interface VoiceProgressEvent {
   jobId: string
-  stage: 'synthesizing' | 'skipped' | 'failed' | 'assembling' | 'done'
+  stage: 'synthesizing' | 'reused' | 'skipped' | 'failed' | 'assembling' | 'done'
   index: number
   total: number
   segmentId?: string
@@ -142,6 +142,9 @@ const api = {
   cancelVoiceJob: (jobId: string) => ipcRenderer.invoke('tts:cancel', jobId),
   saveVoiceTrack: (jobId: string) => ipcRenderer.invoke('tts:saveTrack', jobId),
   releaseVoiceBatch: (jobId: string) => ipcRenderer.invoke('tts:releaseBatch', jobId),
+  // 配音片段缓存（#362）：这一层落在 userData、启动清扫不动它，所以体积与「清掉」都得给界面一个入口
+  getVoiceClipCacheStats: () => ipcRenderer.invoke('tts:cacheStats'),
+  clearVoiceClipCache: () => ipcRenderer.invoke('tts:cacheClear'),
   // 本地配音引擎：只读状态（不会因此拉起引擎）、应用内重启与停止
   // profileId 是「问哪一套配音配置里的引擎」，不传就是问当前默认那套
   getLocalVoiceStatus: (engine?: string, profileId?: string) =>

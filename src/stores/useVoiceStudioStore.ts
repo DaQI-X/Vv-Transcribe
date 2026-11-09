@@ -47,11 +47,16 @@ export interface VendorVoiceOption {
  */
 export const VOICE_SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
 
-/** 成功的段数就是事件里的 index：主进程在「这一段拿到音频」之后才推 synthesizing，index 0 是开工前的占位 */
+/**
+ * 成功的段数就是事件里的 index：主进程在「这一段拿到音频」之后才推 synthesizing，index 0 是开工前的占位。
+ * reused 是其中「复用缓存、没花钱」的那几段（#362）——它同时算进 done，因为那一段确实有音频了，
+ * 但界面必须能把它单说出来：跑 300 段时用户想知道的是这一趟扣了几段的钱，不是总共动了多少段。
+ */
 interface LiveCount {
   done: number
   failed: number
   skipped: number
+  reused: number
 }
 
 interface VoiceStudioState {
@@ -168,7 +173,7 @@ interface VoiceStudioState {
   applyProgress: (data: VoiceProgress) => void
 }
 
-const emptyLive: LiveCount = { done: 0, failed: 0, skipped: 0 }
+const emptyLive: LiveCount = { done: 0, failed: 0, skipped: 0, reused: 0 }
 
 /** 进度订阅只挂一次（模块级，不放 state）：store 是单例，监听跟着它活到渲染进程结束 */
 let progressUnsubscribe: (() => void) | null = null
@@ -605,9 +610,16 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
         sourceName: draftName(get().source),
       })
       set({ result: res, phase: 'done', jobId: res.jobId, progress: null })
+      // 复用了几段必须说在这一句里（#362）：「完成 300 段」听起来像烧了 300 段的钱，
+      // 而真实情况可能是 297 段一分没花——这一版功能的意义就在这句反馈上，不说等于没做
+      const costLine = res.reused > 0 ? `复用 ${res.reused} 段、新合成 ${res.clipCount - res.reused} 段` : ''
       if (res.error) toast.error(res.error)
       else if (res.abortedReason) toast.error(res.abortedReason)
-      else if (res.canceled) toast.info(`已取消，已完成的 ${res.clipCount} 段拼成了一条轨`)
+      else if (res.canceled)
+        toast.info(
+          `已取消，已完成的 ${res.clipCount} 段拼成了一条轨${costLine ? `（${costLine}）` : ''}`
+        )
+      else if (costLine) toast.success(`字幕配音完成，${res.clipCount} 段：${costLine}`, 8000)
       else toast.success(`字幕配音完成，${res.clipCount} 段`)
     } catch (err) {
       set({ phase: 'idle', queue: [] })
@@ -711,14 +723,24 @@ export const useVoiceStudioStore = create<VoiceStudioState>((set, get) => ({
     set((prev) => {
       const live = { ...prev.live }
       if (data.stage === 'synthesizing') live.done = data.index
-      else if (data.stage === 'failed') live.failed += 1
+      // 复用与真合成在「这一段有音频了」上是同一件事，所以 done 一样往前推；
+      // 单独记一笔 reused 才说得出这一趟花了几段的钱（#362）
+      else if (data.stage === 'reused') {
+        live.done = data.index
+        live.reused += 1
+      } else if (data.stage === 'failed') live.failed += 1
       else if (data.stage === 'skipped') live.skipped += 1
       return { jobId: data.jobId, progress: data, live }
     })
     // 用户点取消时 jobId 可能还没推回来（第一段还在接口那边），那时只置了标志；
     // 现在拿到 id 了，每来一条进度就补发一次，主进程那边是幂等的
     if (!get().cancelRequested) return
-    if (data.stage === 'synthesizing' || data.stage === 'failed' || data.stage === 'skipped') {
+    if (
+      data.stage === 'synthesizing' ||
+      data.stage === 'reused' ||
+      data.stage === 'failed' ||
+      data.stage === 'skipped'
+    ) {
       void getElectronAPI()?.cancelVoiceJob(data.jobId)
     }
   },

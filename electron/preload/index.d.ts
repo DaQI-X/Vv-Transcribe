@@ -107,7 +107,7 @@ export interface VoiceCallOptions {
 
 export interface VoiceProgress {
   jobId: string
-  stage: 'synthesizing' | 'skipped' | 'failed' | 'assembling' | 'done'
+  stage: 'synthesizing' | 'reused' | 'skipped' | 'failed' | 'assembling' | 'done'
   /** 1 起算的真实段号；0＝已发起、第一段还在接口那边（让界面早点拿到 jobId 好放「取消」）；assembling/done 时等于总数 */
   index: number
   total: number
@@ -322,6 +322,8 @@ export interface TTSSynthesizeResult {
   jobId: string | null
   track: VoiceTrack | null
   clipCount: number
+  /** 其中几段复用缓存里的旧音频、没调接口也没花钱（#362）；clipCount - reused 就是这一批真花了几段 */
+  reused: number
   failures: Array<{ segmentId: string; index: number; error: string }>
   /** 空段落 id：没调接口、没花钱 */
   skipped: string[]
@@ -586,6 +588,13 @@ export interface ElectronAPI {
   }>
   /** 没另存就清空这批时回收整批中间产物（另存成功后同样回收） */
   releaseVoiceBatch: (jobId: string) => Promise<{ ok: boolean; error?: string | null }>
+  /**
+   * 配音片段缓存占多少（#362）。这一层落在 userData、启动清扫不动它，所以它必须看得见体积。
+   * error 非空时 bytes/clips 两个数字都不许读——读成 0 就是说「没占地方」，那是句谎。
+   */
+  getVoiceClipCacheStats: () => Promise<{ bytes: number; clips: number; error: string | null }>
+  /** 清掉整层片段缓存。正在逐段配音时主进程会拒绝（ok:false + error），那一轮的片段还指着这些文件 */
+  clearVoiceClipCache: () => Promise<{ ok: boolean; freed: number; error: string | null }>
   onVoiceProgress: (callback: (data: VoiceProgress) => void) => () => void
 
   /**

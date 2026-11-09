@@ -17,7 +17,12 @@ export interface VoiceSegment {
 /** 进度推送：index/total 是真实段号，不做假百分比 */
 export interface VoiceProgress {
   jobId: string
-  stage: 'synthesizing' | 'skipped' | 'failed' | 'assembling' | 'done'
+  /**
+   * 'reused'＝这一段复用缓存里的旧音频，没调接口也没花钱（#362）。
+   * 它单独成一档而不是混进 'synthesizing'：界面上「这一段正在花钱」和「这一段白捡」是两件事，
+   * 合并了用户就只能等整批跑完才知道省没省。
+   */
+  stage: 'synthesizing' | 'reused' | 'skipped' | 'failed' | 'assembling' | 'done'
   /** 1 起算的真实段号；0＝已发起、第一段还在接口那边；assembling/done 时等于总数 */
   index: number
   total: number
@@ -45,6 +50,8 @@ export interface VoiceSynthesizeResult {
   jobId: string | null
   track: VoiceTrack | null
   clipCount: number
+  /** 其中几段是复用缓存的旧音频（#362）：clipCount 减它就是这一批真调了几次接口 */
+  reused: number
   failures: Array<{ segmentId: string; index: number; error: string }>
   /** 空段落 id：没调接口、没花钱 */
   skipped: string[]

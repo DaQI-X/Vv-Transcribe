@@ -20,6 +20,7 @@ import {
   pruneOlderCopies,
   readJsonFile,
   settingsFile,
+  ttsClipCacheDir,
   userDataPath,
   userDataRoot,
 } from '../electron/main/services/userDataStore'
@@ -58,6 +59,9 @@ describe('路径收口', () => {
     expect(componentsDir()).toBe(join(dir, 'components'))
     expect(dictionaryDir()).toBe(join(dir, 'dictionary'))
     expect(new Set([logsDir(), componentsDir(), dictionaryDir()]).size).toBe(3)
+    // 配音片段缓存（#362）也收在这一层：它的名字不能带 transcribe- 前缀，否则启动清扫与
+    // releaseBatch 那两处按前缀的删除会把「下一次还在」这条根本意义删掉
+    expect(ttsClipCacheDir()).toBe(join(dir, 'tts-clips'))
     // 应用内更新下来的 yt-dlp 由 urlDownloader 自己拼 userDataPath('bin', <带不带 .exe 的名字>)：
     // 叶子名是它的领域知识，但根仍是这一层，所以这里钉的是 bin 这层不会和上面任何目录撞名
     expect(userDataPath('bin')).toBe(join(dir, 'bin'))

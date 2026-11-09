@@ -345,6 +345,13 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   const [ytDlpProgress, setYtDlpProgress] = useState<{ received: number; total: number } | null>(
     null
   )
+  /**
+   * 配音片段缓存占多少（#362）。这一层落在 userData、启动清扫从不碰它，所以它必须自己报体积：
+   * 一个只会长、又没人告诉用户它在哪的目录，跟没做这个功能一样糟。
+   * null＝还没读到（或这一次没读出来），界面那格留空，不许当成 0 显示成「没占地方」。
+   */
+  const [clipCache, setClipCache] = useState<{ bytes: number; clips: number } | null>(null)
+  const [clipCacheClearing, setClipCacheClearing] = useState(false)
   const api = getElectronAPI()
   const { theme, setTheme } = useThemeStore()
 
@@ -931,6 +938,23 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     }
   }, [tab, api, ttsLocal, selectedTtsEngine, voiceStateTick])
 
+  /**
+   * 片段缓存的体积只在开到「关于与更新」时读一次：那一步要把整层目录 readdir 一遍再逐个 stat，
+   * 而这一行不显示的时候读它没有任何读者。error 非空时保持 null——读不到就说读不到，
+   * 不能把主进程失败值里那份占位的 0 演成「缓存是空的」。
+   */
+  useEffect(() => {
+    if (tab !== 'about' || !api) return
+    let cancelled = false
+    void api.getVoiceClipCacheStats().then((res) => {
+      if (cancelled || res.error) return
+      setClipCache({ bytes: res.bytes, clips: res.clips })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [tab, api])
+
   const handleTestConnection = async (kind: 'asr' | 'ai' | 'tts') => {
     if (!api || testingRef.current) return
     testingRef.current = true
@@ -1214,6 +1238,29 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    * 实现放在 utils/userData，保存失败的 toast 用的是同一个（措辞必须与主进程那句话对上）。
    */
   const handleOpenUserDataDirectory = () => void openUserDataDirectory()
+
+  /**
+   * 清空配音片段缓存（#362）。这一删不可逆但只丢「省钱的派生物」——下一批配音会重新调接口、
+   * 重新花钱，产物本身（配音轨、历史记录里勾了留住的副本）一个字节都不动。
+   * 正在逐段配音时主进程直接拒绝并把原因回在 error 里，这里只负责弹出来。
+   */
+  const handleClearClipCache = async () => {
+    if (!api || clipCacheClearing) return
+    setClipCacheClearing(true)
+    try {
+      const res = await api.clearVoiceClipCache()
+      if (res.error) {
+        toast.error(res.error)
+        return
+      }
+      toast.success(`已清空配音片段缓存，释放 ${formatBytes(res.freed)}`)
+      setClipCache({ bytes: 0, clips: 0 })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '清空配音片段缓存失败')
+    } finally {
+      setClipCacheClearing(false)
+    }
+  }
 
   const copyContactEmail = async (email: string) => {
     try {
@@ -1747,6 +1794,32 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 <span className="settings-form-hint">
                   设置（settings.json）、按需下载的配音引擎与组件都在这里。设置没能解析时，
                   原件会以 settings.json.corrupt-时间戳 的名字留在同一层，可以从那份文件里找回
+                </span>
+              </div>
+
+              <div className="settings-form-group">
+                <label className="settings-form-label">配音片段缓存</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span className="settings-form-hint" style={{ margin: 0 }}>
+                    {clipCache
+                      ? clipCache.clips === 0
+                        ? '还没有存下的片段'
+                        : `${clipCache.clips} 段，占 ${formatBytes(clipCache.bytes)}`
+                      : '体积读取中…'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleClearClipCache()}
+                    disabled={clipCacheClearing || clipCache?.clips === 0}
+                    className="settings-modal__dict-update-btn"
+                  >
+                    {clipCacheClearing ? '清空中...' : '清空缓存'}
+                  </button>
+                </div>
+                <span className="settings-form-hint">
+                  同一句文本、同一套配音参数配过一次就存下来，改几个字重出一版时只重配改过的那几段，
+                  没改的段不再调用接口。换配音方案、模型、音色或倍速都会让旧片段作废；只有换 API Key 不作废，它不改听感。
+                  清掉不影响已经配好的音轨和历史记录，只是下一批要重新调接口
                 </span>
               </div>
 

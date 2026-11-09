@@ -42,6 +42,8 @@ export interface VoiceDetail {
   trackBytes: number
   trackDuration: number
   pushedCount: number
+  /** 其中几段复用缓存的旧音频、没再调接口（#362）。1.1.4 之前的记录没有这一维，读出来是 undefined，别当成 0 */
+  reusedCount?: number
 }
 
 export type HistoryDetail = TranscribeDetail | DownloadDetail | VoiceDetail

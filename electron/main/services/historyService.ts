@@ -100,6 +100,11 @@ export interface VoiceDetail {
   speed: number
   /** 这一段数成了的；界面把它跟 queueTotal 一起摆，「跑了 12/300 段」一眼就能看出来是没配完 */
   clips: number
+  /**
+   * 其中几段是复用缓存里的旧音频、没再花一次接口的钱（#362）。
+   * 可选：1.1.4 之前落账的记录根本没有这一维，读旧账本时它就是 undefined，不能当成 0。
+   */
+  reusedCount?: number
   /** 这批提交了多少段（含失败与被跳过的），取消和熔断都发生在它中间 */
   queueTotal: number
   trackBytes: number
