@@ -486,8 +486,8 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
         </div>
       </div>
 
-      {/* 整轴那一格：改轴的两个入口都归到这里，表头只留「办这页的事」那四颗。
-          读数给的是全稿两头（逐行编辑一次只看得到一段），1.1.5 的拆/合/删也挂这条。 */}
+      {/* 整轴那一格：读数给的是全稿两头（逐行编辑一次只看得到一段），一次动全部行的只有这颗「轴偏移」。
+          拆/合/删（#364）挂不在这里——它们改的是这一行和它的下一行，落点在行内的展开条与右键菜单。 */}
       <div className="transcript-editor__axisbar">
         <span className="transcript-editor__axisbar-readout">
           {axis
@@ -495,7 +495,7 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             : '还没有时间轴'}
         </span>
         {/* 这句提示是这一条里唯一可省的（CSS 让它先被挤掉），所以要短到在最窄的读数下也不断句 */}
-        <span className="transcript-editor__axisbar-hint">双击行首时间改起止，右键这一行还有更多</span>
+        <span className="transcript-editor__axisbar-hint">双击行首改起止，右键这一行拆·并·删</span>
         <TimelineShift />
       </div>
 

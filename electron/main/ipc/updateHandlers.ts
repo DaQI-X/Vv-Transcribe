@@ -11,7 +11,14 @@
  * 收口之后它们改回值，所以两条通道的形状各多了一个 error 槽位——渲染层必须读它，
  * 否则「问不出新版本」会被显示成「当前已是最新版本」。
  */
-import { app, shell } from 'electron'
+import { app, dialog, shell } from 'electron'
+import { stat, writeFile } from 'node:fs/promises'
+import { basename } from 'node:path'
+import {
+  buildDiagnosticsText,
+  diagnosticsFileName,
+  landsInSweepTarget,
+} from '../services/diagnosticsService'
 import {
   applyYtDlpUpdate,
   checkYtDlpUpdate,
@@ -19,6 +26,7 @@ import {
   type YtDlpLocalInfo,
   type YtDlpProgress,
 } from '../services/ytDlpUpdate'
+import { logger } from '../services/logger'
 import { failSuccessError, ipcHandle } from './guard'
 
 const RELEASE_API = 'https://api.github.com/repos/DaQI-X/Vv-Transcribe/releases/latest'
@@ -59,6 +67,55 @@ export interface UpdateInfo {
 export interface YtDlpLocalSnapshot {
   info: YtDlpLocalInfo | null
   error: string | null
+}
+
+/**
+ * `app:exportDiagnostics` 的返回值。四个槽各管一件事，界面必须分开说：
+ * - `canceled`：用户自己点了取消，此时一个字都不该说（`tts:saveTrack` 同一条规矩）；
+ * - `error`：包**没写出来**的原因（读盘炸了、选的位置在清扫靶子里）；
+ * - `mailError`：包**已经写出来了**，只是邮件客户端没起来——这时候话要说成「文件在 ××，邮件没起」，
+ *   说成「导出失败」会让人重做一遍已经成功的动作，而那个文件会留成两份。
+ */
+export interface DiagnosticsExportResult {
+  success: boolean
+  canceled: boolean
+  error: string | null
+  /** 写出去的那个文件名（只有 basename：绝对路径正是这个功能自己不许发出去的东西） */
+  name?: string
+  bytes?: number
+  email: string
+  mailError: string | null
+}
+
+/**
+ * 同一封反馈邮件的 URL：收件人与主题两处共用，只有正文末段按「这次要附什么」不同。
+ * 拼法原样沿用 #185 那一版，改的只是把「请把 .log 拖进邮件」这一句抽成参数——
+ * 两条通道各拼一份的话，将来换收件人就会换漏一边。
+ */
+function feedbackMailto(bodyTail: string): string {
+  const env = [`应用版本：v${app.getVersion()}`, `系统：${process.platform} ${process.arch} / ${process.getSystemVersion()}`, bodyTail].join('\n')
+  return (
+    `mailto:${CONTACT_EMAIL}` +
+    `?subject=${encodeURIComponent(`Vv Transcribe v${app.getVersion()} 问题反馈`)}` +
+    `&body=${encodeURIComponent('请描述：在哪一步失败、上传的是什么素材、预期结果是什么。\n\n\n' + env)}`
+  )
+}
+
+/**
+ * 起邮件客户端。回 null＝起来了；回一句原话＝没起来。
+ * 收成一句是因为两条通道都得面对同一个事实：`openExternal('mailto:')` 在没装默认邮件应用的
+ * 机器上未必抛（macOS 上它常常安静地成功），所以「返回成功」不等于「用户看见了写信窗口」，
+ * 界面那句话说得留有余地。
+ */
+async function openFeedbackMail(bodyTail: string): Promise<string | null> {
+  try {
+    await shell.openExternal(feedbackMailto(bodyTail))
+    return null
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.warn('Update', 'Feedback mailto did not open', message)
+    return message
+  }
 }
 
 function parseVersion(raw: string): number[] {
@@ -193,21 +250,74 @@ export function registerUpdateHandlers() {
   ipcHandle(
     'app:contactDeveloper',
     async () => {
-      const env = [
-        `应用版本：v${app.getVersion()}`,
-        `系统：${process.platform} ${process.arch} / ${process.getSystemVersion()}`,
-        '日志：设置 → 关于与更新 → 打开日志文件夹，请把其中的 .log 文件作为附件一并发来',
-      ].join('\n')
-
-      const url =
-        `mailto:${CONTACT_EMAIL}` +
-        `?subject=${encodeURIComponent(`Vv Transcribe v${app.getVersion()} 问题反馈`)}` +
-        `&body=${encodeURIComponent('请描述：在哪一步失败、上传的是什么素材、预期结果是什么。\n\n\n' + env)}`
-
-      await shell.openExternal(url)
+      // 这一条留着教用户自己去日志文件夹拖 .log：导出诊断包只能带上它生成的那一个文件，
+      // 而有的现场（比如「昨天还好好的」）要看的正是轮转出去的那几份旧档
+      const mailError = await openFeedbackMail(
+        '日志：设置 → 关于与更新 → 打开日志文件夹，请把其中的 .log 文件作为附件一并发来'
+      )
+      if (mailError) return { success: false, email: CONTACT_EMAIL, error: mailError }
       return { success: true, email: CONTACT_EMAIL }
     },
     // email 也要带上：界面拿它做「复制收件人」，那是打不开邮件客户端时唯一的出路
     (message) => ({ success: false, email: CONTACT_EMAIL, error: message })
+  )
+
+  /**
+   * 一键导出诊断包（#358）。
+   * 缺的那一步其实只有一个：`mailto` 带不了附件，而「打开日志文件夹 → 找到 .log → 拖进邮件」
+   * 多数人做不到，回来的反馈就只剩「转写不准」这种没法定位的描述。
+   * 这条通道把包写到**用户当场选的位置**，全程没有一次网络请求——所以「素材不出本机」
+   * 那句话一个字都不用改（包里有什么、隐了什么，见 services/diagnosticsService.ts 头上）。
+   */
+  ipcHandle(
+    'app:exportDiagnostics',
+    async (): Promise<DiagnosticsExportResult> => {
+      // 先拼文本再弹保存框：读盘炸了的时候不该让用户对着一扇已经打开的原生面板等一句「生成失败」
+      const text = await buildDiagnosticsText()
+      const result = await dialog.showSaveDialog({
+        defaultPath: diagnosticsFileName(new Date()),
+        filters: [{ name: '诊断包（纯文本）', extensions: ['txt'] }],
+      })
+      if (result.canceled || !result.filePath) {
+        logger.userAction('Diagnostics export cancelled')
+        return { success: false, canceled: true, error: null, email: CONTACT_EMAIL, mailError: null }
+      }
+      // 落进 transcribe- 那一层等于把包交给那个 24 小时后把它删掉的清扫机制（理由见 userDataStore 头上）
+      if (landsInSweepTarget(result.filePath)) {
+        return {
+          success: false,
+          canceled: false,
+          error: '诊断包不能存进转写临时目录那一层——那里过一天会被自动清掉，请改选桌面或文档',
+          email: CONTACT_EMAIL,
+          mailError: null,
+        }
+      }
+
+      await writeFile(result.filePath, text, 'utf-8')
+      const saved = await stat(result.filePath)
+      const savedName = basename(result.filePath)
+      logger.userAction('Diagnostics package exported', { name: savedName, sizeBytes: saved.size })
+      // 正文只报文件名，不报路径：绝对正是这个功能自己不许写出去的东西，邮件正文不该开口子
+      const mailError = await openFeedbackMail(
+        `诊断包：已导出 ${savedName}（就在你刚才选的位置），请把它作为附件发回来`
+      )
+      return {
+        success: true,
+        canceled: false,
+        error: null,
+        name: savedName,
+        bytes: saved.size,
+        email: CONTACT_EMAIL,
+        mailError,
+      }
+    },
+    // canceled 显式给 false 而不是缺着：界面那条「用户自己取消了就一个字别说」的分支要有东西可读
+    (message) => ({
+      success: false,
+      canceled: false,
+      error: message,
+      email: CONTACT_EMAIL,
+      mailError: null,
+    })
   )
 }

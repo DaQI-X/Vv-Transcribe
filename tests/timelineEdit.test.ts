@@ -1,13 +1,22 @@
 /**
- * 字幕时间轴编辑（#361）。
+ * 字幕时间轴编辑（#361 平移/单段起止，#364 拆/并/删）。
  *
  * 这一层的价值全在「拒掉」那半边：接受改动的路径谁都写得出来，重叠和倒序的轴才是会把
  * 配音铺轴与播放器高亮一起带跑的东西，所以每条拒绝都要有名字、有数字、有出路。
- * 用例分四组：整轴平移、单段起止、读数范围、以及改完轴的**下游**（导出的 SRT 与浮点尾巴）。
+ * 用例分组：整轴平移、单段起止、拆段、合段、删段、读数范围，以及改完轴的**下游**
+ * （导出的 SRT、浮点尾巴，还有拆/并/删之后「数组序＝时间序、相邻不重叠」这条前提还在不在）。
  */
 import { describe, expect, it } from 'vitest'
 import { exportTranscript } from '../src/utils/exportTranscript'
-import { editSegmentTimes, shiftTimeline, timelineSpan, type TimelineEditResult } from '../src/utils/timelineEdit'
+import {
+  deleteSegment,
+  editSegmentTimes,
+  mergeSegment,
+  shiftTimeline,
+  splitSegment,
+  timelineSpan,
+  type TimelineEditResult,
+} from '../src/utils/timelineEdit'
 import type { TranscriptionSegment } from '../src/types/transcription'
 
 function segment(overrides: Partial<TranscriptionSegment>): TranscriptionSegment {
@@ -173,6 +182,187 @@ describe('单段起止：editSegmentTimes', () => {
   })
 })
 
+/** b 那行是「监管部门提醒投资者注意风险」（13 字），光标放在第 6 个字后面：前半 6 字、后半 7 字 */
+const CUT = 6
+
+describe('拆段：splitSegment', () => {
+  it('文字按光标分开、时间按两半的字数摊开，别的行一个字都不动', () => {
+    const next = applied(splitSegment(threeSegments(), 'b', CUT))
+    expect(next.map((s) => [s.startTime, s.endTime])).toEqual([
+      [0, 10],
+      [10, 14.615],
+      [14.615, 20],
+      [20, 30],
+    ])
+    expect(next.map((s) => s.text)).toEqual([
+      '监管部门提醒投资者注意风险',
+      '监管部门提醒',
+      '投资者注意风险',
+      '监管部门提醒投资者注意风险',
+    ])
+  })
+
+  /** 整篇稿子＝各行 join('')，AI 校对把这一篇发出去再按行贴回来：拆这一刀不能增减一个字 */
+  it('拆完 join 起来跟拆之前一模一样，空格也不裁', () => {
+    const segments = [segment({ id: 'a', startTime: 0, endTime: 10, text: '监管部门 提醒投资者' })]
+    const before = segments.map((s) => s.text).join('')
+    const next = applied(splitSegment(segments, 'a', 5))
+    expect(next.map((s) => s.text).join('')).toBe(before)
+    expect(next[0].text).toBe('监管部门 ')
+  })
+
+  /** 摊比例用的是码点数：`length` 会把一个 emoji 数成 2 字，前半就多拿一份时长 */
+  it('摊时间按字数、不按 UTF-16 长度', () => {
+    const segments = [segment({ id: 'a', startTime: 0, endTime: 10, text: '🎧🎧🎧🎧🎧🎧🎧' })]
+    // 光标位是按 UTF-16 码元报的（textarea 的 selectionStart 就是这个口径），8 码元＝第 4 个字后面
+    const next = applied(splitSegment(segments, 'a', 8))
+    expect(next.map((s) => s.text)).toEqual(['🎧🎧🎧🎧', '🎧🎧🎧'])
+    expect(next.map((s) => [s.startTime, s.endTime])).toEqual([
+      [0, 5.714],
+      [5.714, 10],
+    ])
+  })
+
+  it('前半沿用原来的 id，后半另起一个不撞车的 id', () => {
+    const next = applied(splitSegment(threeSegments(), 'b', CUT))
+    expect(next[1].id).toBe('b')
+    expect(next[2].id).toBe('14.615-20#1')
+    expect(new Set(next.map((s) => s.id)).size).toBe(4)
+
+    // 同一刀拆两次（挪回原位再拆）会算出同一个落点，撞上已经存在的 id，序号往上找一个没人占的
+    const crowded = [segment({ id: '14.615-20#1', startTime: 10, endTime: 20 })]
+    expect(applied(splitSegment(crowded, '14.615-20#1', CUT))[1].id).toBe('14.615-20#2')
+  })
+
+  it('光标在开头或末尾时拒，并说清是哪一半空了', () => {
+    const head = splitSegment(threeSegments(), 'b', 0)
+    const tail = splitSegment(threeSegments(), 'b', 13)
+    expect(!head.ok && head.error).toContain('前半是空的')
+    expect(!tail.ok && tail.error).toContain('后半是空的')
+  })
+
+  it('只有空格的半边也算空：拆出来是一行看不见的字幕', () => {
+    const segments = [segment({ id: 'a', startTime: 0, endTime: 10, text: '监管部门　　' })]
+    const result = splitSegment(segments, 'a', 4)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('后半是空的')
+  })
+
+  /** emoji 与生僻字占两个字码，正好切在中间会造出两个乱码字符 */
+  it('光标落在代理对中间时往后挪一格，字不切坏', () => {
+    const segments = [segment({ id: 'a', startTime: 0, endTime: 10, text: '前面🎧后面' })]
+    const next = applied(splitSegment(segments, 'a', 3))
+    expect(next.map((s) => s.text)).toEqual(['前面🎧', '后面'])
+  })
+
+  /** 摊到亚毫秒就被 roundMs 收回原处：这一刀落不进轴里，硬拆会写出 10–10 的零长段 */
+  it('短到摊不出两半的起止时拒，并说要改哪一格', () => {
+    const result = splitSegment([segment({ id: 'a', startTime: 10, endTime: 10.001 })], 'a', CUT)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('摊不出两半都落得住的起止')
+      expect(result.error).toContain('10–10.001')
+    }
+  })
+
+  it('id 对不上时不假装拆好了', () => {
+    const result = splitSegment(threeSegments(), 'zzz', CUT)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('没找到这一段')
+  })
+
+  it('成功那行把两段的时间与摊法念回去', () => {
+    expect(summary(splitSegment(threeSegments(), 'b', CUT))).toBe(
+      '拆成两段：10–14.615 和 14.615–20 秒（按 6/7 字摊的时间；落点不对就改这两段的起止）',
+    )
+  })
+})
+
+describe('合段：mergeSegment', () => {
+  it('只跟下一段并：文字相接、时间取两头、留下自己的 id', () => {
+    const next = applied(mergeSegment(threeSegments(), 'b'))
+    expect(next).toHaveLength(2)
+    expect(next[0]).toMatchObject({ id: 'a', startTime: 0, endTime: 10 })
+    expect(next[1]).toMatchObject({ id: 'b', startTime: 10, endTime: 30 })
+    expect(next[1].text).toBe('监管部门提醒投资者注意风险监管部门提醒投资者注意风险')
+  })
+
+  it('并完 join 起来还是一个字不多一个字少——不替用户补标点也不裁空格', () => {
+    const segments = [
+      segment({ id: 'a', startTime: 0, endTime: 10, text: '第一句没有标点' }),
+      segment({ id: 'b', startTime: 10, endTime: 20, text: ' 接着第二句' }),
+    ]
+    expect(applied(mergeSegment(segments, 'a'))[0].text).toBe('第一句没有标点 接着第二句')
+  })
+
+  it('最后一段没有下一段，拒并把方向说回来', () => {
+    const result = mergeSegment(threeSegments(), 'c')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('最后一行')
+  })
+
+  it('中间本来有空档时并进来的是连空白一起，回执要点名', () => {
+    const segments = [
+      segment({ id: 'a', startTime: 0, endTime: 10 }),
+      segment({ id: 'b', startTime: 14, endTime: 20 }),
+    ]
+    expect(summary(mergeSegment(segments, 'a'))).toContain('10–14 秒原本是空档')
+  })
+
+  it('贴着邻居时那句空档不出现', () => {
+    expect(summary(mergeSegment(threeSegments(), 'b'))).toBe('并成一段：10–30 秒、26 字')
+  })
+
+  it('id 对不上时不假装并好了', () => {
+    const result = mergeSegment(threeSegments(), 'zzz')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('没找到这一段')
+  })
+})
+
+describe('删段：deleteSegment', () => {
+  it('删中间那行，邻居一个数都不挪——不自动补位', () => {
+    const next = applied(deleteSegment(threeSegments(), 'b'))
+    expect(next.map((s) => s.id)).toEqual(['a', 'c'])
+    expect(next.map((s) => [s.startTime, s.endTime])).toEqual([
+      [0, 10],
+      [20, 30],
+    ])
+  })
+
+  it('删第一行和删最后一行都算删，剩下的还是按时间排', () => {
+    expect(applied(deleteSegment(threeSegments(), 'a')).map((s) => s.id)).toEqual(['b', 'c'])
+    expect(applied(deleteSegment(threeSegments(), 'c')).map((s) => s.id)).toEqual(['a', 'b'])
+  })
+
+  it('只剩一段时拒，不交出一份空稿子', () => {
+    const result = deleteSegment([segment({ id: 'a', startTime: 0, endTime: 10 })], 'a')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('这是最后一段')
+  })
+
+  it('删完露出的空档在回执里点名', () => {
+    const segments = [
+      segment({ id: 'a', startTime: 0, endTime: 10 }),
+      segment({ id: 'b', startTime: 14, endTime: 20 }),
+      segment({ id: 'c', startTime: 20, endTime: 30 }),
+    ]
+    expect(summary(deleteSegment(segments, 'b'))).toBe('删掉这一段，还剩 2 段；10–20 秒现在是空档')
+  })
+
+  /** 删中间一行必然在前后之间开一个口子（那行原本占着这些秒），只有删头尾不会 */
+  it('删第一行或最后一行时不说空档', () => {
+    expect(summary(deleteSegment(threeSegments(), 'a'))).toBe('删掉这一段，还剩 2 段')
+    expect(summary(deleteSegment(threeSegments(), 'c'))).toBe('删掉这一段，还剩 2 段')
+  })
+
+  it('id 对不上时不假装删掉了', () => {
+    const result = deleteSegment(threeSegments(), 'zzz')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('没找到这一段')
+  })
+})
+
 describe('读数范围：timelineSpan', () => {
   it('空稿给 null，界面无话可说而不是 0 到 0', () => {
     expect(timelineSpan([])).toBeNull()
@@ -211,5 +401,44 @@ describe('改完轴的下游', () => {
       segments = applied(shiftTimeline(segments, '-0.1'))
     }
     expect(segments[0]).toMatchObject({ startTime: 0, endTime: 10 })
+  })
+
+  /**
+   * 播放器（find 第一个命中）、配音铺轴（把数组序当时间序）、导出这三处都不重排，
+   * 所以拆/并/删之后「数组序＝时间序、相邻不重叠」必须仍然成立——这一条红了，
+   * 症状是配音轨越到后面差越多，而不是这一行显示不对。
+   */
+  it('拆、并、删之后数组还是按时间排且不相隔重叠', () => {
+    const ops = [
+      applied(splitSegment(threeSegments(), 'b', CUT)),
+      applied(mergeSegment(threeSegments(), 'b')),
+      applied(deleteSegment(threeSegments(), 'b')),
+    ]
+    for (const segments of ops) {
+      for (let i = 1; i < segments.length; i++) {
+        expect(segments[i - 1].endTime).toBeLessThanOrEqual(segments[i].startTime)
+        expect(segments[i].startTime).toBeLessThan(segments[i].endTime)
+      }
+    }
+  })
+
+  /** 拆出来的落点是摊出来的小数（14.615），SRT 那一行必须把毫秒位写全，不能四舍五入成 14,000 */
+  it('拆完导出 SRT：多出来的一行插在中间，序号跟着重排', () => {
+    const srt = exportTranscript(applied(splitSegment(threeSegments(), 'b', CUT)), 'srt')
+    expect(srt).toContain('00:00:10,000 --> 00:00:14,615')
+    expect(srt).toContain('00:00:14,615 --> 00:00:20,000')
+    expect(srt.match(/^\d+$/gm)).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('并完导出 SRT：那一行只剩一条，时间取两头', () => {
+    const srt = exportTranscript(applied(mergeSegment(threeSegments(), 'b')), 'srt')
+    expect(srt).toContain('00:00:10,000 --> 00:00:30,000')
+    expect(srt.match(/^\d+$/gm)).toEqual(['1', '2'])
+  })
+
+  it('删掉一段后导出 SRT，剩下的行号还是连续的', () => {
+    const srt = exportTranscript(applied(deleteSegment(threeSegments(), 'b')), 'srt')
+    expect(srt).not.toContain('00:00:10,000 --> 00:00:20,000')
+    expect(srt.match(/^\d+$/gm)).toEqual(['1', '2'])
   })
 })

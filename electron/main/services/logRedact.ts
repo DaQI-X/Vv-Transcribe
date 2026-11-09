@@ -93,6 +93,19 @@ function summarize(value: unknown): string {
   return `[已隐去:${typeof value}]`
 }
 
+/**
+ * 「这个键名是不是凭据或用户原文」——把闸门里那两张表借出去问一次，而不是让调用方自己再列一份。
+ *
+ * #358 的诊断包要用同一把尺子：那份把配置的**所有**字段遍历一遍、撞上敏感键名就整格跳过。
+ * 让它自己抄一张凭据字段名的表，就是下一处「加了一格 Key、诊断包里漏一格、而没人想起来补」——
+ * 那张表在这里已经有一份了（CREDENTIAL_KEY / CONTENT_KEY），少一处对账就少一处能分叉的地方。
+ * 这里只回答「名字撞不撞表」，怎么处置是调用方的事（日志隐值，诊断包跳过整格）。
+ */
+export function isSensitiveKey(key: string): boolean {
+  const norm = normKey(key)
+  return CREDENTIAL_KEY.test(norm) || CONTENT_KEY.has(norm)
+}
+
 const DATA_URI = /data:[^"'`\s]{0,200}?;base64,[A-Za-z0-9+/=]{8,}/gi
 const SK_STYLE_KEY = /\bsk-[A-Za-z0-9_\-]{6,}\b/g
 /** 裸着的 `Bearer <jwt>`（没有 `Authorization:` 前缀那种，多半是从 header 值里单独抄出来的） */
@@ -108,14 +121,29 @@ const INLINE_SECRET =
 /** file:///a/b/c.ts → /a/b/c.ts，好让下面那条路径规则一并收掉 */
 const FILE_SCHEME = /file:\/\/(?=\/)/gi
 /**
- * 绝对路径：必须以 / 开头且至少两段，前一个字符只能是空白或引号括号那几种。
+ * 绝对路径：必须以 / 开头且至少两段，前一个字符只能是空白、引号括号那几种，或中文标点。
  * 这条约束是为了不破掉 `http://host/path`（第二个斜杠前面还是斜杠 → 不匹配）和 `:8010/v1/tts`
  * （端口数字直接挨着斜杠 → 不匹配）；`/health` 这种单段也不动。
+ * 中文标点在名单里（#358 这趟补的）：这个应用的报错是人话，而人话里路径前面就是全角冒号——
+ * 盘上真有这样的 producer：`componentService.ts` 抛的 `指纹表里的路径不合规矩：${file.path}`
+ * 经 IPC 闸门落进 `logger.error` 的 message，只认 ASCII 边界的话整条路径照抄进盘，而诊断包正是来读这一段的。
+ * 全角那几种只**增加**匹配（`：` 后面紧跟 `/` 的合法写法只有路径），不动 `=` 和 ASCII 括号，
+ * 也不收汉字当边界：`转写/校对` 那种用斜杠当分隔符的词表不能毁掉（`写` 不在名单里 → 不匹配）。
+ * 那个 `[` 特意转义成 `\[`：不转义时它是名单里的一项，紧跟其后的全角串就落到类外面，
+ * 整个 lookbehind 变成「13 个字符连着匹配」——正则照样编译，只是永远匹配不上，实测踩过。
+ * `(?<=\\[nrt])` 收的是**JSON 里那个两字符转义**（反斜杠 + n/r/t），不是真空白：日志一行装的是
+ * `JSON.stringify` 之后的整条记录，子进程那段多行 stderr 里的换行到盘上就剩 `\n` 两个字，
+ * 于是路径前面的字符是 `n`——一个字母，正好落在「不收字母当边界」那条保护里，整条路径照抄。
+ * 本机今天的 app.log 里这样的行有 32 条（本地配音引擎那句 `Ignore OOV '：'` 后面每一段都带
+ * `/Users/runner/work/sherpa-onnx/…`，只有行首那一条被收掉），诊断包读的正是这种尾部。
+ * 只加这一种两字符前缀，不把 `n`/`r`/`t` 单字收进名单：那会连 `https://host/Users` 这种
+ * 「字母挨着斜杠」的写法一起吃掉，而那条保护是这条规则存在的全部理由。
  * 段内字符用 `\p{L}\p{N}`（不是 `[A-Za-z0-9]`）：这应用装的就是中文命名的媒体文件，
  * 写成 ASCII 类的话 `/Users/daqi/Movies/采访第3期.mp3` 只会匹配到 `Movies` 为止，
  * 用户名和目录名收掉了、`Movies/采访第3期.mp3` 照抄进盘——那是最难发现的一种漏。
  */
-const POSIX_PATH = /(?:^|(?<=[\s"'=([]))((?:\/[\p{L}\p{N}._~+@-]+){2,})/gu
+const POSIX_PATH =
+  /(?:^|(?<=[\s"'=(\[：，。、；！？（）【】《》「」])|(?<=\\[nrt]))((?:\/[\p{L}\p{N}._~+@-]+){2,})/gu
 const WINDOWS_PATH = /(?:^|(?<=[\s"'=(]))[A-Za-z]:[\\/][^\s"'`<>|:;?*,)]{1,200}/g
 /** 只收掉带凭据形状参数的查询串，公开链接的 `?v=1` 那种没必要毁 */
 const SUSPECT_QUERY = /[?&][^#=]*(?:sig|token|key|secret|password|credential|expires|policy|auth)[^#=]*=/i

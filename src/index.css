@@ -2010,6 +2010,38 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   background: var(--brand-blue-hover);
 }
 
+/* ============================================
+ * #364 拆段/合段/删段：展开条里的说明行与那颗删除
+ * 说明行占满一整行（上面那组字段是 flex-wrap 的），字号跟读数同一档，别抢输入格的注意力。
+ * ============================================ */
+
+.segment-structure__note {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 删是不可逆的，所以这颗跟「保存」长得开：口径照历史记录与方案列表那两颗危险按钮——
+   平时描边红字，鼠标进来才填实（深色主题下 --error-color 是浅红，直接填底会吃掉白字） */
+.segment-structure__danger {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--error-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--error-color);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.segment-structure__danger:hover {
+  background: var(--error-color);
+  color: #fff;
+}
+
 .axis-shift {
   display: flex;
   flex-direction: column;

@@ -38,6 +38,7 @@ import {
   TriangleAlert,
   Mail,
   Copy,
+  FileDown,
   BookOpen,
 } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
@@ -352,6 +353,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    */
   const [clipCache, setClipCache] = useState<{ bytes: number; clips: number } | null>(null)
   const [clipCacheClearing, setClipCacheClearing] = useState(false)
+  /** 导出诊断包（#358）在跑的那一会儿：中间要弹一次原生保存面板，重复点会叠出第二扇 */
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
   const api = getElectronAPI()
   const { theme, setTheme } = useThemeStore()
 
@@ -1296,6 +1299,45 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
 
   const handleCopyContactEmail = () => copyContactEmail(CONTACT_EMAIL)
 
+  /**
+   * 导出诊断包（#358）。三种结局要分开说，混一种就是句谎：
+   * 用户自己点了取消（一个字别说）、包没写出来（error）、包写出来了但邮件客户端没起来
+   * （mailError——文件是真在了，说成「导出失败」会让人重做一遍已经成功的那一步）。
+   * 报的是文件名而不是路径：绝对路径正是这个功能自己不许写出去的东西，界面这一句也不开口子。
+   */
+  const handleExportDiagnostics = async () => {
+    if (!api || diagnosticsBusy) return
+    setDiagnosticsBusy(true)
+    try {
+      const result = await api.exportDiagnostics()
+      if (result.canceled) return
+      if (!result.success) {
+        toast.error(`导出诊断包失败：${result.error || '未知原因'}`, 9000, {
+          label: '复制邮箱地址',
+          onClick: () => copyContactEmail(result.email || CONTACT_EMAIL),
+        })
+        return
+      }
+      const saved = `已导出诊断包 ${result.name ?? ''}${
+        typeof result.bytes === 'number' ? `（${formatBytes(result.bytes)}）` : ''
+      }`
+      if (result.mailError) {
+        // 不塞 action：`toast.info` 没有这个槽，而同一栏顶上那颗「复制邮箱地址」一直在屏幕上，
+        // 比一颗 12 秒后会消失的按钮靠得住。话术跟 handleContactDeveloper 那一句保持一致。
+        toast.info(
+          `${saved}。邮件客户端没能打开（${result.mailError}），可点「复制邮箱地址」自己把这封信发出去并附上它`,
+          12000
+        )
+        return
+      }
+      toast.success(`${saved}，把它附在邮件里`, 9000)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '导出诊断包失败')
+    } finally {
+      setDiagnosticsBusy(false)
+    }
+  }
+
   const handleOpenExternal = async (url: string) => {
     if (!api) return
     const result = await api.openExternal(url)
@@ -1846,6 +1888,16 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <button
                     type="button"
+                    onClick={handleExportDiagnostics}
+                    disabled={diagnosticsBusy}
+                    className="settings-modal__dict-update-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  >
+                    <FileDown size={12} />
+                    {diagnosticsBusy ? '生成中...' : '导出诊断包'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleContactDeveloper}
                     className="settings-modal__dict-update-btn"
                     style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
@@ -1865,7 +1917,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <span style={{ fontSize: 11, color: '#9AA5B8' }}>{CONTACT_EMAIL}</span>
                 </div>
                 <span className="settings-form-hint">
-                  邮件会自动带上版本号与运行日志位置；附上日志比描述「转写不准」更容易定位问题
+                  诊断包只有版本与系统、配置摘要（不含 Key）和日志尾部；文件只留在你选的位置，
+                  应用不会自己发出去——附上它比说「转写不准」更好定位
                 </span>
               </div>
             </>

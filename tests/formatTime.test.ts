@@ -157,11 +157,16 @@ describe('判据：时钟只剩一把尺', () => {
    *   一处是百分号转义补两位十六进制（对齐对方 Java 样例的 URLEncoder），
    *   一处是讯飞签名参数里 `dateTime=yyyyMMddHHmmss` 这个**线上字段**，格式由对方文档写死，
    *   补不补零直接决定签名对不对。它念给机器看，不念给人看，所以不走界面那把尺。
+   * - `electron/main/services/diagnosticsService.ts`（#358）：同上，是**文件名**不是读数——
+   *   `vv-diagnostic-YYYYMMDD-HHmm.txt` 要跨机器稳定、能当附件名、按名字就能排出先后，
+   *   所以拼法钉死在本地时区的 `getFullYear` 那几位上；换成 Intl 就是把形状交给某台机器的 locale 数据。
+   *   `formatTime.ts` 那把尺量的是「一段音频有几时几分几秒」，也压根产不出这个形状。
    * 再出现别的文件时得先回答：这是界面读数（改用那把尺），还是别的格式（在这里写清为什么留）。
    */
   it('自己补两位拼时钟的文件只有这几个', async () => {
     expect(await holdersOf(/padStart\(2/)).toEqual([
       'electron/main/services/asr/iflytekAsr.ts',
+      'electron/main/services/diagnosticsService.ts',
       'src/utils/exportTranscript.ts',
       'src/utils/formatTime.ts',
     ])

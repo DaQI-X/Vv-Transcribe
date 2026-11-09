@@ -160,6 +160,45 @@ describe('按形状改写：裸在文本里的凭据、内嵌音频、绝对路�
     expect(redactText('D:\\素材\\2026选题\\嘉宾甲.mp3')).toBe('嘉宾甲.mp3')
   })
 
+  /**
+   * #358 拼诊断包时实测出来的洞：边界名单里原先只有 ASCII 那几种，而这个应用的报错句子是中文——
+   * 「读不出来：/Users/daqi/…」那个全角冒号挨着斜杠，整条路径照抄进盘。
+   * 反面一起钉住：全角冒号后面跟的是**两段**的接口路径时不能顺手毁掉（`basenameOf` 认它没扩展名、
+   * 首段不是目录树的根）。三段以上的 `/v1/chat/completions` 收成 `completions` 是闸门本来就在换的形状
+   * ——它跟在空格后面今天同样被收，不是这趟新添的；真日志里那一句写的是完整 URL（`https://…/v1/…`），不受影响。
+   */
+  it('全角冒号后面的绝对路径也收掉，但两段接口路径照样留着', () => {
+    expect(redactText('读不出来：/Users/daqi/Movies/采访第3期/成片.mp3')).toBe('读不出来：成片.mp3')
+    expect(redactText('本地服务：/tmp/vv-engine.log 找不着')).toBe('本地服务：vv-engine.log 找不着')
+    expect(redactText('接口：/v1/models 返回 404')).toContain('/v1/models')
+    expect(redactText('（详见 /Users/daqi/Desktop/x.mp4）')).toBe('（详见 x.mp4）')
+  })
+
+  it('斜杠当分隔符的中文词表不毁：转写/校对/配音 照原样', () => {
+    expect(redactText('这一档做转写/校对/配音三件事')).toBe('这一档做转写/校对/配音三件事')
+  })
+
+  /**
+   * 盘上的一行是 `JSON.stringify` 之后的整条记录，所以子进程那段多行 stderr 里的换行到盘上只剩
+   * `\n` 两个字，路径前面的字符就成了 `n`——一个字母，正好落在「不收字母当边界」那条保护里。
+   * 本机今天的 app.log 里这种行有 32 条（本地配音引擎 `Ignore OOV '：'` 后面每段都重贴一次编译机路径），
+   * 而诊断包读的正是这种尾部。反面钉住：不能因此把 `n` 单字收成边界，那是 URL 与 `:8010/v1/tts`
+   * 不被吃掉的全部理由。
+   */
+  it('JSON 里那个两字符转义（反斜杠 n）后面紧跟的绝对路径也收掉', () => {
+    expect(redactText("素材读不出来：\\n/Users/daqi/Movies/采访第3期/成片.mp3 找不到")).toBe(
+      '素材读不出来：\\n成片.mp3 找不到'
+    )
+    expect(
+      redactText("Ignore OOV '：'\\n/Users/runner/work/sherpa-onnx/sherpa-onnx/csrc/lexicon.cc:181")
+    ).toBe("Ignore OOV '：'\\nlexicon.cc:181")
+    // 字母挨着斜杠的两种现有写法都不能被这次放宽吃掉
+    expect(redactText('下载失败 https://example.com/Users/daqi/a.mp4 403')).toContain(
+      'https://example.com/Users/daqi/a.mp4'
+    )
+    expect(redactText('连上 127.0.0.1:8010/v1/tts 就行')).toContain('127.0.0.1:8010/v1/tts')
+  })
+
   it('ffprobe 那种多行横幅：路径收掉、尾部那句决定性的话不能因为截断而丢', () => {
     const banner = [
       '无法读取文件信息: ffprobe exited with code 1',

@@ -251,6 +251,8 @@ const api = {
   openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
   openSystemSettings: () => ipcRenderer.invoke('app:openSystemSettings'),
   contactDeveloper: () => ipcRenderer.invoke('app:contactDeveloper'),
+  // 诊断包（#358）：不接任何入参——包里装什么由主进程决定，渲染层连「存到哪」都说了不算
+  exportDiagnostics: () => ipcRenderer.invoke('app:exportDiagnostics'),
 
   // 主进程崩溃兜底推来的一句话（渲染进程还活着才走这条；界面没了它只能弹系统对话框）。
   // 通道名与 electron/main/services/crashWatch.ts 的 ERROR_NOTICE_CHANNEL 是同一串：

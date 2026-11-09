@@ -817,6 +817,20 @@ export interface ElectronAPI {
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
   openSystemSettings: () => Promise<{ success: boolean; error?: string }>
   contactDeveloper: () => Promise<{ success: boolean; email: string; error?: string }>
+  /**
+   * 一键导出诊断包（#358）。不接参数：包里装什么、隐掉什么都由主进程定，
+   * 连「存到哪」都是原生面板问用户，渲染层没有插嘴的地方。
+   * mailError 与 error 分两槽——包写出来了但邮件没起来时，那句话不能说成「导出失败」。
+   */
+  exportDiagnostics: () => Promise<{
+    success: boolean
+    canceled: boolean
+    error: string | null
+    name?: string
+    bytes?: number
+    email: string
+    mailError: string | null
+  }>
 
   openLogDirectory: () => Promise<{ success: boolean; error?: string }>
   openUserDataDirectory: () => Promise<{ success: boolean; error?: string }>
