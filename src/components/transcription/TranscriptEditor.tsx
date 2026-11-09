@@ -7,7 +7,8 @@
  * - 多格式字幕导出（SRT / VTT 字幕、台词表 TSV、TXT、JSON、Markdown）
  * - 一键字幕配音（跳到「字幕配音」工作台，这一段稿子按时间轴铺成一条独立音轨）
  * - 点击段落跳转到对应播放时间点
- * - 整轴平移（表头「轴偏移」那一格，#361 范围①；单段的起止在每一行的时间那格）
+ * - 整轴平移（列表顶上那条轴工具格里的「轴偏移」，#361 范围①）；单段的起止在每一行：
+ *   双击时间那格展开编辑条，或右键这一行走菜单
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
@@ -24,6 +25,7 @@ import { TimelineShift } from './TimelineShift'
 import { ProofreadModeDialog, type ProofreadMode } from './ProofreadModeDialog'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
 import { exportTranscript, getExportExtension } from '@/utils/exportTranscript'
+import { formatSeconds, timelineSpan } from '@/utils/timelineEdit'
 import { checkCorrectionReady, hasCorrectionModel, raiseReadinessBlock } from '@/utils/readiness'
 import { hasLocalProofreadRules, languageLabel } from '@/utils/asrLanguage'
 import { compareWithReference } from '@/utils/referenceComparator'
@@ -129,6 +131,9 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
   }, [activeSegmentId])
 
   const totalChars = segments.reduce((sum, seg) => sum + seg.text.length, 0)
+  // 整轴的两头与段数：这一格读数给的是「这份稿子的轴现在占多长」，逐行编辑一次只看得到一段
+  const axis = timelineSpan(segments)
+  const segmentCount = segments.filter(Boolean).length
 
   const handleExport = async (format: ExportFormat) => {
     const api = getElectronAPI()
@@ -458,11 +463,14 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             onClick={handleProofreadClick}
             disabled={loading}
             className="transcript-editor__correct-btn"
+            // 这一排只有这一颗是实心的主动作；跑起来时标签固定成「校对中…」，
+            // 是哪个模式在跑放 title 和完成那句提示里说（「本地校对完成，共 N 处差异」），
+            // 免得标签从 2 个字变 6 个字把这排按钮推来推去
+            title={loading ? (proofreadMode === 'local' ? '本地校对进行中…' : 'AI 校对进行中…') : '校对'}
           >
             <Pencil size={14} />
-            {loading ? (proofreadMode === 'local' ? '本地校对中…' : 'AI 校对中…') : '校对'}
+            {loading ? '校对中…' : '校对'}
           </button>
-          <TimelineShift />
           <button
             onClick={() => setVoiceTab('voice')}
             disabled={loading}
@@ -476,6 +484,19 @@ export function TranscriptEditor({ onGoHome }: { onGoHome?: () => void }) {
             </button>
           </Dropdown>
         </div>
+      </div>
+
+      {/* 整轴那一格：改轴的两个入口都归到这里，表头只留「办这页的事」那四颗。
+          读数给的是全稿两头（逐行编辑一次只看得到一段），1.1.5 的拆/合/删也挂这条。 */}
+      <div className="transcript-editor__axisbar">
+        <span className="transcript-editor__axisbar-readout">
+          {axis
+            ? `整轴 ${formatSeconds(axis.start)}–${formatSeconds(axis.end)} 秒 · ${segmentCount} 段`
+            : '还没有时间轴'}
+        </span>
+        {/* 这句提示是这一条里唯一可省的（CSS 让它先被挤掉），所以要短到在最窄的读数下也不断句 */}
+        <span className="transcript-editor__axisbar-hint">双击行首时间改起止，右键这一行还有更多</span>
+        <TimelineShift />
       </div>
 
       <div className="transcript-editor__segments">

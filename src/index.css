@@ -1653,7 +1653,7 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   gap: 8px;
 }
 
-/* 表头按钮（返回首页/上传参考/校对/导出）文字不折行，宁可整组换行也不压字 */
+/* 表头按钮（返回首页/上传参考/校对/字幕配音/导出）文字不折行，宁可整组换行也不压字 */
 .transcript-editor__header button {
   white-space: nowrap;
 }
@@ -1718,7 +1718,40 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--brand-blue);
 }
 
+/* 这一排唯一的实心主动作。最小宽度按跑起来那句「校对中…」留：
+   文案从 2 个字变 4 个字会把右边几颗推来推去，整排跟着抖 */
 .transcript-editor__correct-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 104px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: none;
+  background: var(--brand-blue);
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  cursor: pointer;
+  transition: var(--app-transition);
+  font-family: var(--font-sans);
+}
+
+.transcript-editor__correct-btn:hover:not(:disabled) {
+  background: var(--brand-blue-hover);
+}
+
+.transcript-editor__correct-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 三个次要动作共用一套外观（上传参考 / 字幕配音 / 导出）：一排水蓝框挤在一起就是蓝墙，
+   所以表头只留校对那颗实心，其余收成描边，导出原来那层渐变也一起收了 */
+.transcript-editor__ref-btn,
+.transcript-editor__voice-btn,
+.transcript-editor__export-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1734,35 +1767,45 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   font-family: var(--font-sans);
 }
 
-.transcript-editor__correct-btn:hover {
+.transcript-editor__ref-btn:hover:not(:disabled),
+.transcript-editor__voice-btn:hover:not(:disabled),
+.transcript-editor__export-btn:hover {
   background: rgba(27, 85, 245, 0.12);
 }
 
-.transcript-editor__correct-btn:disabled {
+.transcript-editor__ref-btn:disabled,
+.transcript-editor__voice-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-.transcript-editor__export-btn {
+/* 列表顶上那条轴工具条：整轴读数 + 「轴偏移」。
+   放在列表这一侧而不是表头，因为改轴和看轴是同一件事的两头——读数就在待改的那几百行上面。
+   1.1.5 的拆/合/删也挂这条。 */
+.transcript-editor__axisbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 10px;
-  border: none;
-  background: linear-gradient(135deg, var(--brand-blue) 0%, var(--brand-teal) 100%);
-  font-size: 14px;
-  font-weight: 500;
-  color: #fff;
-  cursor: pointer;
-  transition: var(--app-transition);
-  font-family: var(--font-sans);
-  box-shadow: 0 2px 8px rgba(27, 85, 245, 0.2);
+  gap: 12px;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--border-color);
 }
 
-.transcript-editor__export-btn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(27, 85, 245, 0.3);
+.transcript-editor__axisbar-readout {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 提示语是这一条里最可省的：窄窗口下先让它挤掉，读数与那颗按钮不许换行 */
+.transcript-editor__axisbar-hint {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .transcript-editor__segments {
@@ -1854,14 +1897,25 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 /* ============================================
- * 时间轴编辑（#361）：单段起止那格气泡 + 表头「轴偏移」
+ * 时间轴编辑（#361）：单段起止的展开条 + 轴工具条里那颗「轴偏移」
  * 两格的输入都是「秒」这个纯数字，不是时码：见 src/utils/timelineEdit.ts 顶上那段说明。
  * ============================================ */
+
+/* 编辑条展开在这一行底下，跟差异面板同一个位置（不浮在行上挡着上下行） */
+.segment-row__strip {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  /* 行本身 cursor:pointer，展开条里要能划选文字，别把指针带进来 */
+  cursor: default;
+}
+
 .time-editor {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 232px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
 }
 
 .time-editor__field {
@@ -1878,8 +1932,6 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 
 .time-editor__input,
 .axis-shift__input {
-  flex: 1;
-  min-width: 0;
   height: 28px;
   padding: 0 8px;
   border: 1.5px solid var(--border-color);
@@ -1889,6 +1941,17 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   font-family: var(--font-mono);
   font-size: 13px;
   outline: none;
+}
+
+/* 展开条里两格是固定宽（秒数最长也就 8 位），轴偏移那一格跟着气泡宽度走 */
+.time-editor__input {
+  flex: none;
+  width: 84px;
+}
+
+.axis-shift__input {
+  flex: 1;
+  min-width: 0;
 }
 
 .time-editor__input:focus,
@@ -1914,11 +1977,12 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--brand-blue);
 }
 
+/* 读数 + 取消/保存挤在这一行的右端；窄窗口下整组跟着上面两格一起换行 */
 .time-editor__foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  margin-left: auto;
 }
 
 /* 这行是「你填的数在界面上会读成什么」——数字填进去、时钟读出来，两边对得上才敢保存 */
@@ -3587,56 +3651,8 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   background: rgba(237, 53, 53, 0.1);
 }
 
-.transcript-editor__ref-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--brand-blue);
-  background: rgba(27, 85, 245, 0.06);
-  color: var(--brand-blue);
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.2s;
-  font-family: var(--font-sans);
-}
-.transcript-editor__ref-btn:hover {
-  background: rgba(27, 85, 245, 0.12);
-}
-.transcript-editor__ref-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* 配音与校对同级：描边按钮，不进主 CTA 的渐变（导出才是这一排的主动作） */
-.transcript-editor__voice-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--brand-blue);
-  background: rgba(27, 85, 245, 0.06);
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--brand-blue);
-  cursor: pointer;
-  transition: var(--app-transition);
-  font-family: var(--font-sans);
-}
-
-.transcript-editor__voice-btn:hover {
-  background: rgba(27, 85, 245, 0.12);
-}
-
-.transcript-editor__voice-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* 轴偏移：这一排里它是唯一「常驻的小工具」，其余几格都是点了就办事的动作。
-   描边收成中性灰，免得整排五个蓝框挤成一堵蓝墙；hover 才回品牌色。 */
+/* 轴偏移：已经从表头那排按钮搬进段落列表顶部的工具条。
+   在那儿它左边是一串只读的轴读数，不是一颗动作按钮，所以描边继续收中性灰、hover 才回品牌色。 */
 .transcript-editor__axis-btn {
   display: flex;
   align-items: center;
@@ -3956,6 +3972,50 @@ input, textarea, [contenteditable="true"] { user-select: text; }
 }
 
 .custom-dropdown__item:hover {
+  background: var(--bg-hover);
+}
+
+/* 右键菜单：与导出那排的下拉同一套皮（同宽同圆角同 hover 底色），差别只在它是按鼠标点定位的。
+   键盘上下键选中的那一项用 --active 而不是 :hover 上色：focus 在容器上，不在各个 button 上。 */
+.context-menu {
+  position: fixed;
+  z-index: 502;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  border: 1px solid var(--border-color);
+  animation: popover-in 0.15s ease;
+  outline: none;
+}
+
+.context-menu__item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+}
+
+.context-menu__item--active {
+  background: var(--bg-hover);
+}
+
+.context-menu__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.context-menu__item--active:hover {
   background: var(--bg-hover);
 }
 
@@ -4280,15 +4340,19 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   color: var(--success-color);
 }
 
+/* 深色下三颗描边按钮收成中性灰（浅色的那层蓝底在黑底上发灰）。
+   校对那颗不在这里：它和首页「开始转写」、播放器那颗圆钮一样是两个主题都保持实心的主动作。 */
 :root[data-theme="dark"] .transcript-editor__ref-btn,
-:root[data-theme="dark"] .transcript-editor__correct-btn {
+:root[data-theme="dark"] .transcript-editor__voice-btn,
+:root[data-theme="dark"] .transcript-editor__export-btn {
   background: var(--bg-hover);
   color: var(--text-primary);
   border-color: var(--border-color);
 }
 
-:root[data-theme="dark"] .transcript-editor__ref-btn:hover,
-:root[data-theme="dark"] .transcript-editor__correct-btn:hover {
+:root[data-theme="dark"] .transcript-editor__ref-btn:hover:not(:disabled),
+:root[data-theme="dark"] .transcript-editor__voice-btn:hover:not(:disabled),
+:root[data-theme="dark"] .transcript-editor__export-btn:hover {
   background: var(--bg-page);
   border-color: var(--brand-blue);
 }
