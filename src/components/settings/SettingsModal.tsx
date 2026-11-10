@@ -111,6 +111,15 @@ interface SettingsValues {
    */
   asrEngineAuth: string
   /**
+   * 本机 agent 入口（#376 的门面 + #375 的 `vv` 命令行）开不开。`on` | `off`，默认关。
+   * 1.2.1 #385 起这一格进界面了——它决定的是**一种用法**（让本机另一个进程／AI 客户端来调这个应用），
+   * 不是某个技术参数，所以「没有可决定内容的开关不进界面」那条不适用：不放出来，普通用户永远不知道
+   * 还可以这样用。这一格只在 macOS 出现，因为 `vv` 那层只随 mac 安装包交付（Windows 要的是 .cmd，
+   * 本机没有能验它的机器）。点「保存设置」当场起停，不用重启（`settings:save` 在主进程侧拉齐）。
+   * 端口与 token 不在这一份里、也绝不进渲染层：界面只负责开关本身。
+   */
+  agentApi: string
+  /**
    * 配音走哪一档，以及本地档用哪一款模型（连同它下面的默认音色编号）。
    * 云端档的四项凭据（厂商／地址／Key／配音模型）不在这里：它们属于某一条方案，见 `PROFILE_CAP_SPEC.tts`。
    * 厂商这一格 1.1.1 起才进方案——它决定这次发的请求长什么样，所以跟地址一样是「这一套是哪家」的一部分，
@@ -137,6 +146,7 @@ const DEFAULT_VALUES: SettingsValues = {
   asrLocalModel: 'base',
   asrLanguage: 'zh',
   asrEngineAuth: 'require',
+  agentApi: 'off',
   ttsEngine: 'cloud',
   ttsLocalEngine: '',
   ttsLocalVoice: '',
@@ -144,20 +154,30 @@ const DEFAULT_VALUES: SettingsValues = {
 
 /**
  * 全局段那几个字段：表单开合时按这份名单从脱敏视图里回填（保存发的是整份 `values`，见 handleSave）。
- * 它比屏幕上摊开的那几格多两项。`ttsLocalVoice` 在 1.1.0 之后没有对应的格子（音色是「这一批听哪一个」，
+ * 它比屏幕上摊开的那几格多几项：`ttsLocalVoice` 在 1.1.0 之后没有对应的格子（音色是「这一批听哪一个」，
  * 入口只剩配音页），但换本地模型时仍要把它归回第一个——磁盘上那份默认编号得跟着档位走，配音页起手读的就是它。
- * `asrEngineAuth` 也没有格子（#353：这一项不值得让用户做一次决定），但仍要留在这份名单里：保存发的是整份
- * `values`，没回填的键会带着 `DEFAULT_VALUES` 那个 `require` 一起发出去，于是每一次界面保存都会把排查时
- * 手改进磁盘的那个 `off` 抹掉——那是「配了但没生效」的反面，改了却不留。
+ * `asrEngineAuth` 也没有格子（#353：这一项不值得让用户做一次决定）。`agentApi` 从 #385 起有格子，
+ * 但只在 macOS 出现，所以在 Windows／Linux 上它退回「没有格子那一项」。
+ * 没有格子的键**照样都得留在这份名单里**：保存发的是整份 `values`，没回填的键会带着 `DEFAULT_VALUES`
+ * 那个值一起发出去，于是每一次界面保存都会把排查时手改进磁盘的那个 `off` 抹掉——那是「配了但没生效」的
+ * 反面，改了却不留。`agentApi` 被这样抹掉的代价更大一点：非 mac 上磁盘手改的 `on` 会被一次无关的保存
+ * 盖回 `off`，于是那台机器上的门面永远起不来，而这件事没有任何人会来报告。
  */
 const GLOBAL_VALUE_KEYS: (keyof SettingsValues)[] = [
   'asrProvider',
   'asrLocalModel',
   'asrLanguage',
   'asrEngineAuth',
+  'agentApi',
   'ttsEngine',
   'ttsLocalEngine',
   'ttsLocalVoice',
+]
+
+/** 本机 agent 入口那一格的两条选择。值只有这两个，别的（手改拼错的）主进程一律当关 */
+const AGENT_API_OPTIONS: { value: string; label: string }[] = [
+  { value: 'off', label: '关（默认）' },
+  { value: 'on', label: '开' },
 ]
 
 /**
@@ -356,6 +376,12 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   /** 导出诊断包（#358）在跑的那一会儿：中间要弹一次原生保存面板，重复点会叠出第二扇 */
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
   const api = getElectronAPI()
+  /**
+   * 平台读的是 preload 带出来的那一份，不嗅 userAgent（同一类误判在开屏页上已经赔过一次）。
+   * 「本机 agent 入口」那一格只在这一个平台出现：`vv` 那层只随 mac 安装包交付（electron-builder
+   * 的 extraResource 按 darwin 分支），在没有那层的地方给出这格，就是许下一个装不出来的承诺。
+   */
+  const isMac = api?.platform === 'darwin'
   const { theme, setTheme } = useThemeStore()
 
   // 主题只在点保存后才落到 store，所以「改了没存」拿 store 当前值和表单值比。
@@ -865,6 +891,15 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         toast.success('设置已保存，本地引擎已按新档位重启')
       } else {
         toast.success('设置已保存')
+      }
+      // 门面这件事单独一条，不并进上面那句：一句里塞两件事就会漏一种（既换档位又切开关那一次，
+      // 谁被吞掉都不显眼）。agentNote 那条是「磁盘上存对了、门面没起来」，必须盖过成功那句——
+      // 用户下一步就是去终端敲 vv，红着报错比一句含糊的「已保存」有用。
+      if (result?.agentApi === 'on') {
+        if (result.agentNote) toast.error(result.agentNote, 12000)
+        else toast.success('本机 agent 入口已打开，命令行和 MCP 客户端现在能连上这个应用了', 8000)
+      } else if (result?.agentApi === 'off') {
+        toast.success('本机 agent 入口已关闭，那个监听端口和它的凭据都收回了', 8000)
       }
     } catch {
       toast.error('保存失败')
@@ -1386,8 +1421,10 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    * 这个 Tab 上还有没有「右下角那颗保存设置」写得到的字段。
    * 校对一档从第⑧步起一个全局字段都没有（服务商／地址／Key／模型四格全住在弹窗里，当场落盘），
    * 那里再留一颗按钮，点下去弹的是「设置已保存」——而盘上什么都没变。
+   * 关于页从 #385 起按平台分叉：macOS 上那一格「本机 agent 入口」走的就是这颗按钮（保存即生效，
+   * 不用重启），所以那里要有；另外两个平台那一格根本不出现，于是「什么都没得保存」的旧判断继续成立。
    */
-  const hasPanelFields = tab !== 'about' && tab !== 'ai'
+  const hasPanelFields = tab !== 'ai' && (tab !== 'about' || isMac)
 
   return (
     <div className="settings-overlay" onClick={requestClose}>
@@ -1864,6 +1901,32 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   清掉不影响已经配好的音轨和历史记录，只是下一批要重新调接口
                 </span>
               </div>
+
+              {/* 只在 mac 出现：门面三平台都能起，但 `vv` 那层只随 mac 安装包交付，
+                  在没有它的平台上摆这一格就是许一个装不出来的承诺（见 electron-builder.cjs 的 darwin 分支）。 */}
+              {isMac && (
+                <div className="settings-form-group">
+                  <label className="settings-form-label">本机 agent 入口</label>
+                  <select
+                    className="settings-form-select"
+                    value={values.agentApi}
+                    onChange={(e) => setValues((prev) => ({ ...prev, agentApi: e.target.value }))}
+                  >
+                    {AGENT_API_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="settings-form-hint">
+                    开＝这台机器上的另一个进程也能把音频交给这个应用转写、拿回字幕：终端里的「vv」命令和
+                    接了 MCP 的 AI 客户端走的就是这一条。边界四条：只监听本机（127.0.0.1，局域网里别人连不进来）；
+                    每次运行一枚随机口令，存在上面「本机数据」那个目录里的一个私有文件，界面上不显示、
+                    也不进诊断包，应用退出就删掉；从这个入口出去的只有文件路径、语言和「用哪一套配置」，
+                    API Key 一个字节都不经过它；关着的时候那个端口根本不存在。点「保存设置」当场生效，不用重启
+                  </span>
+                </div>
+              )}
 
               <div className="settings-form-group">
                 <label className="settings-form-label">帮助文档</label>

@@ -707,12 +707,18 @@ export interface ElectronAPI {
    * saveError 非 null 时这次压根没写进磁盘，界面必须留在原状（不许清空 Key 输入框、不许报已保存）。
    * settings 为 null 是更坏的一档：连脱敏视图都没读出来，界面不许据此把密钥状态标成「全是 none」。
    * 密钥字段按「留空＝不改、null＝清除、非空＝替换」处理，返回值同样是脱敏视图。
+   * agentApi 回的是「这次保存有没有切本机 agent 入口的开关」，不是端口也不是 token——
+   * 那两样绝不跨 IPC（#376）；界面只按它决定多说一句「已打开／已关闭」。
+   * agentNote 非 null 时开关切了但门面没按预期起来，这一句必须让用户看见（磁盘上那份已经是对的，
+   * 所以它不借 saveError 那条路走）。
    */
   saveSettings: (settings: Record<string, unknown>) => Promise<{
     settings: Record<string, unknown> | null
     tierRestart: 'not-needed' | 'done' | 'busy' | 'failed'
     error: string | null
     saveError: string | null
+    agentApi: 'unchanged' | 'on' | 'off'
+    agentNote: string | null
   }>
   /**
    * `profileId`＝这一腿正在编辑哪一套方案。表单里 Key 留空时主进程要回落到已保存的那把，

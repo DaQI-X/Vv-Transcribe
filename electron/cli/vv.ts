@@ -84,8 +84,9 @@ export const USAGE = `用法：
   vv --help
   vv --version
 
-transcribe 走的是本机那个 Vv Transcribe 应用：先把应用开着，并在 settings.json 根上把
-agentApi 设成 "on"（改完要重启应用）。开关默认是关的——这一步决定本机多不多一个监听端口。
+transcribe 走的是本机那个 Vv Transcribe 应用：先把应用开着，再在设置「关于与更新」里把
+「本机 agent 入口」打开（点「保存设置」当场生效，1.2.1 起不用重启；老办法手改 settings.json
+根上那行 "agentApi": "on" 一样认）。开关默认是关的——这一步决定本机多不多一个监听端口。
 不写 -o 就把结果打到 stdout，所以 vv transcribe x > x.srt 也是通的（进度在 stderr，不脏管道）。
 
 check 判一份字幕文件上不了得上屏，跟应用开没开着无关：跑的是界面里那同一份校验器，不碰门面也不读 token。
@@ -644,7 +645,9 @@ export function toolSpecs(): Record<string, unknown>[] {
       name: 'transcribe',
       description:
         '把一份素材交给本机那个 Vv Transcribe 应用转写，回来的是 `vv transcribe` 打出的那份文本。'
-        + '要应用开着、settings.json 根上有 "agentApi": "on"：这一把走的正是应用那侧的门面与 token，壳里没有第二套凭据。',
+        + '要应用开着、且设置「关于与更新」里的「本机 agent 入口」是开的（点「保存设置」当场生效；'
+        + '老办法 settings.json 根上那行 "agentApi": "on" 一样认）。'
+        + '这一把走的正是应用那侧的门面与 token，壳里没有第二套凭据。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -953,8 +956,9 @@ function asSegments(list: { startTime: number; endTime: number; text: string }[]
  */
 function explainEndpoint(endpoint: AgentEndpointRead, dir: string): string {
   if (endpoint.status === 'missing') {
-    return `这里没有 agent-api.json（${dir}）。两种可能：Vv Transcribe 没在跑，或者它跑的时候 agentApi 开关是关的——`
-      + '后者要在 settings.json 根上加一行 "agentApi": "on" 并重启应用（这一步决定本机开不开那个监听端口，所以默认是关）'
+    return `这里没有 agent-api.json（${dir}）。两种可能：Vv Transcribe 没在跑，或者它跑的时候「本机 agent 入口」是关的——`
+      + '后者去设置「关于与更新」那一格打开，点「保存设置」当场生效（1.2.1 起不用重启；'
+      + '磁盘上 settings.json 根上那行 "agentApi" 仍然认）。这一格默认是关的，因为它决定本机开不开那个监听端口'
   }
   if (endpoint.status === 'invalid') {
     return `agent-api.json 读不懂：${endpoint.reason}（在 ${dir}）。`

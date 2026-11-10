@@ -110,7 +110,7 @@ vv check 交付.srt --preset broadcast-cn --fps 25  # 判，跟应用开没开�
 
 实现只有四个方法（`initialize` / `ping` / `tools/list` / `tools/call`，通知不回话）和三把 tool。**壳里零逻辑**：`transcribe` 和 `check` 转回同一条 `vv` 子命令，`export` 调的就是界面导出那一个函数（`exportTranscript`）。所以 agent 拿到的结论和人在终端里敲出来的一字不差，不存在第二套判据。
 
-- `transcribe`：`{ file, format?, language?, profileId? }`。要应用开着、且 `settings.json` 根上有 `"agentApi": "on"`（改完重启应用）。**这一步决定本机多一个只绑 127.0.0.1 的监听口**，默认关。
+- `transcribe`：`{ file, format?, language?, profileId? }`。要应用开着、且设置「关于与更新」里那颗「本机 agent 入口」是开的（点「保存设置」当场生效；手改 `settings.json` 根上那行 `"agentApi": "on"` 一样认）。**这一步决定本机多一个只绑 127.0.0.1 的监听口**，默认关。
   ⚠️ 走哪一档转写取的是**应用当时的设置**：选了云端方案，素材照旧发给那家服务商，CLI 不会比界面更本地。
 - `check`：`{ file, preset?, fps? }`，回整份报告：`findings` 一条不少（L2 那条的 `message` 尾巴已经拼上「—— 依据〈cite〉」），跑过哪几条在 `checked`，阈值与完整出处在 `preset.rules`，关掉的连同为什么关掉在 `skipped`。等于 `vv check --json`。**判出红不是这把失败**——红不红看报告里的 `exitCode`，`isError` 只给「活儿没干成」（读不到文件、档位用不了、参数不合法）。
 - `export`：`{ segments, format? }`，`segments` 每项 `{startTime, endTime, text}`，时间是**秒**。`transcribe` 那把 `format=json` 出来的直接能用（多出来的 `isEdited`/`isCorrected` 被忽略）。

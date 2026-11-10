@@ -674,7 +674,11 @@ describe('真启动：开关、监听与凭据文件', () => {
 
     const result = await startAgentFacade()
     expect(result.listening).toBe(false)
-    expect(result.reason).toContain('开关是 off')
+    expect(result.reason).toContain('读出来是 off')
+    // 这一句会被 settings:save 拼成给用户看的 agentNote，所以它得指出该去哪一格看——只说「off」是把排查
+    // 推回文档；同时它不许带端口或 token（#385 那条「渲染层只拿到开关」的边界）
+    expect(result.reason).toContain('关于与更新')
+    expect(result.reason).not.toMatch(/\d{4,5}/)
     expect(await readAgentEndpoint(dir)).toStrictEqual({ status: 'missing' })
   })
 
@@ -748,18 +752,39 @@ describe('结构判据：写在注释里的规矩得有机械判式', () => {
     expect(source).not.toMatch(/agent-api|agentEndpoint|AGENT_ENDPOINT/)
   })
 
-  it('开关只在磁盘上：起与停都挂在应用生命周期上，且收监听排在收引擎之前', async () => {
-    // 「没有可决定内容的开关不进界面」在这层的落点：值来自磁盘（loadSettings），重启才重读
+  it('起停挂在两处：应用生命周期，加上保存时主进程侧那一次拉齐', async () => {
+    // 启动开 + 退出关（退出顺序那条判式在下面）
     const index = code(await read('electron/main/index.ts'))
     expect(index).toMatch(/startAgentFacade\(\)/)
     const quit = index.slice(index.indexOf("app.on('before-quit'"))
     expect(quit).toMatch(/stopAgentFacade\(\)/)
     // 网络边界先关：引擎还活着的时候不该还有一个能收文件路径的端口开着
     expect(quit.indexOf('stopAgentFacade')).toBeLessThan(quit.indexOf('stopASRService'))
+    // #385：保存即生效走的是 `settings:save` 里主进程自己拉齐，**不新开 IPC 通道**——
+    // 新开一条「把门面打开」的通道，下一步就是有人往里塞端口和 token
+    const handlers = code(await read('electron/main/ipc/settingsHandlers.ts'))
+    expect(handlers).toMatch(/startAgentFacade\(\)/)
+    expect(handlers).toMatch(/stopAgentFacade\(\)/)
+    expect(await read('electron/preload/index.ts')).not.toMatch(/AgentFacade|agent-api/)
   })
 
-  it('渲染层里搜不到 agentApi：这一项不是一条 UI 通道', async () => {
-    expect(await readTree('src')).not.toMatch(/agentApi/)
+  it('键可以进界面，凭证与端口读数永远不许进渲染层', async () => {
+    // #385 把这一项从「只在磁盘」换成了「界面上有一格」：它决定的是**一种用法**（让本机另一个进程
+    // 或 AI 客户端来调这个应用），不是一个技术参数——按旧判式藏起来，代价是普通用户永远不知道还能这样用。
+    // 换掉的只是「可发现性」这一半，凭证那一半的边界必须还在，所以两头都钉：
+    // ① 进了 `SettingsValues` 就必须同时进回填名单：保存发的是整份 values，漏一个键就等于
+    //    每一次界面保存都把磁盘上那个 on 盖回默认——非 mac 上没有那一格，那里只会更隐蔽。
+    const modal = await read('src/components/settings/SettingsModal.tsx')
+    const keys = /const GLOBAL_VALUE_KEYS[^\n]*\n([\s\S]*?)\n\]/.exec(modal)
+    expect(keys?.[1] ?? '').toMatch(/'agentApi'/)
+    // ② 渲染层整棵树里不许出现凭据文件名、它的读写模块，或任何端口／token 的读数
+    const tree = await readTree('src')
+    expect(tree).not.toMatch(/agent-api\.json|agentEndpoint|AGENT_ENDPOINT/)
+    expect(tree).not.toMatch(/agentToken|agentPort|AddressInfo/)
+    // ③ 这一格只在 mac 渲染：门面三平台都能起，但 `vv` 只随 mac 安装包交付（electron-builder.cjs 的
+    //    darwin 分支），在没有它的平台上摆一颗开关＝许一个装不出来的承诺。判式只认「isMac 那个块里
+    //    确实包着这格」，所以把门拆掉会红，在别处新加一格不会。
+    expect(code(modal)).toMatch(/\{isMac && \([\s\S]{0,400}?values\.agentApi/)
   })
 })
 

@@ -18,8 +18,10 @@ import {
   setDefaultProfile,
   normalizeLocalModel,
   normalizeTtsEngine,
+  normalizeAgentApi,
   SettingsProfileRuleError,
   SettingsWriteBlockedError,
+  type AgentApiMode,
   type LocalModelTier,
   type ProfileCreateInput,
   type ProfilesView,
@@ -39,11 +41,19 @@ import {
   type TestOutcome,
 } from '../services/connectionTestService'
 import { normalizeTtsVendor, ttsVendorNeedsVoice } from '../services/ttsVendor'
+import { startAgentFacade, stopAgentFacade } from '../services/agentFacade'
 import { logger } from '../services/logger'
 import { ipcHandle } from './guard'
 
 /** 保存档位改动后，本地引擎要不要重启、有没有重启成功 */
 export type TierRestartOutcome = 'not-needed' | 'done' | 'busy' | 'failed'
+
+/**
+ * 这次保存有没有把「本机 agent 入口」的开关切过去。
+ * `unchanged` 时界面一句别说：不这么分的话，每次保存——包括只改了转写语言那种——都会报一遍
+ * 「已打开」，而那既不是这次做的事，也是门面本来就在听的那一种情况的假话。
+ */
+export type AgentApiChange = 'unchanged' | 'on' | 'off'
 
 export interface SaveSettingsResult {
   /** null＝连脱敏视图都没读出来（配置坏了或目录权限掉了）；界面按「不知道密钥状态」处理，不许当成「全是 none」 */
@@ -57,6 +67,14 @@ export interface SaveSettingsResult {
    * 就是当面撒慌——而磁盘上那份配置还是旧的（甚至一份都没有）。
    */
   saveError: string | null
+  /** 本次保存切了本机 agent 入口没有；只报告开关，不回端口，也不回 token */
+  agentApi: AgentApiChange
+  /**
+   * 开关切过去了、但门面没能按预期起来时那句要给用户看的原因；null＝不用多说。
+   * 这一步挂了**不算**保存失败（磁盘上那份是对的），所以它不能借 `saveError` 那条路出去——
+   * 走那条会让界面留着表单、报「没能写入」，而配置其实已经落盘了。
+   */
+  agentNote: string | null
 }
 
 /**
@@ -75,6 +93,47 @@ async function applyTierChange(before: LocalModelTier, after: LocalModelTier): P
 const TIER_RESTART_MESSAGE: Partial<Record<TierRestartOutcome, string>> = {
   busy: '档位已保存，但有转写正在跑，重启引擎会中断它。等这次转写结束后点「重启本地引擎」，新档位才会生效',
   failed: '档位已保存，但本地引擎没能自动重启。点「重启本地引擎」再试一次，成功后新档位才生效',
+}
+
+/**
+ * 本机 agent 入口（#376）的开关跟着这次保存当场起停（#385）。
+ *
+ * 为什么在主进程侧做而不是加一条 IPC：门面开的是「别的进程能不能连进来」那道口，
+ * 渲染层点一下就能改的口子不该由渲染层来管——它只要把值交给 `settings:save`，
+ * 起与停、凭据文件、监听收回全在这一侧。加通道会多出「界面那侧要能拿到端口或 token」的诱惑，
+ * 而那两样正是绝不跨 IPC 的东西。
+ *
+ * 三条规矩：
+ * 1. **只在值真的变了时动手**：不这么分就会出现「保存了一次转写语言，门面被重启一遍」，
+ *    而重启意味着换 token、掐断正在流式输出的那一单作业。
+ * 2. **这一步失败不改成保存失败**：磁盘上那份已经写对了，报 `saveError` 会让界面留着表单、
+ *    说「没能写入」，用户再点一次还是同一个结果——那句是假的。它走 `agentNote`。
+ * 3. **不起第二份监听**：`startAgentFacade` 自己幂等（已经在听就直接回），这里不重复判。
+ */
+async function applyAgentFacadeChange(
+  before: AgentApiMode,
+  after: AgentApiMode
+): Promise<{ change: AgentApiChange; note: string | null }> {
+  if (before === after) return { change: 'unchanged', note: null }
+  try {
+    if (after === 'on') {
+      const started = await startAgentFacade()
+      return {
+        change: 'on',
+        note: started.listening
+          ? null
+          : `设置已写入，但本机 agent 入口没能打开：${started.reason}`,
+      }
+    }
+    await stopAgentFacade()
+    return { change: 'off', note: null }
+  } catch (err) {
+    // 起停本身炸了（监听收不回去、凭据文件写不下去之外的意外）也要说得出为什么，
+    // 但不许把它冒成「设置没写进去」
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error('Settings', 'agent facade change failed', message)
+    return { change: after, note: `设置已写入，但本机 agent 入口的开关没能切换（${message}）` }
+  }
 }
 
 /** 密文解不开＝这台机器读不出那把 Key（换过电脑或系统密钥库被清过）；说「还没填」会让人以为是自己漏填 */
@@ -202,20 +261,43 @@ export function registerSettingsHandlers() {
       patch: SettingsPatch
     ): Promise<SaveSettingsResult> => {
       try {
-        const before = normalizeLocalModel((await loadSettings()).asrLocalModel)
+        const previous = await loadSettings()
+        // 这两样都是「全局段」的字段，不待在任何一条方案里，所以 before/after 都重新
+        // load 一次磁盘值来比，不能拿「这次写进去的是哪条方案」来推：只改凭据的保存动不到这两个值，
+        // 档位没变却重启一次、还说「新档位才会生效」，就是把用户的好几次转写白白打断了；
+        // agentApi 同理——不动它却起停一次，等于每次保存都在换 token、掐断正在流式输出的那一单
+        const before = normalizeLocalModel(previous.asrLocalModel)
+        const beforeAgent = normalizeAgentApi(previous.agentApi)
         const saved = await saveSettings(patch)
-        // 档位是全局段那一份 `asrLocalModel`，不待在任何一条方案里，所以 before/after 都重新
-        // load 一次磁盘值来比，不能拿「这次写进去的是哪条方案」来推：只改凭据的保存动不到这个值，
-        // 档位没变却重启一次、还说「新档位才会生效」，就是把用户的好几次转写白白打断了
-        const after = normalizeLocalModel((await loadSettings()).asrLocalModel)
+        const next = await loadSettings()
+        const after = normalizeLocalModel(next.asrLocalModel)
+        const afterAgent = normalizeAgentApi(next.agentApi)
         const tierRestart = await applyTierChange(before, after)
-        return { settings: saved, tierRestart, error: TIER_RESTART_MESSAGE[tierRestart] ?? null, saveError: null }
+        // 排在档位重启之后：两次都要动本地那台引擎，先把引擎按新档位拉起来再开那道口。
+        // 反过来的话新开的门面会先把旧引擎接住，紧接着那次重启把它正在流的作业掐断。
+        const facade = await applyAgentFacadeChange(beforeAgent, afterAgent)
+        return {
+          settings: saved,
+          tierRestart,
+          error: TIER_RESTART_MESSAGE[tierRestart] ?? null,
+          saveError: null,
+          agentApi: facade.change,
+          agentNote: facade.note,
+        }
       } catch (err) {
         // 写盘失败要说得出为什么，还要把界面上那份（没存进去的）视图原样回给它，
         // 否则渲染层会照着默认值重画一遍表单、把用户刚填的清空
         const saveError = saveErrorMessage(err)
         logger.error('Settings', 'settings:save did not reach the disk', saveError)
-        return { settings: await viewForFailure(), tierRestart: 'not-needed', error: null, saveError }
+        // 写盘都没成，就更不该去动门面：那一下会把「磁盘上还是旧值」变成「旧值 + 一个不该开的端口」
+        return {
+          settings: await viewForFailure(),
+          tierRestart: 'not-needed',
+          error: null,
+          saveError,
+          agentApi: 'unchanged',
+          agentNote: null,
+        }
       }
     },
     // 走到这里的是连兜底都读不出设置视图的情况（配置文件坏了、目录权限掉了）：
@@ -225,6 +307,8 @@ export function registerSettingsHandlers() {
       tierRestart: 'not-needed' as const,
       error: null,
       saveError: `设置没能写入（${message}）。界面上填的内容还在，不用重填`,
+      agentApi: 'unchanged' as const,
+      agentNote: null,
     })
   )
 

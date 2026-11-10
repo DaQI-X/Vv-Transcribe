@@ -11,9 +11,11 @@
  * 经过这个 HTTP 端口——出去的只有 `file / language / profileId`，回来的是段落。
  *
  * 五条不许松的约束，分别长在哪：
- * 1. **默认关**：`settings.agentApi`（磁盘手改，界面上没格子）经 `normalizeAgentApi` 读成
- *    `'on' | 'off'`，白名单外的值一律 `'off'`（fail-closed：这一项的失败方向是「多开了一个端口」，
- *    而多开一个端口没有任何人会来报告）。改完要重启应用才重读，与 `asrEngineAuth` 同口径。
+ * 1. **默认关**：`settings.agentApi` 经 `normalizeAgentApi` 读成 `'on' | 'off'`，白名单外的值一律
+ *    `'off'`（fail-closed：这一项的失败方向是「多开了一个端口」，而多开一个端口没有任何人会来报告）。
+ *    #385 起这一格在设置「关于与更新」里（只有 macOS 出现，因为 `vv` 只随 mac 安装包交付），
+ *    **保存即生效**：启动时读一次磁盘，之后由 `settings:save` 在主进程侧当场起或停。
+ *    这一条与 `asrEngineAuth` 从此不同口径——那个仍是磁盘手改 + 重启生效，因为它没有可决定的内容。
  * 2. **只绑 127.0.0.1**：地址是写死的常量，不读配置、也不写 `localhost`——`localhost` 在现代解析里
  *    可能先给 `::1`，那一半就是「整台机器的 IPv6 监听」，#353 定的就是这条。端口给 0 让 OS 挑，
  *    所以端口每次运行都可能不同，必须与 token 一起落盘（`agentEndpoint.ts`）。
@@ -428,8 +430,12 @@ export function createFacadeHandler(deps: FacadeDeps): (req: FacadeRequest, res:
 let server: Server | null = null
 
 /**
- * 开关为 on 才监听。返回「这次到底开没开 + 为什么」，让调用方（`main/index.ts`）能把那句落到日志里——
- * 这一趟最难的排障场景是「设置里改了却没生效」，而它的正确答案多半是「忘了重启」或「值拼错了」。
+ * 开关为 on 才监听。返回「这次到底开没开 + 为什么」：启动时那一句落进日志（`main/index.ts`），
+ * 保存时那一句是要给用户看的（`settings:save` 把它拼成 agentNote）——所以这句话里不许有绝对路径、
+ * 端口或 token，只许有「为什么没开」这个原因本身。
+ *
+ * 幂等：已经在听就回 `listening: true`，重复调用（比如保存了一趟别的字段）不会换 token、
+ * 也不会把正在流式输出的那一单作业打断。
  */
 export async function startAgentFacade(): Promise<{ listening: boolean; reason: string }> {
   if (server) return { listening: true, reason: '已经在听了' }
@@ -442,7 +448,10 @@ export async function startAgentFacade(): Promise<{ listening: boolean; reason: 
     // 下次那个端口可能已经归了别的程序，CLI 会连上一个不是这个应用的服务
     const detail = await clearAgentEndpoint(dir)
     if (detail) logger.warn(TAG, 'Stale endpoint file could not be removed', detail)
-    return { listening: false, reason: `开关是 ${mode}（settings.json 根上的 agentApi，改完要重启应用）` }
+    return {
+      listening: false,
+      reason: `开关读出来是 ${mode}（设置「关于与更新」里那一格；这一格认的值只有 on 和 off，别的都当关）`,
+    }
   }
 
   const token = randomUUID()

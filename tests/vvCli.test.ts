@@ -319,12 +319,14 @@ function makeHarness(steps: Array<Response | Error>, overrides: Partial<CliIo> =
 const said = (h: Harness): string => h.err.join('')
 
 describe('vv run：三种「连不上」各说各的话', () => {
-  it('没有 agent-api.json：点名那个开关，并说改完要重启', async () => {
+  it('没有 agent-api.json：点名那一格与「保存设置」，不再让人去重启一个本来就在跑的应用', async () => {
     const h = makeHarness([], { readEndpoint: async () => ({ status: 'missing' }) })
     expect(await run(['transcribe', 'a.mp4'], h.io)).toBe(3)
     expect(said(h)).toContain('agent-api.json')
     expect(said(h)).toContain('agentApi')
-    expect(said(h)).toContain('重启')
+    // #385 起这一格在设置界面里、保存即生效：再说「重启应用」就是把人引向一步没必要的动作
+    expect(said(h)).toContain('保存设置')
+    expect(said(h)).not.toContain('重启应用')
   })
 
   it('文件在但读不懂：说「读不懂」并带上原因，不许推给「应用没在跑」', async () => {

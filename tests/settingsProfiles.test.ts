@@ -48,6 +48,8 @@ type SaveResult = {
   tierRestart: string
   error: string | null
   saveError: string | null
+  agentApi: string
+  agentNote: string | null
 }
 
 /**
@@ -72,6 +74,22 @@ vi.mock('../electron/main/services/asrServiceManager', () => ({
   }),
 }))
 vi.mock('../electron/main/services/transcribeJob', () => ({ hasActiveTranscription: engine.busy }))
+
+/**
+ * #385 起 settings:save 还管本机 agent 门面的起停。真 startAgentFacade 会占一个 127.0.0.1
+ * 端口并往 userData 落一份 0600 凭据，而这里要钉的只是「哪一次保存该按那个按钮」，
+ * 所以换成两只假动作。`seq` 是两条链路（引擎重启 / 门面起停）共用的调用顺序记录——
+ * 顺序本身也是规矩（先把引擎按新档位拉起来，再开那道口），比两句「都调用了」多钉一件事。
+ */
+const seq: string[] = []
+const facade = vi.hoisted(() => ({
+  start: vi.fn(async () => ({ listening: true, reason: '假门面已经起来了' })),
+  stop: vi.fn(async () => undefined),
+}))
+vi.mock('../electron/main/services/agentFacade', () => ({
+  startAgentFacade: facade.start,
+  stopAgentFacade: facade.stop,
+}))
 
 /**
  * 「测试连接」真发网络请求，测试里换成一只只记参数的假探针。
@@ -1267,6 +1285,121 @@ describe('IPC 通道（渲染层拿到的形状）', () => {
       const got = (await call('settings:save', { asrLocalModel: 'base' })) as SaveResult
       expect(got.tierRestart).toBe('not-needed')
       expect(engine.restart).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('settings:save 顺手起停本机 agent 门面（#385：开关进了界面，保存当场生效）', () => {
+    /**
+     * 这一组钉的不是「能不能起门面」（那是 agentFacade 自己那 40 条），而是**哪一次保存该动它**：
+     * 门面一开一关会换掉那枚每次运行随机的 token，还会掐断正在流式输出的那一单作业，
+     * 所以「值没变也不管，先重起一次再说」这种写法必须当场红。
+     * 另一半是口径：这一步失败不许冒名成「设置没能写入」——磁盘上那一行确实已经写好了，
+     * 说反了用户会去重填一个本来存住的开关，而真正没成的是端口那件事。
+     */
+    beforeEach(async () => {
+      await writeFile(file(), v2Document({}, {}, { agentApi: 'off' }))
+      await loadInto(dir)
+      engine.restart.mockReset().mockResolvedValue({ ok: true })
+      engine.busy.mockReset().mockReturnValue(false)
+      facade.start.mockReset().mockResolvedValue({ listening: true, reason: '假门面已经起来了' })
+      facade.stop.mockReset().mockResolvedValue(undefined)
+      seq.length = 0
+      await register()
+    })
+
+    it('切到开：起一次，回给界面的只有开关本身，没有端口也没有 token', async () => {
+      const got = (await call('settings:save', { agentApi: 'on' })) as SaveResult
+      expect(got.saveError).toBeNull()
+      expect(got.agentApi).toBe('on')
+      expect(got.agentNote).toBeNull()
+      expect(facade.start).toHaveBeenCalledTimes(1)
+      expect(facade.stop).not.toHaveBeenCalled()
+      expect((await readJson(file())).agentApi).toBe('on')
+      expect(got).not.toHaveProperty('port')
+      expect(got).not.toHaveProperty('token')
+      expect(JSON.stringify(got)).not.toContain('127.0.0.1')
+    })
+
+    it('切回关：停一次，那句「收回了」由界面来说，主进程只报告开关', async () => {
+      await call('settings:save', { agentApi: 'on' })
+      facade.start.mockClear()
+      const got = (await call('settings:save', { agentApi: 'off' })) as SaveResult
+      expect(got.agentApi).toBe('off')
+      expect(facade.stop).toHaveBeenCalledTimes(1)
+      expect(facade.start).not.toHaveBeenCalled()
+      expect(got.agentNote).toBeNull()
+      expect(got.saveError).toBeNull()
+    })
+
+    it('没碰这一格的保存，一次都不许起停——磁盘上是 off 还是 on 都一样', async () => {
+      const got = (await call('settings:save', { asrLanguage: 'en' })) as SaveResult
+      expect(got.agentApi).toBe('unchanged')
+      expect(facade.start).not.toHaveBeenCalled()
+      expect(facade.stop).not.toHaveBeenCalled()
+
+      // 开着的那一侧更要钉：界面改个语言就把门面重起，等于当面对用户换掉他正在用的 token
+      await writeFile(file(), v2Document({}, {}, { agentApi: 'on' }))
+      await loadInto(dir)
+      await register()
+      const kept = (await call('settings:save', { asrLanguage: 'ja' })) as SaveResult
+      expect(kept.agentApi).toBe('unchanged')
+      expect(facade.start).not.toHaveBeenCalled()
+      expect(facade.stop).not.toHaveBeenCalled()
+      expect((await readJson(file())).agentApi).toBe('on')
+    })
+
+    it('表外的值换表外的值：两边都读成 off，不算切', async () => {
+      await writeFile(file(), v2Document({}, {}, { agentApi: 'require' }))
+      await loadInto(dir)
+      await register()
+      const got = (await call('settings:save', { agentApi: 'weird' })) as SaveResult
+      expect(got.agentApi).toBe('unchanged')
+      expect(facade.start).not.toHaveBeenCalled()
+    })
+
+    it('门面没能起来：设置算写成了，但那句话必须送到界面', async () => {
+      facade.start.mockResolvedValue({ listening: false, reason: '端口占不下来' })
+      const got = (await call('settings:save', { agentApi: 'on' })) as SaveResult
+      expect(got.saveError).toBeNull()
+      expect(got.agentApi).toBe('on')
+      expect(got.agentNote).toContain('端口占不下来')
+      expect((await readJson(file())).agentApi).toBe('on')
+    })
+
+    it('起停那一步抛了：不改口说「设置没能写入」，视图照旧回', async () => {
+      facade.start.mockRejectedValue(new Error('假失败'))
+      const got = (await call('settings:save', { agentApi: 'on' })) as SaveResult
+      expect(got.saveError).toBeNull()
+      expect(got.settings).not.toBeNull()
+      expect(got.agentNote).toContain('假失败')
+    })
+
+    it('磁盘没写成就一个调用都不发：门面只跟着真落盘的那一次', async () => {
+      // 三档都空、补丁里带着凭据 → 写盘之前就抛（那句出路是「请先点『新建一套』」）。
+      // 这一条要的是 catch 那一支：它回 unchanged，而且绝不趁一次失败的保存把端口开出去。
+      await writeFile(file(), v2Document({ asr: [], ai: [], tts: [] }, { asr: '', ai: '', tts: '' }))
+      await loadInto(dir)
+      await register()
+      const got = (await call('settings:save', { agentApi: 'on', aiApiBase: 'https://gate.example' })) as SaveResult
+      expect(got.saveError).not.toBeNull()
+      expect(got.agentApi).toBe('unchanged')
+      expect(got.agentNote).toBeNull()
+      expect(facade.start).not.toHaveBeenCalled()
+    })
+
+    it('档位与开关一起改：先把引擎按新档位拉起来，再开那道口', async () => {
+      engine.restart.mockImplementation(async () => {
+        seq.push('engine')
+        return { ok: true }
+      })
+      facade.start.mockImplementation(async () => {
+        seq.push('facade')
+        return { listening: true, reason: '' }
+      })
+      const got = (await call('settings:save', { asrLocalModel: 'small', agentApi: 'on' })) as SaveResult
+      expect(got.tierRestart).toBe('done')
+      expect(got.agentApi).toBe('on')
+      expect(seq).toEqual(['engine', 'facade'])
     })
   })
 
