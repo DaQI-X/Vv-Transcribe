@@ -786,6 +786,23 @@ describe('结构判据：写在注释里的规矩得有机械判式', () => {
     //    确实包着这格」，所以把门拆掉会红，在别处新加一格不会。
     expect(code(modal)).toMatch(/\{isMac && \([\s\S]{0,400}?values\.agentApi/)
   })
+
+  it('引流只做「用户主动动作」：按钮深链到 #cli，而 vv 不为打印地址联网', async () => {
+    // 收益口径：真人访问官网才有展示位，agent 调用本身不产生收益。所以引流只挂在用户自己的动作上
+    //（点按钮、看 --help、排障那三种失败），反过来也不许变成拦路——这里没有一处「先看官网才给用」。
+    const modal = code(await read('src/components/settings/SettingsModal.tsx'))
+    expect(modal).toMatch(/const DOCS_URL = 'https:\/\/vvscribe\.com\/docs'/)
+    expect(modal).toMatch(/const DOCS_CLI_URL = `\$\{DOCS_URL\}#cli`/)
+    // 这颗按钮跟开关同进同出：非 mac 上没有 vv，就不该有一格「查看用法」指着它
+    expect(modal).toMatch(/\{isMac && \([\s\S]{0,2000}?handleOpenExternal\(DOCS_CLI_URL\)/)
+
+    // CLI 那一行是印出来的字，不是请求：vv 唯一的出网对象是 127.0.0.1 上那扇门
+    const cli = code(await read('electron/cli/vv.ts'))
+    expect(cli).toContain('https://vvscribe.com/docs#cli')
+    const fetchTargets = [...cli.matchAll(/fetch\(\s*[`'"]([^`'"]+)/g)].map((m) => m[1])
+    expect(fetchTargets.length).toBeGreaterThan(0)
+    for (const target of fetchTargets) expect(target).toMatch(/^http:\/\/127\.0\.0\.1:/)
+  })
 })
 
 /**

@@ -226,6 +226,11 @@ describe('vv parseArgv：参数形状', () => {
   it('USAGE 里的六个档位名与 FORMATS 一一对上', () => {
     for (const format of FORMATS) expect(USAGE).toContain(format)
   })
+
+  /** #387：那一行地址只在人主动看帮助时出现。它不许变成拦路提示，也不许变成一次请求 */
+  it('USAGE 末尾带那一行文档地址', () => {
+    expect(USAGE).toContain('https://vvscribe.com/docs#cli')
+  })
 })
 
 // ---------------------------------------------------------------- ② 三种连不上 + 退出码
@@ -319,6 +324,7 @@ function makeHarness(steps: Array<Response | Error>, overrides: Partial<CliIo> =
 const said = (h: Harness): string => h.err.join('')
 
 describe('vv run：三种「连不上」各说各的话', () => {
+  /** #387 的口径：排障那三种失败各带一行文档地址（人已经在找办法了），但正常输出流里一处都没有 */
   it('没有 agent-api.json：点名那一格与「保存设置」，不再让人去重启一个本来就在跑的应用', async () => {
     const h = makeHarness([], { readEndpoint: async () => ({ status: 'missing' }) })
     expect(await run(['transcribe', 'a.mp4'], h.io)).toBe(3)
@@ -327,6 +333,7 @@ describe('vv run：三种「连不上」各说各的话', () => {
     // #385 起这一格在设置界面里、保存即生效：再说「重启应用」就是把人引向一步没必要的动作
     expect(said(h)).toContain('保存设置')
     expect(said(h)).not.toContain('重启应用')
+    expect(said(h)).toContain('vvscribe.com/docs#cli')
   })
 
   it('文件在但读不懂：说「读不懂」并带上原因，不许推给「应用没在跑」', async () => {
@@ -337,6 +344,7 @@ describe('vv run：三种「连不上」各说各的话', () => {
     expect(said(h)).toContain('读不懂')
     expect(said(h)).toContain('Unexpected end of JSON input')
     expect(said(h)).not.toContain('没在跑')
+    expect(said(h)).toContain('vvscribe.com/docs#cli')
   })
 
   it('端口没人应答：说那次运行已经结束了，而不是「开关没开」', async () => {
@@ -344,6 +352,7 @@ describe('vv run：三种「连不上」各说各的话', () => {
     expect(await run(['transcribe', 'a.mp4'], h.io)).toBe(3)
     expect(said(h)).toContain('端口 41234 上没人应答')
     expect(said(h)).not.toContain('agentApi')
+    expect(said(h)).toContain('vvscribe.com/docs#cli')
   })
 
   it('token 对不上（401）：点出「每次运行换一个」', async () => {
@@ -351,6 +360,7 @@ describe('vv run：三种「连不上」各说各的话', () => {
     expect(await run(['transcribe', 'a.mp4'], h.io)).toBe(3)
     expect(said(h)).toContain('token 对不上')
     expect(said(h)).toContain('重启')
+    expect(said(h)).toContain('vvscribe.com/docs#cli')
   })
 })
 

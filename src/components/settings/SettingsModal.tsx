@@ -196,6 +196,8 @@ const CONTACT_EMAIL = 'hi@vvscribe.com'
 
 /** 使用文档在官网（vvscribe.com/docs），应用里不抄一份内容——抄了就会和线上那份过期不一致 */
 const DOCS_URL = 'https://vvscribe.com/docs'
+/** 锚点跟的是官网文档页那一节的 id（docs.vue 里 sections 表第 10 项），那边改 id 这里要跟着改 */
+const DOCS_CLI_URL = `${DOCS_URL}#cli`
 
 const TAB_TITLES: Record<string, string> = {
   asr: '转写配置',
@@ -1918,6 +1920,19 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                       </option>
                     ))}
                   </select>
+                  {/* 引流只做「用户主动动作」这一种：这颗按钮不拦路、不弹窗、也不改变任何行为，
+                      开关关着它照样在——想知道这条入口能干什么，点开官网那一节就行。 */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenExternal(DOCS_CLI_URL)}
+                      className="settings-modal__dict-update-btn"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    >
+                      <BookOpen size={12} />
+                      查看用法
+                    </button>
+                  </div>
                   <span className="settings-form-hint">
                     开＝这台机器上的另一个进程也能把音频交给这个应用转写、拿回字幕：终端里的「vv」命令和
                     接了 MCP 的 AI 客户端走的就是这一条。边界四条：只监听本机（127.0.0.1，局域网里别人连不进来）；

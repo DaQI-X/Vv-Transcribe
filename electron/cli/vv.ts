@@ -102,7 +102,16 @@ README 的 agent 那一节；只有 transcribe 那一把要应用开着，check 
 
 退出码：0 成 / 1 这一单失败（check 这里是「有错误级的结果」）/ 2 命令写错了 / 3 连不上应用
 （没开、开关没开、凭据不对都算这一类，stderr 那句话会点明是哪一种）/ 130 被 Ctrl-C 打断（会顺手把那一单取消掉）
-check 只用 0 / 1 / 2 这三个；mcp 是长驻的，客户端关掉它就退，失败在协议里说（isError），不靠退出码`
+check 只用 0 / 1 / 2 这三个；mcp 是长驻的，客户端关掉它就退，失败在协议里说（isError），不靠退出码
+
+文档：https://vvscribe.com/docs#cli（挂进 MCP 客户端的写法、字幕档位的规则表都在那一节。
+这行只是一个给您看的地址：vv 自己不联网，也不为了打印它去请求任何东西）`
+
+/**
+ * 排障时多印的那一行。规矩是它只跟在「连不上这道门」那三种失败后面（读不到凭据、端口没人应答、token 对不上），
+ * 不进正常输出流，也不做拦路提示；而且它是印出来的字，不是请求——vv 为了打印它不联网。
+ */
+const DOCS_HINT = '文档 https://vvscribe.com/docs#cli'
 
 /**
  * 六档清单在这里第二次出现，是因为 `ExportFormat` 只是个编译期类型，运行时取不到成员表。
@@ -375,7 +384,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
   const dir = endpointDir(args, io)
   const endpoint = await io.readEndpoint(dir)
   if (endpoint.status !== 'ok') {
-    io.stderr(`vv: ${explainEndpoint(endpoint, dir)}\n`)
+    io.stderr(`vv: ${explainEndpoint(endpoint, dir)}\nvv: ${DOCS_HINT}\n`)
     return 3
   }
   const { port, token } = endpoint.endpoint
@@ -394,12 +403,13 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       signal: io.signal,
     })
   } catch (err) {
-    io.stderr(`vv: ${explainConnect(err, port)}\n`)
+    // Ctrl-C 那一支不算排障：用户是自己停的，不需要一行文档地址
+    io.stderr(`vv: ${explainConnect(err, port)}${io.signal.aborted ? '' : `\nvv: ${DOCS_HINT}`}\n`)
     return io.signal.aborted ? 130 : 3
   }
 
   if (res.status === 401) {
-    io.stderr(`vv: token 对不上（401）。这一份 token 是上一次运行留下的：应用重启过，token 每次运行换一个。\n`)
+    io.stderr(`vv: token 对不上（401）。这一份 token 是上一次运行留下的：应用重启过，token 每次运行换一个。\nvv: ${DOCS_HINT}\n`)
     return 3
   }
   if (!res.ok) {
