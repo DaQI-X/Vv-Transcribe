@@ -375,6 +375,34 @@ describe('L2 排版层：阈值来自档位，出处跟着报错走', () => {
     const hit = report.findings.find((finding) => finding.rule === 'readingSpeed')
     expect(hit!.message).toContain('字每秒')
     expect(hit!.message).toContain('本档上限 9 字每秒')
+    // 念回来的是要改的那句台词，不是时间行：那两个时间点 message 自己已经复述过了
+    expect(hit!.detail).toBe('整整二十个字的台词用来踩这条阅读速度的上限')
+    expect(hit!.line).toBe(3)
+  })
+
+  it('判字的几条念台词、判时间的念时间行，行号都跟着自己念的那一行', () => {
+    const report = checkSubtitleText(
+      srt(['00:00:01,000 --> 00:00:01,500', '第一行台词\n第二行台词\n第三行台词']),
+      { preset: preset('broadcast-cn') },
+    )
+    const byRule = (rule: string) => report.findings.find((finding) => finding.rule === rule)
+    // 台词占文件第 3–5 行（第 1 行序号、第 2 行时间行）
+    expect(byRule('linesPerCue')!.detail).toBe('第一行台词⏎第二行台词⏎第三行台词')
+    expect(byRule('linesPerCue')!.line).toBe(3)
+    expect(byRule('readingSpeed')!.detail).toBe('第一行台词⏎第二行台词⏎第三行台词')
+    expect(byRule('readingSpeed')!.line).toBe(3)
+    // 停留 0.5 秒这条，越线的就是那两个时间点
+    expect(byRule('cueDuration')!.detail).toBe('00:00:01,000 --> 00:00:01,500')
+    expect(byRule('cueDuration')!.line).toBe(2)
+  })
+
+  it('直接判定那条路没有文件：台词照样念，行号不给', () => {
+    const report = checkSegments([{ startTime: 1, endTime: 2, text: '第一行\n第二行\n第三行' }], {
+      preset: preset('broadcast-cn'),
+    })
+    const hit = report.findings.find((finding) => finding.rule === 'linesPerCue')
+    expect(hit!.detail).toBe('第一行⏎第二行⏎第三行')
+    expect(hit!.line).toBeUndefined()
   })
 
   it('读数往越线的方向收：27 字摊在 2.999 秒里报 9.01，不能报成一个看着没越线的 9.00', () => {
@@ -428,7 +456,7 @@ describe('L2 排版层：阈值来自档位，出处跟着报错走', () => {
 })
 
 describe('一致守卫：导出 → 解析 → 判定 与 直接判定 必须一字不差', () => {
-  /** 两条路该差的只有坐标：文件侧有行号与原文片段，segments 侧没有这两样。判的是结论。 */
+  /** 两条路该差的只有行号：那是文件才有的坐标（判时间的那几条连时间行原文都只有文件侧给得出）。判的是结论。 */
   function conclusions(report: CheckReport) {
     return {
       format: report.format,
@@ -523,6 +551,10 @@ describe('人看的那份输出：出处表与范围声明跟着报告走', () =
 
   it('文件侧的报错带原文与行号，那是 segments 那条路给不出的坐标', () => {
     expect(text).toContain('原文（第 2 行）：00:00:01,000 --> 00:00:09,000')
+  })
+
+  it('念台词的那几条把台词印出来，行号指台词那一行（第 3 行），不指时间行', () => {
+    expect(text).toContain('原文（第 3 行）：这句台词刚好十六个字超了那档上限')
   })
 
   it('结尾必有一段范围声明：全绿不等于能交', () => {

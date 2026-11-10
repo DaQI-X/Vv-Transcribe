@@ -104,7 +104,7 @@ export interface Finding {
   message: string
   /** 第几条（1 基，按出现顺序）；一条 finding 涉及多条时省略，改在 message 里举例 */
   cue?: number
-  /** 文件里的行号（1 基）；直接判定那条路没有文件，省略 */
+  /** 文件里的行号（1 基），指的就是下面那段原文所在的那一行；直接判定那条路没有文件，省略 */
   line?: number
   /** 文件上那一行原文，或越线的那一行台词：报错要能念回来 */
   detail?: string
@@ -536,6 +536,21 @@ function totalChars(cue: SubtitleCue): number {
   return cue.lines.reduce((sum, line) => sum + charCount(line), 0)
 }
 
+/**
+ * 越线的是上屏的字时，原文要念台词：时间行那一串 `-->` 在报错里已经被复述过一遍数字，
+ * 再念一次等于把真正要改的那几个字藏起来。
+ *
+ * 行号跟着原文走：台词紧挨在时间行下面，第 position 行就在 `cue.line + 1 + position`。
+ * 直接判定那条路没有文件（`cue.line` 是 0），给不出行号，但台词照样是台词。
+ * 多行时用 `⏎` 表示那个硬换行——它是判据的一部分（每屏几行），不能糊成空格。
+ */
+function citeText(cue: SubtitleCue, position?: number): { line?: number; detail?: string } {
+  const picked = position === undefined ? cue.lines : cue.lines.slice(position, position + 1)
+  const detail = picked.join('⏎')
+  if (detail === '') return {}
+  return { line: cue.line > 0 ? cue.line + 1 + (position ?? 0) : undefined, detail }
+}
+
 function layoutViolations(
   ruleId: RuleId,
   spec: RuleSpec,
@@ -548,10 +563,11 @@ function layoutViolations(
       const hits: Violation[] = []
       for (const cue of cues) {
         if (cue.lines.length > max) {
+          const quote = citeText(cue)
           hits.push({
             cue: cue.index,
-            line: cue.line || undefined,
-            detail: cue.timing || undefined,
+            line: quote.line,
+            detail: quote.detail,
             message: `第 ${cue.index} 条上屏 ${cue.lines.length} 行，本档上限 ${max} 行`,
           })
         }
@@ -565,10 +581,11 @@ function layoutViolations(
         cue.lines.forEach((line, position) => {
           const count = charCount(line)
           if (count <= max) return
+          const quote = citeText(cue, position)
           hits.push({
             cue: cue.index,
-            line: cue.line || undefined,
-            detail: line,
+            line: quote.line,
+            detail: quote.detail,
             message: `第 ${cue.index} 条第 ${position + 1} 行 ${count} 字，本档上限 ${max} 字`,
           })
         })
@@ -610,10 +627,11 @@ function layoutViolations(
         if (duration <= 0 || chars === 0) continue
         const speed = chars / duration
         if (speed > max) {
+          const quote = citeText(cue)
           hits.push({
             cue: cue.index,
-            line: cue.line || undefined,
-            detail: cue.timing || undefined,
+            line: quote.line,
+            detail: quote.detail,
             message: `第 ${cue.index} 条 ${chars} 字摊在 ${shown(duration, 3, 'down')} 秒里是 ${shown(speed, 2, 'up')} 字每秒，本档上限 ${max} 字每秒`,
           })
         }
