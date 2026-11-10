@@ -34,6 +34,7 @@
  * 没有人敲 `vv mcp`，这台机器上就多不出任何东西；而转写那把照样得应用开着、`agentApi` 打开，
  * 凭据只从 `agent-api.json` 那一份读，壳里没有第二套。
  */
+import { realpathSync } from 'node:fs'
 import { access, readFile, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
@@ -1056,15 +1057,23 @@ export async function main(argv: string[]): Promise<number> {
  * 只有被当成入口跑时才动手（`ELECTRON_RUN_AS_NODE=1 …/vv.mjs`），单测从这里 import 函数才不会顺手真跑一趟。
  * 认法用「两边都归成文件系统路径再比」而不是比 URL：应用名字里带空格（Vv Transcribe.app），
  * 拿 URL 比就多一套编码规矩要担心，而 dev 与打包版吃的是同一条式子。
+ *
+ * 字面比不过再用 realpath 兜一层。ESM 那个 `import.meta.url` 是 Node realpath 过的，软链没消掉的话
+ * 两边就对不上（2026-11-10 拿 `/tmp/…/app.asar/dist-electron/cli/vv.mjs` 跑打包形态实测到：不报错、
+ * 不输出，直接退 0）。这种失败形状比报错坏得多——看着像成功了，而 agent 读到的是一份空产物。
  */
-function invokedAsEntry(): boolean {
-  const target = process.argv[1]
-  if (!target) return false
+export function entryMatches(argvTarget: string | undefined, selfPath: string): boolean {
+  if (!argvTarget) return false
   try {
-    return resolve(target) === fileURLToPath(import.meta.url)
+    const target = resolve(argvTarget)
+    return target === selfPath || realpathSync(target) === selfPath
   } catch {
     return false
   }
+}
+
+function invokedAsEntry(): boolean {
+  return entryMatches(process.argv[1], fileURLToPath(import.meta.url))
 }
 
 if (invokedAsEntry()) {

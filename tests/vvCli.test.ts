@@ -8,7 +8,8 @@
  * ③ **薄**：不许 import 'electron'（#374 实测 node 模式一 import 就抛）、不许自己写时间轴
  *    （「CLI 出的文件与界面导的一致」这句承诺的结构保证就是同一次 `exportTranscript` 调用）、
  *    六档清单与导出器逐条对账。这三条扫源码，因为它们在行为上「暂时没坏」也能一直坏着。
- * ④ **启动器的路径算术**：打包实测在这件小事上翻过两次车（少算一级 / 拿 -f 探 asar 里面），所以搭假包布局真跑。
+ * ④ **启动器的路径算术**：打包实测在这件小事上翻过两次车（少算一级 / 拿 -f 探 asar 里面），所以搭假包布局真跑；
+ *    再加上「入口判定」那一次（软链路径下的 vv.mjs 认不出自己是入口 → 不输出还退 0）。
  * ⑤ **一次真 socket**：门面的 handler + 真 fetch + 真落盘的凭据文件，中间不掺假响应。
  * ⑥ **check（#356）**：这一条不碰门面也不读凭据（发一次请求就算跑偏）、报告整份走 stdout、
  *    退出码只借校验报告那一个，档位文件必须过同一道 validatePreset（手改的那份不许绕过「六条写全 + 每条带出处」）。
@@ -17,7 +18,7 @@
  *    `vv check` / `exportTranscript` 逐字节相同，判出红不是工具失败（isError 只给「活儿没干成」）。
  */
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { mkdir, mkdtemp, access, copyFile, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -53,6 +54,7 @@ import {
   FORMATS,
   TOOL_NAMES,
   USAGE,
+  entryMatches,
   handleMcpLine,
   parseArgv,
   run,
@@ -665,6 +667,43 @@ describe('bin/vv 的路径算术：假包布局真跑一遍', () => {
     const res = spawnLauncher(link, ['--version'])
     expect(res.code, res.stderr).toBe(0)
     expect(res.said('ARG1')).toMatch(/Fake\.app\/Contents\/Resources\/app\.asar\/dist-electron\/cli\/vv\.mjs$/)
+  })
+})
+
+/**
+ * 启动器解的是自己的链接，可它交给 Electron 的那个 entry 路径不一定还能对上 `import.meta.url`——
+ * 打包形态实测就栽在这儿：拿 /tmp/…（macOS 上 /tmp 是 /private/tmp 的软链）去起 vv.mjs，
+ * ESM 那边永远是 realpath 过的那一份，两边比不出相等，于是那个文件「不报错、不输出、退 0」。
+ * 一个装完什么也没干的 CLI 比一句报错难查得多，所以这一层判定单独钉。
+ */
+const entryDirs: string[] = []
+
+describe('vv 的入口判定：软链路径也算入口', () => {
+  afterAll(async () => {
+    for (const dir of entryDirs) await rm(dir, { recursive: true, force: true })
+  })
+
+  it('打包版那条本来就在字面上对得上（应用名带空格也一样）', () => {
+    const self = '/Applications/Vv Transcribe.app/Contents/Resources/app.asar/dist-electron/cli/vv.mjs'
+    expect(entryMatches(self, self)).toBe(true)
+  })
+
+  it.skipIf(!POSIX)('argv 那一路过的是软链：realpath 兜一层，别把它判成「不是入口」', async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), 'vv-entry-'))
+    entryDirs.push(sandbox)
+    const real = join(sandbox, 'real', 'vv.mjs')
+    await mkdir(dirname(real), { recursive: true })
+    await writeFile(real, 'export {}', 'utf-8')
+    const link = join(sandbox, 'vv-link.mjs')
+    await symlink(real, link)
+    expect(realpathSync(link)).not.toBe(link) // 前提：这条路径真是软链，不然下一条没测到东西
+    // 左边的 link 就是 argv[1] 那一路来的，右边是 Node 交给 import.meta.url 的那一份
+    expect(entryMatches(link, realpathSync(link))).toBe(true)
+  })
+
+  it('argv 空着 / 文件根本不存在：退 false 就够，不许把异常抛出去', () => {
+    expect(entryMatches(undefined, '/x/vv.mjs')).toBe(false)
+    expect(entryMatches('/no/such/vv.mjs', '/x/vv.mjs')).toBe(false)
   })
 })
 
