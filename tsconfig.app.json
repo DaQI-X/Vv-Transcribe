@@ -9,6 +9,10 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // 字幕 preset 是数据文件（src/data/subtitle-presets/*.json），#356 定的口径是「阈值不进代码」。
+    // 不打开这条，`import preset from './xxx.json'` 直接报「找不到模块」，而 vite 那边其实能打包——
+    // 又是「构建绿、类型检查红」的第二套真相。
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,

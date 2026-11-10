@@ -9,6 +9,9 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // 同 tsconfig.app.json：字幕校验器（src/utils/subtitleSpec）要 import preset 那几份 JSON，
+    // 而 CLI 与主进程都通过别名把它拉进本程序。少这条就是「vite 能打包、tsc 说找不到模块」。
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
@@ -21,7 +24,8 @@
 
     "baseUrl": ".",
     "paths": {
-      "@electron/*": ["electron/*"]
+      "@electron/*": ["electron/*"],
+      "@/*": ["src/*"]
     }
   },
   "include": ["electron"]

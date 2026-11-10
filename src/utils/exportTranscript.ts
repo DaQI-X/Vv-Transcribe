@@ -8,19 +8,9 @@
  */
 import type { TranscriptionSegment, ExportFormat } from '@/types/transcription'
 import { formatTime } from './formatTime'
+import { formatSrtClock, formatVttClock } from './subtitleTime'
 
-function formatSRTTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  const ms = Math.floor((seconds % 1) * 1000)
-  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')},${ms.toString().padStart(3, '0')}`
-}
-
-/** WebVTT 的时间戳分隔符是点，不是 SRT 的逗号——写成逗号会被当坏文件 */
-function formatVTTTime(seconds: number): string {
-  return formatSRTTime(seconds).replace(',', '.')
-}
+/** SRT 用逗号、VTT 用点，两把尺都住在 subtitleTime.ts：校验器判的是同一份取整口径 */
 
 export function exportTranscript(
   segments: TranscriptionSegment[],
@@ -31,7 +21,7 @@ export function exportTranscript(
       return segments
         .map(
           (seg, idx) =>
-            `${idx + 1}\n${formatSRTTime(seg.startTime)} --> ${formatSRTTime(seg.endTime)}\n${seg.text}\n`,
+            `${idx + 1}\n${formatSrtClock(seg.startTime)} --> ${formatSrtClock(seg.endTime)}\n${seg.text}\n`,
         )
         .join('\n')
 
@@ -40,7 +30,7 @@ export function exportTranscript(
         'WEBVTT',
         '',
         ...segments.map(
-          (seg) => `${formatVTTTime(seg.startTime)} --> ${formatVTTTime(seg.endTime)}\n${seg.text}\n`,
+          (seg) => `${formatVttClock(seg.startTime)} --> ${formatVttClock(seg.endTime)}\n${seg.text}\n`,
         ),
       ].join('\n')
 
@@ -50,7 +40,7 @@ export function exportTranscript(
      */
     case 'tsv':
       return segments
-        .map((seg) => `${formatVTTTime(seg.startTime)}\t${seg.text}`)
+        .map((seg) => `${formatVttClock(seg.startTime)}\t${seg.text}`)
         .join('\n')
 
     case 'txt':

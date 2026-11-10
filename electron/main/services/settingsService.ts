@@ -111,6 +111,20 @@ export interface AppSettings {
    * （见 README 的本地引擎一节）；开着校验那条路就被自己堵死了，所以留一条不用改代码的出路。
    */
   asrEngineAuth: string
+  /**
+   * 要不要在本机挂一个给 agent/CLI 用的 HTTP 门面（1.2.0 #376）：`'off'`（默认）| `'on'`。
+   *
+   * 与 `asrEngineAuth` 同一口径的三条：界面上没有格子（开它要同时接受「本机多一个能收文件路径的
+   * 监听端口」这件事，那不是随手一勾的决定）、磁盘上那一个值是唯一的入口、配置缓在内存里所以
+   * **改完要重启应用才重读**。
+   * 默认关是 fail-closed：认不出的值（拼错、`true`、`'require'` 串档）都读成关，
+   * 因为这一项的失败方向是「多开了一个端口」，而那种事不会有人来报告。
+   *
+   * 这一项**不是**凭据体系：它只决定监听与否，转写用的地址/Key 照旧走 profileId 与该档当前默认
+   * 那条（#222）。门面自己那份 Bearer token 不在这里落盘，在 `agentEndpoint.ts` 那一份文件里——
+   * 它是每次运行随机的一份，写进配置反而会出现「磁盘上躺着一份永远连不上的旧 token」。
+   */
+  agentApi: string
   aiProvider: string
   aiApiKey: string
   aiApiBase: string
@@ -272,6 +286,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   asrLocalModel: 'base',
   asrLanguage: 'zh',
   asrEngineAuth: 'require',
+  agentApi: 'off',
   aiProvider: 'openai',
   aiApiKey: '',
   aiApiBase: '',
@@ -295,8 +310,8 @@ const DEFAULT_SETTINGS: AppSettings = {
  * 从两张表推出来而不是在这里再列一遍：那张表是「哪一档有哪几项」唯一的事实来源，
  * 这里抄一份就会出现「asr 已经把 provider 退回全局、全局段还当它是方案字段」这种分叉，
  * 而分叉的方向是把用户填过的值写进一个没人读的位置——读得到、写进去、东西没了。
- * 此刻是 asrProvider / asrLocalModel / asrLanguage / asrEngineAuth / ttsEngine / ttsLocalEngine
- * / ttsLocalVoice / ttsVoice 八个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」
+ * 此刻是 asrProvider / asrLocalModel / asrLanguage / asrEngineAuth / agentApi / ttsEngine / ttsLocalEngine
+ * / ttsLocalVoice / ttsVoice 九个（三档方案收窄到只剩网关参数之后，「走不走云端」「本地档位」「本地音色编号」
  * 都在这；配音音色从 v3 起也回到这里——它是这一批怎么选的问题，不是这家网关的参数）。
  */
 const GLOBAL_FLAT_KEYS: readonly string[] = (() => {
@@ -593,6 +608,21 @@ export type EngineAuthMode = (typeof ENGINE_AUTH_MODES)[number]
 
 export function normalizeEngineAuth(raw: unknown): EngineAuthMode {
   return ENGINE_AUTH_MODES.includes(raw as EngineAuthMode) ? (raw as EngineAuthMode) : 'require'
+}
+
+/**
+ * agent 门面开关（#376）：`'on'` | `'off'`，默认与未知值都是 `'off'`。
+ *
+ * 与 normalizeEngineAuth 同一个写法而**默认方向相反**，这是这一项的失败方向决定的：
+ * 引擎校验认不出得多落回「开着」，因为那一道的用途是挡住同网段的别的程序；
+ * 门面认不出得多落回「不监听」，因为「多开了一个端口」这件事没有任何人会来报告。
+ * 老配置磁盘上没有这一项 → undefined → `'off'`，所以不需要一次迁移，行为与 1.1.5 一字不差。
+ */
+const AGENT_API_MODES = ['on', 'off'] as const
+export type AgentApiMode = (typeof AGENT_API_MODES)[number]
+
+export function normalizeAgentApi(raw: unknown): AgentApiMode {
+  return AGENT_API_MODES.includes(raw as AgentApiMode) ? (raw as AgentApiMode) : 'off'
 }
 
 /**

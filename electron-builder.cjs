@@ -161,6 +161,17 @@ const config = {
       to: 'yt-dlp',
       filter: [ytdlpExeName],
     },
+    ...(process.platform === 'darwin'
+      ? [
+          {
+            // #377 的 vv 启动器：落在 Contents/Resources/bin/vv，Homebrew 的 cask binary 指这里。
+            // 只随 mac 包，因为这份脚本里写的是 .app 的形状（Contents/MacOS 那个二进制 + app.asar）；
+            // Windows 要的是 .cmd，本机没有能验它的机器，不写没验过的东西（同 #235/#263 那笔环境债）。
+            from: 'bin/vv',
+            to: 'bin/vv',
+          },
+        ]
+      : []),
   ],
   afterPack(context) {
     const platformName = context.electronPlatformName // 'darwin' | 'win32' | 'linux'

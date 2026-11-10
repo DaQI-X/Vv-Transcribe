@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { registerAllHandlers } from './ipc'
 import { ipcHandle } from './ipc/guard'
 import { startASRService, stopASRService, getASRServiceStatus } from './services/asrServiceManager'
+import { startAgentFacade, stopAgentFacade } from './services/agentFacade'
 import { stopLocalTtsEngine } from './services/localTtsEngine'
 import { initDictionary } from './services/dictionaryService'
 import { logger } from './services/logger'
@@ -196,7 +197,18 @@ app.whenReady().then(async () => {
   const dictionaryTask = initDictionary().finally(() => {
     dictionaryTaskDone = true
   })
-  Promise.all([asrTask, dictionaryTask])
+  // agent 门面（#376）：默认关，所以绝大多数运行里这一步只做一件事——把 settings 根上那个
+  // 开关读出来，然后什么都不做（不开端口、不留凭据文件）。开着的分支要等 settings 起来才有意义。
+  // 它挂了不并入 serviceError：门面是可选入口，把「没起来」报成「应用没准备好」会让开屏页撒谎，
+  // 而那才是这条链路上真正没人要的副作用。
+  const facadeTask = startAgentFacade()
+    .then((result) => {
+      logger.info('App', result.listening ? 'Agent facade up' : 'Agent facade off', {
+        reason: result.reason,
+      })
+    })
+    .catch((e) => logger.warn('App', 'Agent facade failed to start', e?.message))
+  Promise.all([asrTask, dictionaryTask, facadeTask])
     .then(() => {
       serviceReady = true
       logger.info('App', 'Services initialization completed', { ready: serviceReady, asrError: asrFailureReason() })
@@ -218,6 +230,9 @@ app.on('before-quit', async (e) => {
   isQuitting = true
   logger.info('App', 'Application quitting...')
   e.preventDefault()
+  // 门面先收：它是「别的进程能不能连进来」那一道，退出流程一开始就该关掉，
+  // 顺手把那份每次运行随机的 token 从磁盘上删掉（留着会出现旧 token 配上被别人占走的端口）
+  await stopAgentFacade().catch(() => {})
   // 链接转写的那份临时媒体是播放器一路在用的，只能等到这里才没人用；被强杀时走不到这步，
   // 由下次启动的 sweepStaleMediaTempDirs 兜底
   await releaseAllMediaSessions().catch(() => {})

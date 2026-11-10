@@ -47,6 +47,26 @@ export default defineConfig({
           },
         },
       },
+      {
+        /**
+         * CLI 是第三个构建产物，不是主进程那份的一部分：`vv` 靠 ELECTRON_RUN_AS_NODE 直接吃这个文件，
+         * 主进程那个 bundle 一 import 就抛（它要 `electron` 模块）。名字定死成 vv.mjs（不是默认的 vv.js）
+         * 是因为 #374 实测跑通的就是 `.mjs`——省掉「靠根 package.json 的 type 字段才被当 ESM」这一层间接。
+         * onstart 留空：这个入口改了不该再拉起一个 Electron 实例。
+         */
+        entry: 'electron/cli/vv.ts',
+        onstart() {},
+        vite: {
+          build: {
+            outDir: 'dist-electron/cli',
+            rollupOptions: {
+              output: {
+                entryFileNames: 'vv.mjs',
+              },
+            },
+          },
+        },
+      },
     ]),
     renderer(),
   ],

@@ -215,6 +215,23 @@ describe('正常读写', () => {
     await service.saveSettings({ aiApiKey: null })
     expect((await service.loadSettings()).aiApiKey).toBe('')
   })
+
+  it('界面保存不带 agentApi 那一行时，磁盘上手改的 "on" 还在', async () => {
+    // #376 那个开关住在文档根上，而它**不在渲染层那份 SettingsValues 里**：表单发的是整份 values，
+    // 里面压根没这一格；写盘那侧只收字符串，所以缺席＝不改。这一条钉的就是这个巧合别变成事故——
+    // 真被抹平的话症状是「在设置里改了个模型名，agent 入口从此再也连不上」，而那看起来像门面的 bug，
+    // 排查会一路走到 token 那边去。同一趟也反过来钉一句：显式给了值就得写进去，
+    // 这条开关的出路不许只剩「手改磁盘」一种形状（#353 那条 asrEngineAuth 同理，见 localEngineAuth）。
+    await writeFile(file(), v3Document({}, {}, { agentApi: 'on' }))
+    await loadInto(dir)
+    expect((await service.loadSettings()).agentApi).toBe('on')
+
+    await service.saveSettings({ asrLanguage: 'en' })
+    expect((await readJson(file())).agentApi).toBe('on')
+
+    await service.saveSettings({ agentApi: 'off' })
+    expect((await readJson(file())).agentApi).toBe('off')
+  })
 })
 
 describe('settings.json 解不开（corrupt）', () => {

@@ -150,9 +150,10 @@ describe('界面与导出同一个读数', () => {
 describe('判据：时钟只剩一把尺', () => {
   /**
    * 补零到两位是「自己拼时钟」的指纹。今天允许的这些：
-   * - `src/utils/formatTime.ts`：那把尺本身。
-   * - `src/utils/exportTranscript.ts`：SRT/VTT 的字幕时间戳，是文件格式不是界面读数，
-   *   收进界面尺等于改一次显示口径就写坏一份交付文件。
+   * - `src/utils/formatTime.ts`：界面读数那把尺本身。
+   * - `src/utils/subtitleTime.ts`：字幕文件那把尺（#356 收口）。SRT/VTT 的时间戳是文件格式不是界面读数，
+   *   收进界面尺等于改一次显示口径就写坏一份交付文件；它自己补零、自己做进制，是**第二把尺**而不是第三处散装拼法。
+   *   `exportTranscript.ts` 从这份名单上退掉了：它现在只调用那两把尺，不再手拼。
    * - `electron/main/services/asr/iflytekAsr.ts`（#343）：两处都跟时钟无关——
    *   一处是百分号转义补两位十六进制（对齐对方 Java 样例的 URLEncoder），
    *   一处是讯飞签名参数里 `dateTime=yyyyMMddHHmmss` 这个**线上字段**，格式由对方文档写死，
@@ -161,13 +162,13 @@ describe('判据：时钟只剩一把尺', () => {
    *   `vv-diagnostic-YYYYMMDD-HHmm.txt` 要跨机器稳定、能当附件名、按名字就能排出先后，
    *   所以拼法钉死在本地时区的 `getFullYear` 那几位上；换成 Intl 就是把形状交给某台机器的 locale 数据。
    *   `formatTime.ts` 那把尺量的是「一段音频有几时几分几秒」，也压根产不出这个形状。
-   * 再出现别的文件时得先回答：这是界面读数（改用那把尺），还是别的格式（在这里写清为什么留）。
+   * 再出现别的文件时得先回答：这是界面读数（改用那把尺），是字幕文件（改用 subtitleTime），
+   * 还是别的格式（在这里写清为什么留）。
    */
   it('自己补两位拼时钟的文件只有这几个', async () => {
     expect(await holdersOf(/padStart\(2/)).toEqual([
       'electron/main/services/asr/iflytekAsr.ts',
       'electron/main/services/diagnosticsService.ts',
-      'src/utils/exportTranscript.ts',
       'src/utils/formatTime.ts',
     ])
   })
@@ -182,13 +183,16 @@ describe('判据：时钟只剩一把尺', () => {
    *   放进句子里就成了「只收 00:08:20以内的音频」——而且这句的方向是**向下**取整（保守），
    *   与界面进度读数一律 floor 的理由不是同一件事。
    * - `iflytekAsr.ts` 折的是签名里那个时区偏移的分钟位，同样是线上字段。
+   *
+   * #356 之后这一处从 `exportTranscript.ts` 挪到了 `subtitleTime.ts`：字幕时钟的时/分/秒/毫秒换算
+   * 整个收进了那一个文件，导出器与校验器都只调它，折分的动作全仓库只剩这一份。
    */
   it('把秒折成分的地方也只有这几个', async () => {
     expect(await holdersOf(/Math\.floor\(.*\/\s*60\)/)).toEqual([
       'electron/main/services/asr/asrVendor.ts',
       'electron/main/services/asr/iflytekAsr.ts',
-      'src/utils/exportTranscript.ts',
       'src/utils/formatTime.ts',
+      'src/utils/subtitleTime.ts',
     ])
   })
 })

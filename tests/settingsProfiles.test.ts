@@ -71,7 +71,7 @@ vi.mock('../electron/main/services/asrServiceManager', () => ({
     port: 8000,
   }),
 }))
-vi.mock('../electron/main/ipc/asrHandlers', () => ({ hasActiveTranscription: engine.busy }))
+vi.mock('../electron/main/services/transcribeJob', () => ({ hasActiveTranscription: engine.busy }))
 
 /**
  * 「测试连接」真发网络请求，测试里换成一只只记参数的假探针。

@@ -1,0 +1,45 @@
+#!/bin/sh
+# vv —— Vv Transcribe 的命令行入口（#377）。
+# 这一层只做一件事：找到「装着这个脚本的那份 Electron」，用它的 node 模式跑 asar 里那个 CLI 产物。
+# 参数原样转过去；业务逻辑、错误话术、退出码全在 vv.mjs 里，这里不重写第二遍。
+#
+# 退出码只有一条是自己的：127 = 这个包里的运行时找不到。其余都从 vv.mjs 来（0/1/2/3/130）。
+
+self=$0
+# 先把符号链接解掉，再取 dirname：Homebrew 的 cask 会把这里 link 到 /opt/homebrew/bin/vv，
+# 那时 dirname $0 得到的是那个 bin 目录，照着它找 .app 一定找不到（#374 记过这一条）。
+while [ -L "$self" ]; do
+  link=$(readlink "$self") || exit 127
+  case $link in
+    /*) self=$link ;;
+    *)  self=$(dirname -- "$self")/$link ;;
+  esac
+done
+here=$(CDPATH= cd -P -- "$(dirname -- "$self")" && pwd) || exit 127
+# bin 往上两层才是「装着它的那一层的根」：打包版是 Contents/Resources→Contents（#377 打包实测就是
+# 在这一层少算了一级，拿 Resources 当 Contents，于是去找 Resources/MacOS/Vv Transcribe 找不到）
+root=$(dirname -- "$here")
+contents=$(dirname -- "$root")
+
+if [ -x "$contents/MacOS/Vv Transcribe" ]; then
+  # 打包版：…/Vv Transcribe.app/Contents/{MacOS,Resources/bin}
+  runner=$contents/MacOS/"Vv Transcribe"
+  entry=$contents/Resources/app.asar/dist-electron/cli/vv.mjs
+  # 文件系统看不见 asar 里面（-f 走的是真 fs），所以这一支查的是「那罐 asar 在不在」，
+  # 里面那个产物由构建保证（vite 的第三个 electron 入口），打包实测核过。
+  probe=$contents/Resources/app.asar
+else
+  # 仓库里直接跑（dev 验收走这条）：用 devDependencies 那份 electron + 构建产物，那时 root 就是仓库根
+  runner=$root/node_modules/.bin/electron
+  entry=$root/dist-electron/cli/vv.mjs
+  probe=$entry
+fi
+
+if [ ! -x "$runner" ] || [ ! -f "$probe" ]; then
+  printf 'vv: 找不到运行时（%s / %s）\n' "$runner" "$entry" >&2
+  printf 'vv: 仓库里跑要先 pnpm build；打包版别把 bin/vv 单独拷走（它靠自己在 .app 里的位置找 Electron）\n' >&2
+  exit 127
+fi
+
+# ELECTRON_RUN_AS_NODE 是关键那一步：少了它，这个二进制会当成 GUI 应用起来（#374 实测）
+exec env ELECTRON_RUN_AS_NODE=1 "$runner" "$entry" "$@"

@@ -9,6 +9,9 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // 同 app/electron 那两份：tests 按相对路径把 src/utils/subtitleSpec 拉进来，它 import 的是
+    // src/data/subtitle-presets/*.json。三份程序要么都认这条，要么都不认，别留一套例外。
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,

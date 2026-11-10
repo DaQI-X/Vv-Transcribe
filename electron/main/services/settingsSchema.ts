@@ -91,7 +91,7 @@ export type DefaultProfileId = Record<ProfileCapability, string>
 
 /**
  * 全局段：不属于任何一档方案的扁平配置（此刻是 asrProvider / asrLocalModel / asrLanguage /
- * asrEngineAuth / ttsEngine / ttsLocalEngine / ttsLocalVoice / ttsVoice）。
+ * asrEngineAuth / agentApi / ttsEngine / ttsLocalEngine / ttsLocalVoice / ttsVoice）。
  * 键就是 v1 那批扁平键的名字，落盘时也平铺在文档根上，不再嵌一层——嵌进去就得让迁移知道
  * 哪些键归全局，而那份知识已经在 CAPABILITY_FIELDS 里了，抄第二遍迟早分叉。
  */

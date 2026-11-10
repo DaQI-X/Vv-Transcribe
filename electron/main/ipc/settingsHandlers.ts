@@ -28,7 +28,7 @@ import {
   type SettingsView,
 } from '../services/settingsService'
 import { restartLocalEngine } from '../services/asrServiceManager'
-import { hasActiveTranscription } from './asrHandlers'
+import { hasActiveTranscription } from '../services/transcribeJob'
 import {
   testASRConfig,
   testAIConfig,

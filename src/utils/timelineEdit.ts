@@ -192,8 +192,12 @@ function mintSplitId(
   return `${start}-${end}#${suffix}`
 }
 
-/** 按字码点数：`length` 会把一个 emoji 数成 2 字，摊时间时前半就多拿一份时长 */
-function charCount(text: string): number {
+/**
+ * 按字码点数：`length` 会把一个 emoji 数成 2 字，摊时间时前半就多拿一份时长。
+ * 导出去（#356）：字幕校验器 `subtitleSpec.ts` 数的是同一个数——界面回执说 15 字、
+ * `vv check` 说 16 字，这种两个数比不判更糟。
+ */
+export function charCount(text: string): number {
   return [...text].length
 }
 
