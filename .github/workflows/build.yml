@@ -345,7 +345,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           ls -l dist-components/
 
-      # 七个要挂的文件在这儿收齐（3 安装包 + 3 份引擎资产 + 1 份清单），发布步骤只认 publish/*。
+      # 八个要挂的文件在这儿收齐（3 安装包 + 3 份引擎资产 + 1 份清单 + 1 份 SHA256 清单），发布步骤只认 publish/*。
       # 为什么不用 artifacts/**/*.dmg 那种通配：① 它正是 v1.0.6 多出那枚 vv-tts-server.exe 的原因
       # （**/*.exe 把 Windows 引擎二进制也当安装包挂了上去，白多一枚 24MB 公开资产，还绕过清单）；
       # ② 单层 * 依赖 upload-artifact 内部到底保不保留 dist/ 这一层，而这一步挂了就是整版发不出去，
@@ -365,9 +365,12 @@ jobs:
           done
           cp dist-components/* publish/
           cp components-manifest.json publish/
+          # SHA256 清单必须随 Release 创建一起传（immutability，事后补不进去）：
+          # 下载镜像（dl.vvscribe.com）上的副本靠它自证「与发版原件逐字节一致」。
+          (cd publish && find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt)
           n=$(ls publish | wc -l)
-          if [ "$n" -ne 7 ]; then
-            echo "::error::publish/ 里是 $n 个文件，应为 7（3 安装包 + 3 份引擎资产 + 1 份清单）——Release 一旦发出去就不可变，多挂少挂都补不回来，所以在这儿拦住"
+          if [ "$n" -ne 8 ]; then
+            echo "::error::publish/ 里是 $n 个文件，应为 8（3 安装包 + 3 份引擎资产 + 1 份清单 + 1 份 SHA256 清单）——Release 一旦发出去就不可变，多挂少挂都补不回来，所以在这儿拦住"
             ls -l publish/
             exit 1
           fi
@@ -409,4 +412,14 @@ jobs:
             exit 1
           fi
           cat /tmp/verify.err || true
+
+  # Release 发出去之后，把全部资产逐字节镜像到 Cloudflare R2（dl.vvscribe.com），国内下载走它。
+  # 独立成 job 而不是 release 里的一步：镜像挂了不该把已成功的发布标红，且可以单独 Re-run；
+  # rclone copy 幂等，重跑只补缺。GitHub Release 仍是唯一发版源，镜像只是副本。
+  mirror:
+    name: Mirror to R2
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/mirror-release.yml
+    secrets: inherit
 

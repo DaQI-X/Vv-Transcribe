@@ -1,0 +1,98 @@
+name: Mirror Release to R2
+
+# 把 GitHub Release 的全部资产逐字节同步到 Cloudflare R2（对外域名 dl.vvscribe.com），
+# 国内用户下载走镜像。GitHub Release 仍是唯一发版源：镜像只是副本，不是第二条发布链路。
+#
+# 两个入口：
+# - workflow_call：build.yml 的 release job 成功后自动调用（tag 发版链路的一环）
+# - workflow_dispatch：手工回填或重试（例如镜像上线前发布的 v1.2.1）
+#
+# 失败不影响已发布的 Release；rclone copy 幂等，重跑只补缺、不重复传。
+# 依赖三个仓库 secrets：R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY。
+# 没配时本 workflow 打警告后绿退（镜像是增益项，不该把发版链路拦死），配好后 dispatch 即可补上。
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要镜像的 Release tag（如 v1.2.1）'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: Sync assets to R2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          # 只认三段 semver（与发版口径一致）；tag 会进 rclone 目标路径，先验再用
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 必须是 v三段版本号（如 v1.2.1），收到的是：$tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # runner 在 GitHub 网内，拉 Release 资产不受国内带宽问题影响。
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" --dir release-assets --clobber
+          ls -l release-assets
+
+      # 镜像目录里必须有一份 SHA256SUMS.txt，用户才能校验「镜像副本 == 发版原件」。
+      # 新版本的清单在 release job 里随 Release 一起上传（immutability，事后补不进去）；
+      # 镜像上线前的旧版本（如 v1.2.1）Release 里没有，就按刚下载到的资产现算一份，只挂镜像。
+      - name: Ensure SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          cd release-assets
+          if [ -f SHA256SUMS.txt ]; then
+            sha256sum -c SHA256SUMS.txt
+          else
+            find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
+            echo "::notice::该 Release 没有随附清单（镜像上线前的旧版本），已按下载到的资产现算 SHA256SUMS.txt"
+          fi
+          cat SHA256SUMS.txt
+
+      - name: Sync to R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${RCLONE_CONFIG_R2_ACCESS_KEY_ID}" ] || [ -z "${RCLONE_CONFIG_R2_SECRET_ACCESS_KEY}" ]; then
+            echo "::warning::R2 secrets 未配置（R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY），跳过镜像同步。GitHub Release 不受影响；配好后手工 dispatch 本 workflow 即可补上。"
+            exit 0
+          fi
+          dest="r2:vv-transcribe-downloads/${{ steps.tag.outputs.tag }}"
+          # --s3-no-check-bucket：桶已由控制台建好，令牌只有对象读写权限，别让 rclone 尝试建桶
+          rclone copy release-assets "$dest" --s3-no-check-bucket --checksum --transfers 4 --s3-upload-concurrency 4 --retries 3
+          # 传完再对一次体积：证「桶里的件数与大小 == 刚从 Release 下载的」。
+          # 不用哈希比对——几百 MB 走 multipart，R2 的 ETag 不是 MD5，rclone check 默认比哈希会误报；
+          # 真正的字节完整性由上传前那步 sha256sum 对账锚定（用户下载后也可拿 SHA256SUMS.txt 复核）。
+          rclone check release-assets "$dest" --s3-no-check-bucket --size-only
+          rclone ls "$dest" --s3-no-check-bucket
