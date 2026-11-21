@@ -1085,6 +1085,7 @@ yt-dlp 每隔几周就要跟着站点改解析规则，而安装包里的这一�
 - 加载优先级：`userData/dictionary/`（更新后的副本）> `resources/dictionary/`（内置）
 - **启动那一次读盘只跑一遍**：`initDictionary()` 有两个调用点同时打在启动那几秒里——`main/index.ts` 那串服务初始化，和 `ipc/dictionaryHandlers.ts` 注册通道时自己那一次。判空只看 `dictionaryCache`，而它要等两份 JSON 全解完才赋值，于是后一家进来时什么都是空的、于是 26 万条 ci + 3 万条成语被读进内存两遍。本机 `app.log` 上这是每次启动两行 `Loaded builtin dictionary`、隔 85–96 毫秒（改前一次启动实测两行 12:56:42.350 / .446，改后一次启动只剩一行 13:06:05.636）。现在跟在飞的那次 promise 被另一个调用点共用（与本地配音引擎 `singleFlight` 同一套路），失败后 `initTask` 清空、下一次调用可以重试。
 - 更新机制：按 `data/ci.json` 的最近 commit hash 判断有没有新版，有就直接拉 `ci.json` / `idiom.json` 写入 `userData/dictionary/`、清缓存重载，当场生效。连不上 GitHub 会如实报错，不会当成「已是最新」
+- **落盘前按字节验**：两份数据的体积与 SHA2-256 钉在 `dictionaryService.ts` 的 `DICTIONARY_CHECKSUMS` 里，取值与随包 `resources/dictionary/` 那份逐字节相同（2026-11-21 实测）。两份全部取回并验过之后才一份份写盘，所以中途失败时上一版数据还完整留着，不会出现「ci 是新的、idiom 是旧的」那种混合态；对不上就整趟判失败、给人话原因，不拿残包当新版。指纹钉在代码而不是清单里，是因为上游 `data/` 最后一次提交是 2018-12-16，八年没动过——真遇到更新时的做法是人工核一遍新内容，再把指纹连同数据一起改、随版走（`tests/dictionaryChecksum.test.ts` 里有一条会拿随包那两份喂闸门，改数据不改指纹当场红）。
 
 ## 注意事项
 

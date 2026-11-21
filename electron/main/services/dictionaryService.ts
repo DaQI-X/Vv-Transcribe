@@ -6,6 +6,7 @@
  * 更新机制：通过 GitHub API 获取最新 commit hash，对比本地版本，从 raw.githubusercontent.com 下载数据
  * 缓存策略：启动时一次性加载到内存（Map），查询时 O(1) 命中
  */
+import { createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { dictionaryDir } from './userDataStore'
@@ -33,6 +34,48 @@ const SOURCE_REPO = 'pwxcoo/chinese-xinhua'
 const SOURCE_BRANCH = 'master'
 const RAW_BASE = `https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_BRANCH}/data`
 const GITHUB_API = `https://api.github.com/repos/${SOURCE_REPO}`
+
+/**
+ * 词库两份数据的指纹，按 2026-11-21 实测钉死（那两份的 SHA2-256 与随包 resources/dictionary 下的
+ * 同名文件逐字节相等，所以这条闸门不会把「刚装上就点更新」的正常路径判成篡改）。
+ *
+ * 钉在这里而不是清单里，是因为上游那个仓库的 data/ 最后一次提交是 2018-12-16，八年没动过；
+ * 「跟着上游走」这条需求今天不值钱，而「下载来的东西原样落盘」值钱。真遇到上游更新时的做法是：
+ * 人工核一遍新内容（词库这东西没有自动化能判对错），再把这两个指纹连同数据一起改，随版走。
+ */
+const DICTIONARY_CHECKSUMS: Record<string, { bytes: number; sha256: string }> = {
+  'ci.json': {
+    bytes: 26_129_191,
+    sha256: '739e086d61dc9b95cd1df92095720e6391f952a41c476d3281ef95ebed869a09',
+  },
+  'idiom.json': {
+    bytes: 10_319_857,
+    sha256: '1d4b4f454ce1c416d6a1ab2369d6e66c0ff99e04390172eef70790499e21ce19',
+  },
+}
+
+/**
+ * 校验一份下载到的词库数据，返回 null 表示通过，否则返回要给用户看的原因。
+ * 抽成纯函数：这一步是整个词库更新里唯一「错了不报错、静默把坏数据当新的用」的地方，
+ * 拿真字节喂它比在链路上加日志可靠。
+ */
+export function verifyDictionaryBytes(
+  filename: string,
+  received: Buffer
+): string | null {
+  const pinned = DICTIONARY_CHECKSUMS[filename]
+  if (!pinned) return `词库里没有 ${filename} 这份数据`
+  if (received.length !== pinned.bytes) {
+    // 这里不能图省事用 formatBytes：截断 1000 字节会被两边都收成同一个「10.3MB」，
+    // 给用户读出来就是「只收到 10.3MB，与钉死的 10.3MB 不符」——一句听不出问题的话
+    return `${filename} 收到 ${received.length.toLocaleString('en-US')} 字节，与钉死的 ${pinned.bytes.toLocaleString('en-US')} 字节不符`
+  }
+  const digest = createHash('sha256').update(received).digest('hex')
+  if (digest !== pinned.sha256) {
+    return `${filename} 的指纹和钉死的那份对不上（${digest.slice(0, 12)}… ≠ ${pinned.sha256.slice(0, 12)}…）`
+  }
+  return null
+}
 
 function getBuiltinDictionaryPath(): string {
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -65,23 +108,28 @@ async function loadVersionInfo(dictPath: string): Promise<VersionInfo | null> {
   }
 }
 
+function parseDictionaryEntries(raw: string): Map<string, string> {
+  const map = new Map<string, string>()
+  const data = JSON.parse(raw) as Array<{ ci?: string; word?: string; explanation: string }>
+
+  for (const entry of data) {
+    const term = entry.ci || entry.word
+    if (term && entry.explanation) {
+      map.set(term, entry.explanation)
+    }
+  }
+  return map
+}
+
 async function loadDictionaryFile(filePath: string): Promise<Map<string, string>> {
   const map = new Map<string, string>()
   try {
-    const raw = await readFile(filePath, 'utf-8')
-    const data = JSON.parse(raw) as Array<{ ci?: string; word?: string; explanation: string }>
-
-    for (const entry of data) {
-      const term = entry.ci || entry.word
-      if (term && entry.explanation) {
-        map.set(term, entry.explanation)
-      }
-    }
+    return parseDictionaryEntries(await readFile(filePath, 'utf-8'))
   } catch (error) {
     // 路径原样交出去：脱敏那一步把它收成文件名（#123 那种「调用点自己记得写 basename」在这里不再需要）
     logger.error(TAG, 'Failed to load dictionary file', { file: filePath, error })
+    return map
   }
-  return map
 }
 
 async function ensureUpdateDir(): Promise<void> {
@@ -109,17 +157,32 @@ async function initializeFromUpdate(): Promise<boolean> {
 
   if (!versionInfo) return false
 
-  const ciPath = join(updatePath, 'ci.json')
-  const idiomPath = join(updatePath, 'idiom.json')
+  const files = ['ci.json', 'idiom.json'] as const
+  const buffers = new Map<string, Buffer>()
+  try {
+    for (const filename of files) {
+      buffers.set(filename, await readFile(join(updatePath, filename)))
+    }
+  } catch {
+    // 少一份、读不动都算「这份更新不存在」，退回内置那份
+    return false
+  }
 
-  if (!(await fileExists(ciPath)) || !(await fileExists(idiomPath))) return false
+  // 同一把闸门打在读取侧，理由在落盘侧之外还有一条：旧版代码是「下载一份写一份、写完不验」，
+  // 所以盘上完全可能留着「ci.json 断了、idiom.json 是好的」这种混合态。以前只按两份都空才判失败，
+  // 于是它带着零条词语被当成一次成功的更新加载进来，而 version.json 里的 commit 和远端一致，
+  // checkForUpdate 永远回「已是最新」——坏状态自己不会好。现在验不过就整份退回内置，
+  // 退回之后版本号又和远端不一样了，下一次检查更新会重下一遍，这才是自愈。
+  for (const filename of files) {
+    const mismatch = verifyDictionaryBytes(filename, buffers.get(filename)!)
+    if (mismatch) {
+      logger.warn(TAG, 'Updated dictionary rejected by checksum, falling back to builtin', { version: versionInfo.version, mismatch })
+      return false
+    }
+  }
 
-  const [words, idioms] = await Promise.all([
-    loadDictionaryFile(ciPath),
-    loadDictionaryFile(idiomPath),
-  ])
-
-  if (words.size === 0 && idioms.size === 0) return false
+  const words = parseDictionaryEntries(buffers.get('ci.json')!.toString('utf-8'))
+  const idioms = parseDictionaryEntries(buffers.get('idiom.json')!.toString('utf-8'))
 
   dictionaryCache = { words, idioms }
   currentVersion = versionInfo.version
@@ -233,6 +296,9 @@ export async function downloadUpdate(): Promise<{ success: boolean; error?: stri
 
     const filesToDownload = ['ci.json', 'idiom.json']
 
+    // 先全部取回、全部验过，再一份都不落盘：中途失败时上一版数据还完整留着，
+    // 不会出现「ci.json 是新的、idiom.json 还是旧的」那种混合态
+    const pending: Array<{ filename: string; content: Buffer }> = []
     for (const filename of filesToDownload) {
       const url = `${RAW_BASE}/${filename}`
       const fileResponse = await fetch(url)
@@ -241,8 +307,18 @@ export async function downloadUpdate(): Promise<{ success: boolean; error?: stri
         return { success: false, error: `下载 ${filename} 失败 (${fileResponse.status})` }
       }
 
-      const content = await fileResponse.text()
-      await writeFile(join(updatePath, filename), content, 'utf-8')
+      // 按字节验，不走 text()：重新编码过一次 UTF-8 之后再比长度与指纹，量的就不是拿到的那份东西了
+      const content = Buffer.from(await fileResponse.arrayBuffer())
+      const mismatch = verifyDictionaryBytes(filename, content)
+      if (mismatch) {
+        logger.error(TAG, 'Dictionary update rejected by checksum', { filename, mismatch })
+        return { success: false, error: mismatch }
+      }
+      pending.push({ filename, content })
+    }
+
+    for (const { filename, content } of pending) {
+      await writeFile(join(updatePath, filename), content)
     }
 
     const versionInfo: VersionInfo = {
