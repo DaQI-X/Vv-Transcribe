@@ -1,15 +1,20 @@
-name: Mirror Release to R2
+name: Mirror Release
 
-# 把 GitHub Release 的全部资产逐字节同步到 Cloudflare R2（对外域名 dl.vvscribe.com），
-# 国内用户下载走镜像。GitHub Release 仍是唯一发版源：镜像只是副本，不是第二条发布链路。
+# 把 GitHub Release 的全部资产逐字节同步到下载镜像。GitHub Release 仍是唯一发版源：
+# 镜像只是副本，不是第二条发布链路。两个后端，各自独立开关（secrets 没配就绿退）：
+# - R2（dl.vvscribe.com，桶未建好前是空转）：rclone copy，幂等重跑只补缺。
+# - Hugging Face 数据集（Seven7Q/vv-transcribe-releases）：按版本打 tag，
+#   镜像链接钉 tag（.../resolve/v<ver>/<file>），国内走 hf-mirror.com 换域名。
+#   同步的是 Release 原文件，不重新打包——重打字节必变，SHA256SUMS 就对不上。
 #
 # 两个入口：
 # - workflow_call：build.yml 的 release job 成功后自动调用（tag 发版链路的一环）
 # - workflow_dispatch：手工回填或重试（例如镜像上线前发布的 v1.2.1）
 #
-# 失败不影响已发布的 Release；rclone copy 幂等，重跑只补缺、不重复传。
-# 依赖三个仓库 secrets：R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY。
-# 没配时本 workflow 打警告后绿退（镜像是增益项，不该把发版链路拦死），配好后 dispatch 即可补上。
+# 失败不影响已发布的 Release。
+# 依赖仓库 secrets：R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY（R2）
+# 与 HF_TOKEN（HF，fine-grained，只对该数据集有写权限，绝不进日志）。
+# 没配时对应后端打警告后绿退（镜像是增益项，不该把发版链路拦死），配好后 dispatch 即可补上。
 
 on:
   workflow_call:
@@ -25,9 +30,10 @@ permissions:
 
 jobs:
   mirror:
-    name: Sync assets to R2
+    name: Sync assets to mirrors
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 首同步要往 HF 传 1.15GB（v1.2.1 七件资产），30 分钟留得紧，抬到 45
+    timeout-minutes: 45
     steps:
       - name: Resolve tag
         id: tag
@@ -96,3 +102,67 @@ jobs:
           # 真正的字节完整性由上传前那步 sha256sum 对账锚定（用户下载后也可拿 SHA256SUMS.txt 复核）。
           rclone check release-assets "$dest" --s3-no-check-bucket --size-only
           rclone ls "$dest" --s3-no-check-bucket
+
+      # HF 数据集后端：产物按「当前 main 修订 = 最新发版」落根目录，再给该修订打 v<ver> tag。
+      # 链接一律钉 tag（resolve/v<ver>/<file>），旧版本 tag 指向各自的历史修订，永不被后版覆盖。
+      # 重跑幂等：内容没变时 upload_folder 不产生新提交，随后的逐件体积对账仍会跑。
+      - name: Sync to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: Seven7Q/vv-transcribe-releases
+          HF_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN}" ]; then
+            echo "::warning::HF_TOKEN 未配置，跳过 HF 同步。GitHub Release 与 R2 不受影响；配好后手工 dispatch 本 workflow 即可补上。"
+            exit 0
+          fi
+          python3 -m pip install -q huggingface_hub
+          python3 - <<'PY'
+          import os
+          import sys
+          from huggingface_hub import HfApi
+
+          repo = os.environ["HF_REPO"]
+          tag = os.environ["HF_TAG"]
+          api = HfApi(token=os.environ["HF_TOKEN"])
+
+          # 公开性是前提：镜像链接给终端用户直连，私有仓传成功也没用，先拦住再说。
+          info = api.repo_info(repo_id=repo, repo_type="dataset")
+          if info.private:
+              print(f"::error::数据集 {repo} 是私有，镜像必须是公开的")
+              sys.exit(1)
+
+          api.upload_folder(
+              repo_id=repo,
+              repo_type="dataset",
+              folder_path="release-assets",
+              commit_message=f"Sync GitHub Release {tag}",
+          )
+
+          # 体积对账：证「数据集当前修订里的每件 == 刚从 Release 下载的」。
+          # 只比大小不比哈希——LFS 大文件全量回读要再花一倍时间，
+          # 字节完整性由 SHA256SUMS.txt 锚定（用户下载后可自行复核）。
+          local = sorted(f for f in os.listdir("release-assets") if os.path.isfile(f"release-assets/{f}"))
+          sizes = {i.path: i.size for i in api.get_paths_info(repo_id=repo, paths=local, repo_type="dataset")}
+          bad = []
+          for name in local:
+              expect = os.path.getsize(f"release-assets/{name}")
+              got = sizes.get(name)
+              mark = "ok" if got == expect else "MISMATCH"
+              if got != expect:
+                  bad.append(name)
+              print(f"{mark}\t{name}\tlocal={expect}\tremote={got}")
+          if bad:
+              print(f"::error::HF 上体积对不上的文件：{', '.join(bad)}")
+              sys.exit(1)
+
+          # 给当前修订打版本 tag；已有同名 tag 视为上次跑到过上传之后，跳过。
+          existing = {t.tag for t in (api.list_repo_refs(repo_id=repo, repo_type="dataset").tags or [])}
+          if tag in existing:
+              print(f"tag {tag} 已存在，跳过 create_tag")
+          else:
+              api.create_tag(repo_id=repo, repo_type="dataset", tag=tag, tag_message=f"mirror of GitHub Release {tag}")
+              print(f"已打 tag {tag}")
+          print(f"https://huggingface.co/datasets/{repo}/tree/{tag}")
+          PY
