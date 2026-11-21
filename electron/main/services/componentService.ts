@@ -833,8 +833,13 @@ async function attemptDownload(
       headers: { 'User-Agent': 'vv-transcribe' },
     })
     if (!res.ok) {
+      // 只有 404 算「这个源亲口说没有」（MissingAssetError）：调用方要靠它区分「重跑没意义」
+      // 和「这一棒没跑动」，5xx 是服务器那一刻的状态，不能拿它掐掉兜回那一棒。
       // 这句话两条来源都要能用，所以不写「发布」：清单那条 entry.tag 是 vX.Y.Z 这种发布号，上游那条是提交号前 7 位
-      throw new Error(`下载失败 ${res.status}（${entry.asset} 在 ${entry.tag} 这一版里取不到？）`)
+      if (res.status === 404) {
+        throw new MissingAssetError(`下载失败 ${res.status}（${entry.asset} 在 ${entry.tag} 这一版里取不到？）`)
+      }
+      throw new Error(`下载失败 ${res.status}（${hostOf(url)} 这一棒没取到文件）`)
     }
     if (!res.body) throw new Error('下载响应没有内容')
 
@@ -861,6 +866,7 @@ async function attemptDownload(
     onBytes(received)
   } catch (err) {
     if (inFlight.reason === 'cancelled') throw new Error('已取消下载')
+    if (err instanceof MissingAssetError) throw err
     if (stalled) {
       throw new Error(
         `${stalled}（已收到 ${(received / 1e6).toFixed(1)}MB / 约 ${(entry.bytes / 1e6).toFixed(0)}MB）`
@@ -883,6 +889,7 @@ async function attemptDownload(
  * 把一份资产取到 `.part` 并验过指纹，返回收到的字节数；任何一道闸门没过就抛，由调用方删掉临时件。
  * 候选源按 assetUrls() 的顺序试（#407）：自家 Release 取不动时换 hf-mirror 上那份逐字节副本，
  * 换 host 不换 SHA2-256 那道闸门——清单没点过的文件在哪个源上都装不进去。
+ * 全试完仍没成时，第一腿还能补跑一次耐心预算，理由写在下面那段注释里。
  * `progress` 只给逐文件取上游那条路用：一条进度条要跨 17 个文件连起来走，
  * 每个文件都拿自己的字节数当分母，界面上就是一根从 0 反复弹回去的假条。
  * 导出只为让单测能喂假网络：换源、以及「换了 host 但指纹不符照样不认」这两条
@@ -902,31 +909,41 @@ export async function downloadToPart(
     emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
 
   const problems: string[] = []
-  for (const [index, url] of urls.entries()) {
+  /** 哪个源亲口说过「这一版没有这份件」——对它的重跑只会再拿到同一个 404，不该做 */
+  const absent = new Set<string>()
+  /** 哪个源给过一份字节完整的文件（哪怕指纹不对）——重跑它等于再赌一次同一条链路的坏数据 */
+  const delivered = new Set<string>()
+
+  /**
+   * 跑一棒：成功返回 true，任何一道闸门没过就把原因记进 problems 并返回 false。
+   * `note` 只影响给用户看的那句问题里的措辞（兜回第一腿那一棒要说清它是第二遍）。
+   */
+  const take = async (url: string, budget: Budget, note: string): Promise<boolean> => {
     if (inFlight.reason === 'cancelled') throw new Error('已取消下载')
-    const budget = index === urls.length - 1 ? LAST_BUDGET : EARLY_BUDGET
+    const label = `${hostOf(url)}${note}`
     let taken: { received: number; digest: string }
     try {
       taken = await attemptDownload(url, partFile, entry, inFlight, budget, report)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (message === '已取消下载') throw err
-      problems.push(`${hostOf(url)}：${message}`)
+      if (err instanceof MissingAssetError) absent.add(url)
+      problems.push(`${label}：${message}`)
       logger.warn(TAG, 'asset attempt failed', { id: spec.id, url, error: message })
-      continue
+      return false
     }
     if (taken.received !== entry.bytes) {
-      problems.push(
-        `${hostOf(url)}：下载不完整（收到 ${taken.received} / 应有 ${entry.bytes} 字节）`
-      )
+      problems.push(`${label}：下载不完整（收到 ${taken.received} / 应有 ${entry.bytes} 字节）`)
       logger.warn(TAG, 'incomplete download', {
         id: spec.id,
         url,
         received: taken.received,
         expected: entry.bytes,
       })
-      continue
+      return false
     }
+    // 走到这里，这个源已经把整份文件交出来了：下面拒的是内容，不是链路
+    delivered.add(url)
     if (taken.digest !== entry.sha256) {
       // 记 host：镜像上的副本与原件指纹不一致时，这句话是唯一的现场证据
       logger.error(TAG, 'fingerprint mismatch', {
@@ -936,14 +953,43 @@ export async function downloadToPart(
         actual: taken.digest,
       })
       problems.push(
-        `${hostOf(url)}：指纹和钉死的那份对不上（${taken.digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…）`
+        `${label}：指纹和钉死的那份对不上（${taken.digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…）`
       )
-      continue
+      return false
     }
-    if (urls.length > 1 && index > 0) {
-      logger.info(TAG, 'asset recovered from fallback source', { id: spec.id, url, attempts: index + 1 })
+    return true
+  }
+
+  // 候选队列：最后一个用耐心预算（换无可换只能等），其余按快刀阈值随时准备换源
+  for (const [index, url] of urls.entries()) {
+    const budget = index === urls.length - 1 ? LAST_BUDGET : EARLY_BUDGET
+    if (await take(url, budget, '')) {
+      if (index > 0) {
+        logger.info(TAG, 'asset recovered from another source', { id: spec.id, url, attempts: index + 1 })
+      }
+      return entry.bytes
     }
-    return taken.received
+  }
+
+  /**
+   * 兜回第一个源、用不设快刀的预算跑到底。
+   * 加候选源只能让下载变好，不能把「本来慢慢能下完」变成「彻底失败」，而这一棒正是那条底线：
+   * 2026-11-21 实测国内直连 GitHub 约 21KB/s、镜像约 2MB/s，而清单钉的那个 tag 镜像未必同步过
+   * （发版链路的镜像同步缺凭证时是「打警告后绿退」，不是失败）。快刀在 3 秒掐断第一腿、
+   * 第二腿 404，按 45 分钟的硬上限本来 19 分钟能下完的那份文件就变成一句报错。
+   * 兜回那一棒只补「链路没跑通」这一种：第一个源既没亲口说没有（absent），也没把整份文件交出来
+   * 过（delivered——那种情况重跑等于再赌一次同一条链路的坏数据，白烧到 45 分钟上限）。
+   */
+  if (urls.length > 1 && !absent.has(urls[0]) && !delivered.has(urls[0])) {
+    const retryNote = '（换回第一个源跑到底）'
+    if (await take(urls[0], LAST_BUDGET, retryNote)) {
+      logger.info(TAG, 'asset recovered by retrying the first source', {
+        id: spec.id,
+        url: urls[0],
+        attempts: urls.length + 1,
+      })
+      return entry.bytes
+    }
   }
 
   if (problems.length === 1) throw new Error(`${problems[0]}。可开启网络加速后重试`)

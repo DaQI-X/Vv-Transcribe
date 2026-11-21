@@ -6,7 +6,8 @@
  *    且 GitHub 排第一（发版源优先，第三方副本只是出路）；
  * 2. 换源真的会发生——第一棒失败要继续试第二棒，而不是把第一棒的错直接抛给用户；
  * 3. 换 host 不换闸门——落地前比的始终是清单钉死的 SHA2-256，镜像给一份「别的内容」必须被拒；
- * 4. 换源阈值——第一棒慢到照这个速度取不完要换源，最后一棒不许中途被换掉（换无可换只能等）。
+ * 4. 换源阈值——第一棒慢到照这个速度取不完要换源，最后一棒不许中途被换掉（换无可换只能等）；
+ * 5. 换源不许把人留在原地——第二腿空着（镜像没同步过那个 tag）时，第一腿要能兜回来慢慢跑完。
  */
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
@@ -221,6 +222,62 @@ describe('downloadToPart 换源', () => {
     await expect(done).resolves.toBe(payload.length)
     expect(fetch.mock.calls.map((call) => new URL(call[0] as string).host)).toEqual([GITHUB, MIRROR])
     expect(Buffer.compare(await readFile(partFile), payload)).toBe(0)
+  })
+
+  /**
+   * #407 上线前实测出来的那条底线，单独钉一条：镜像数据集只回填过 v1.2.1，而线上清单钉的是
+   * v1.0.8 —— `resolve/v1.0.8/vv-tts-server-darwin-arm64-1.0.8` 直连拿到的就是 404（2026-11-21 核过）。
+   * 也就是第二腿随时可能是空的，而快刀会在 3 秒掐掉第一腿。国内直连约 21KB/s，24MB 那份按 45 分钟
+   * 硬上限本来 19 分钟能下完；没有这一棒，用户拿到的就是一句「几个下载源都没取到」，比改之前更差。
+   */
+  it('镜像上没有清单钉的那个 tag（404）：兜回第一个源慢慢跑完，不许就此失败', async () => {
+    vi.useFakeTimers()
+    const payload = Buffer.from('engine binary bytes')
+    const entry = entryFor(payload)
+    let githubCalls = 0
+    const fetch = vi.spyOn(net, 'fetch').mockImplementation(async (url, init) => {
+      if (new URL(url as string).host === MIRROR) {
+        return responseOf(new Uint8Array(), { ok: false, status: 404 })
+      }
+      githubCalls++
+      // 第一棒演「连上了但字节爬不出来」，兜回来那一棒才给全量：同一份文件在同一个源上
+      // 两种速度都可能出现，区别只在预算给不给它跑完的时间
+      return githubCalls === 1
+        ? responseThatNeverSends(init as { signal?: AbortSignal })
+        : responseOf(new Uint8Array(payload))
+    })
+
+    const done = downloadToPart(assetUrls(entry), partFile, entry, newTask(), spec)
+    // 快刀那一拍（3 秒阈值 + 1 秒粒度）之后还要留给换源与兜回那两棒走完；假时钟只截 timer，
+    // 落盘的 fs 回调仍要真实事件循环那一轮，所以每拍之间真睡一次（理由见上面那条测试）
+    for (let i = 0; i < 8; i++) {
+      await realSleep(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+    }
+
+    await expect(done).resolves.toBe(payload.length)
+    expect(fetch.mock.calls.map((call) => new URL(call[0] as string).host)).toEqual([
+      GITHUB,
+      MIRROR,
+      GITHUB,
+    ])
+    expect(Buffer.compare(await readFile(partFile), payload)).toBe(0)
+  })
+
+  it('第一个源亲口回了 404：不兜回重跑，用户看到的是两条路的原话', async () => {
+    const payload = Buffer.from('x')
+    const entry = entryFor(payload)
+    const fetch = vi.spyOn(net, 'fetch').mockImplementation(async (url) =>
+      responseOf(new Uint8Array(), {
+        ok: false,
+        status: new URL(url as string).host === GITHUB ? 404 : 500,
+      })
+    )
+
+    await expect(downloadToPart(assetUrls(entry), partFile, entry, newTask(), spec)).rejects.toThrow(
+      /取不到？/
+    )
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('取消是整条任务的：切源之后再点取消要立刻停，不许继续换源', async () => {
