@@ -63,6 +63,29 @@ const MANIFEST_URLS = [
 /** 我们自己仓库的 Release 资产前缀，写死。清单改不了它 */
 const RELEASE_BASE = 'https://github.com/DaQI-X/Vv-Transcribe/releases/download'
 
+/**
+ * hf-mirror 上那份逐字节副本的前缀（.github/workflows/mirror-release.yml 把 Release 资产原样
+ * 同步进 Seven7Q/vv-transcribe-releases 并按发布号打 tag，所以两边只差前缀）。
+ * `?download=true` 不是装饰：它决定 Xet 后端给的 Content-Disposition 是 attachment 还是 inline，
+ * 而 inline 那条在浏览器侧会被当成页面渲染（#406 官网那条直链栽的就是这个）。
+ * 另一个坑是 Referer：带上外部站的 Referer 时 hf-mirror 只回一个 6.5KB 的「警告：未授权访问」HTML 页，
+ * 实测 net.fetch 不发 Referer，所以这条候选拿到的是原文件——24,445,808 字节、12 秒、SHA2-256 与清单一致。
+ */
+const MIRROR_BASE = 'https://hf-mirror.com/datasets/Seven7Q/vv-transcribe-releases/resolve'
+
+/**
+ * 资产取件的候选源，按顺序试（#407）。
+ * 自家 Release 排第一：它是唯一发版源，镜像只是副本，能取到原件就不去动第三方。
+ * 但副本必须有：国内直连 github.com 实测要么 0 字节连不上、要么 15–17KB/s 地漏，
+ * 而引擎二进制 24MB 按那个速度要 27 分钟——那不是「慢一点」，是必挂（现有文案
+ * 「可开启网络加速后重试」就是这条链路的自白）。
+ * 换 host 不动信任模型：落地前比的始终是清单钉死的那份 SHA2-256，与来源无关。
+ */
+const ASSET_SOURCES: { prefix: string; suffix: string }[] = [
+  { prefix: RELEASE_BASE, suffix: '' },
+  { prefix: MIRROR_BASE, suffix: '?download=true' },
+]
+
 /** 清单格式版本：对不上就停，别按半懂的结构去装东西 */
 const MANIFEST_SCHEMA = 1
 /** Release 标签：形如 vX.Y.Z（带不带 v 都收）。资产名与 tag 都要拼进 URL，所以字符集收得很死 */
@@ -275,8 +298,12 @@ interface InstalledRecord {
 
 interface Task {
   controller: AbortController
-  /** 中止原因。abort() 本身不带信息，不分清「用户取消 / 断流 / 超时」就没法说人话 */
-  reason: '' | 'cancelled' | 'idle' | 'timeout'
+  /**
+   * 整条任务被中止的原因。abort() 本身不带信息，不记这一笔就分不清「用户取消」和
+   * 「某一棒自己断流」——前者要立刻停手，后者要换下一个源继续。
+   * 断流/超时是单个候选源的事，记在 attemptDownload 里，不在这层。
+   */
+  reason: '' | 'cancelled'
   watchers: Array<(p: ComponentProgress) => void>
 }
 
@@ -390,10 +417,24 @@ function manifestUrls(): string[] {
  * 资产前缀可以覆盖，但它只在清单也被覆盖时才有意义：落地前要比 SHA2-256，
  * 换前缀换不出「清单没点过的文件」，所以这个口子撑不开「把用户机器上的组件换成攻击者的文件」。
  * 两个都覆盖才能真正喂一份本地假归档，而这要求清单先为那份文件签一个真指纹。
+ *
+ * 覆盖生效时只认那一个源、不再追加生产候选源：自测口子要的是「跑的就是我喂的这份」，
+ * 中间混进一次 hf-mirror 成功会让那条链路测了等于没测。
  */
-function releaseBase(): string {
+function assetSources(): { prefix: string; suffix: string }[] {
   const override = process.env.VV_COMPONENTS_RELEASE_BASE
-  return override && process.env.VV_COMPONENTS_MANIFEST_URL ? override : RELEASE_BASE
+  if (override && process.env.VV_COMPONENTS_MANIFEST_URL) return [{ prefix: override, suffix: '' }]
+  return ASSET_SOURCES
+}
+
+/**
+ * 同一份资产的取件地址，按候选顺序排。tag 与资产名在清单解析那一步就过过正则
+ * （TAG_RE / ASSET_RE），所以这里拼串不引入新的注入面。
+ * 导出只为让单测钉住「顺序」与「镜像那条必须带 ?download=true」——这两条错了都不会崩，
+ * 只会让用户拿到一个 HTML 页或永远先等满 GitHub 的超时。
+ */
+export function assetUrls(entry: Pick<AssetEntry, 'tag' | 'asset'>): string[] {
+  return assetSources().map((source) => `${source.prefix}/${entry.tag}/${entry.asset}${source.suffix}`)
 }
 
 /**
@@ -680,42 +721,115 @@ function emit(inFlight: Task, p: ComponentProgress): void {
 }
 
 /**
- * 边下边算 SHA2-256。返回收到的字节数；指纹不符或字节数不对直接抛，由调用方删掉临时件。
- * `progress` 只给逐文件取上游那条路用：一条进度条要跨 17 个文件连起来走，
- * 每个文件都拿自己的字节数当分母，界面上就是一根从 0 反复弹回去的假条。
+ * 每个候选源给多少机会。前面的源（生产上就是 GitHub）用快刀，判据是**速率**而不是「有没有断」：
+ * 国内直连 github.com 的失败形态不是报错，而是 0 字节连不上或以 15–17KB/s 级漏——只按「多久没新
+ * 字节」判，那条 trickle 会一直算「还活着」，24MB 的引擎二进制要 27 分钟才撞到硬上限，用户等到的
+ * 是「下载超时」。所以加一条「3 秒内没进来 1MB 就换源」：同一台机器关掉代理实测，github.com 三秒
+ * 只漏进 64KB（照这个速度取不完），hf-mirror 同一条 24MB 十二秒跑完（≈2MB/s）——快刀切的是前者，
+ * 而真误伤了也只是换到 hf-mirror，不比原件慢。最后一个源不给快刀，理由见下面两份预算。
+ *
+ * 这里刻意不按「用户在国内还是国外」选源：判国家码要么问第三方 IP 服务（多一个能撒谎、能挂、
+ * 还把用户出口 IP 交出去的角色），要么问自家域名下的 CF trace——可挂了代理/VPN 的用户 loc 会变成
+ * 海外，而那批人恰恰最需要镜像，等于把判据建在「有没有开加速」上。按速率选源不用知道用户在哪，
+ * 也不新增任何网络往返：第一棒自己会回答这个问题。
  */
-async function downloadToPart(
+/**
+ * 第一棒（自家 Release）的预算：8 秒断流 + 「3 秒没进够 1MB」两条快刀。
+ * 最后一棒只留 8 秒断流、不设快刀：前面都不行时得有人把最后一棒跑完，而镜像那棒的第一个字节本身
+ * 就要等三秒多才到（TLS + 302 + Xet 握手），给它同一把快刀等于自己把自己切死。
+ * 导出是为了让单测读的是真阈值，而不是测试里抄一份数字再自我证明。
+ */
+export const EARLY_BUDGET: Budget = { idleMs: 8_000, floorBytes: 1_000_000, floorMs: 3_000, hardMs: 3 * 60_000 }
+export const LAST_BUDGET: Budget = { idleMs: IDLE_TIMEOUT_MS, floorBytes: 0, floorMs: 0, hardMs: HARD_TIMEOUT_MS }
+/** 看门狗的检查粒度；也是「取消之外」的故障最坏会被多容忍 1 秒的原因 */
+const WATCHDOG_MS = 1_000
+
+interface Budget {
+  /** 连续多少秒没有新字节算断流 */
+  idleMs: number
+  /** 快刀阈值：floorMs 内没收到 floorBytes 就换源；0 表示不设这条 */
+  floorBytes: number
+  floorMs: number
+  /** 这一棒的硬上限 */
+  hardMs: number
+}
+
+/**
+ * 这一棒该判死了吗？返回判死原因，空串表示继续等。
+ * 抽成纯函数是因为它整个就是「拿三个时间戳比大小」，靠假时钟在集成测试里演它，
+ * 测到的往往是假时钟而不是这条判据——而 3 秒换源快不快、会不会误伤，全押在它身上。
+ */
+export function stallReason(
+  now: number,
+  startedAt: number,
+  lastTouch: number,
+  received: number,
+  budget: Budget
+): string {
+  if (now - lastTouch > budget.idleMs) {
+    return `连续 ${Math.round(budget.idleMs / 1000)} 秒没有新字节进来`
+  }
+  if (budget.floorBytes > 0 && now - startedAt > budget.floorMs && received < budget.floorBytes) {
+    return `${Math.round(budget.floorMs / 1000)} 秒只进来 ${(received / 1e6).toFixed(2)}MB，照这个速度取不完`
+  }
+  return ''
+}
+
+/** 从地址里取 host，只用于把「哪个源没取到」说清楚 */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
+/**
+ * 从一个候选源取一份文件，边下边算 SHA2-256，返回字节数与指纹（比对交给调用方：
+ * 一份源取到坏文件不该直接判死，原件可能还好着）。
+ * `onBytes` 每收到一块就被调一次，进度条怎么拼是调用方的事。
+ */
+async function attemptDownload(
   url: string,
   partFile: string,
   entry: AssetEntry,
   inFlight: Task,
-  spec: ComponentSpec,
-  progress?: { base: number; total: number }
-): Promise<number> {
-  const doneOf = (received: number) => (progress ? progress.base + received : received)
-  const totalOf = () => (progress ? progress.total : entry.bytes)
+  budget: Budget,
+  onBytes: (received: number) => void
+): Promise<{ received: number; digest: string }> {
   await mkdir(dirname(partFile), { recursive: true })
+  // 没有断点续传：换源就是从 0 再来一遍，所以先清掉上一棒的半件（跨卷 rename 是 EXDEV，
+  // 临时件必须留在组件目录之内，这点与 #230 当初的理由一致）
   await rm(partFile, { force: true })
 
-  let lastReport = 0
+  const attempt = new AbortController()
+  // 取消按的是整条任务的开关，而此刻在飞的只有这一棒，所以要把它串到本棒的 signal 上：
+  // 否则用户在切源之后点「取消」，要等这一棒自己跑完才停得下来
+  const onGlobalAbort = () => attempt.abort()
+  inFlight.controller.signal.addEventListener('abort', onGlobalAbort, { once: true })
+
+  const startedAt = Date.now()
   let lastTouch = Date.now()
+  let lastReport = 0
   let received = 0
+  let stalled = ''
   const hash = createHash('sha256')
-  const idleTimer = setInterval(() => {
-    if (Date.now() - lastTouch > IDLE_TIMEOUT_MS) {
-      inFlight.reason = 'idle'
-      inFlight.controller.abort()
+  const watchdog = setInterval(() => {
+    const reason = stallReason(Date.now(), startedAt, lastTouch, received, budget)
+    if (reason) {
+      stalled = reason
+      attempt.abort()
     }
-  }, 5_000)
+  }, WATCHDOG_MS)
   const hardTimer = setTimeout(() => {
-    inFlight.reason = 'timeout'
-    inFlight.controller.abort()
-  }, HARD_TIMEOUT_MS)
+    stalled = `约 ${(entry.bytes / 1e6).toFixed(0)}MB 在 ${Math.round(budget.hardMs / 60_000)} 分钟内没下完`
+    attempt.abort()
+  }, budget.hardMs)
 
   try {
     const res = await netFetch(url, {
       redirect: 'follow',
-      signal: inFlight.controller.signal,
+      signal: attempt.signal,
       headers: { 'User-Agent': 'vv-transcribe' },
     })
     if (!res.ok) {
@@ -738,23 +852,18 @@ async function downloadToPart(
         const now = Date.now()
         if (now - lastReport > PROGRESS_INTERVAL_MS) {
           lastReport = now
-          emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
+          onBytes(received)
         }
       }
     } finally {
       await handle.close()
     }
-    emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
+    onBytes(received)
   } catch (err) {
     if (inFlight.reason === 'cancelled') throw new Error('已取消下载')
-    if (inFlight.reason === 'idle') {
+    if (stalled) {
       throw new Error(
-        `下载断流：连续 ${IDLE_TIMEOUT_MS / 1000} 秒没有新字节进来（已收到 ${(received / 1e6).toFixed(1)}MB / 约 ${(entry.bytes / 1e6).toFixed(0)}MB）。可开启网络加速后重试`
-      )
-    }
-    if (inFlight.reason === 'timeout') {
-      throw new Error(
-        `下载超时：约 ${(entry.bytes / 1e6).toFixed(0)}MB 在 ${HARD_TIMEOUT_MS / 60_000} 分钟内没下完（收到 ${(received / 1e6).toFixed(1)}MB）。可开启网络加速后重试`
+        `${stalled}（已收到 ${(received / 1e6).toFixed(1)}MB / 约 ${(entry.bytes / 1e6).toFixed(0)}MB）`
       )
     }
     // net.fetch 失败抛的是 net::ERR_* 这类错误码，原样冒到界面上没人看得懂，包一句
@@ -762,21 +871,83 @@ async function downloadToPart(
     if (NETWORK_ERROR_RE.test(message)) throw new Error(`${NETWORK_HINT}（${message}）`)
     throw err
   } finally {
-    clearInterval(idleTimer)
+    clearInterval(watchdog)
     clearTimeout(hardTimer)
+    inFlight.controller.signal.removeEventListener('abort', onGlobalAbort)
   }
 
-  if (received !== entry.bytes) {
-    throw new Error(`下载不完整（${entry.asset}：收到 ${received} / 应有 ${entry.bytes} 字节）`)
+  return { received, digest: hash.digest('hex') }
+}
+
+/**
+ * 把一份资产取到 `.part` 并验过指纹，返回收到的字节数；任何一道闸门没过就抛，由调用方删掉临时件。
+ * 候选源按 assetUrls() 的顺序试（#407）：自家 Release 取不动时换 hf-mirror 上那份逐字节副本，
+ * 换 host 不换 SHA2-256 那道闸门——清单没点过的文件在哪个源上都装不进去。
+ * `progress` 只给逐文件取上游那条路用：一条进度条要跨 17 个文件连起来走，
+ * 每个文件都拿自己的字节数当分母，界面上就是一根从 0 反复弹回去的假条。
+ * 导出只为让单测能喂假网络：换源、以及「换了 host 但指纹不符照样不认」这两条
+ * 是本次改动的全部风险所在，走公开 API 测要把整条安装链都搭起来。
+ */
+export async function downloadToPart(
+  urls: string[],
+  partFile: string,
+  entry: AssetEntry,
+  inFlight: Task,
+  spec: ComponentSpec,
+  progress?: { base: number; total: number }
+): Promise<number> {
+  const doneOf = (received: number) => (progress ? progress.base + received : received)
+  const totalOf = () => (progress ? progress.total : entry.bytes)
+  const report = (received: number) =>
+    emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
+
+  const problems: string[] = []
+  for (const [index, url] of urls.entries()) {
+    if (inFlight.reason === 'cancelled') throw new Error('已取消下载')
+    const budget = index === urls.length - 1 ? LAST_BUDGET : EARLY_BUDGET
+    let taken: { received: number; digest: string }
+    try {
+      taken = await attemptDownload(url, partFile, entry, inFlight, budget, report)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (message === '已取消下载') throw err
+      problems.push(`${hostOf(url)}：${message}`)
+      logger.warn(TAG, 'asset attempt failed', { id: spec.id, url, error: message })
+      continue
+    }
+    if (taken.received !== entry.bytes) {
+      problems.push(
+        `${hostOf(url)}：下载不完整（收到 ${taken.received} / 应有 ${entry.bytes} 字节）`
+      )
+      logger.warn(TAG, 'incomplete download', {
+        id: spec.id,
+        url,
+        received: taken.received,
+        expected: entry.bytes,
+      })
+      continue
+    }
+    if (taken.digest !== entry.sha256) {
+      // 记 host：镜像上的副本与原件指纹不一致时，这句话是唯一的现场证据
+      logger.error(TAG, 'fingerprint mismatch', {
+        id: spec.id,
+        url,
+        expected: entry.sha256,
+        actual: taken.digest,
+      })
+      problems.push(
+        `${hostOf(url)}：指纹和钉死的那份对不上（${taken.digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…）`
+      )
+      continue
+    }
+    if (urls.length > 1 && index > 0) {
+      logger.info(TAG, 'asset recovered from fallback source', { id: spec.id, url, attempts: index + 1 })
+    }
+    return taken.received
   }
-  const digest = hash.digest('hex')
-  if (digest !== entry.sha256) {
-    logger.error(TAG, 'fingerprint mismatch', { id: spec.id, expected: entry.sha256, actual: digest })
-    throw new Error(
-      `校验不通过：下载到的 ${entry.asset} 指纹和钉死的那份对不上（${digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…），已放弃`
-    )
-  }
-  return received
+
+  if (problems.length === 1) throw new Error(`${problems[0]}。可开启网络加速后重试`)
+  throw new Error(`几个下载源都没取到 ${entry.asset}：${problems.join('；')}。可开启网络加速后重试`)
 }
 
 /**
@@ -817,9 +988,11 @@ async function doInstall(
   const target = spec.target()
   // 临时件一律放组件目录之内：跨卷 rename 是 EXDEV，放同一棵树下改名必成
   const staging = join(componentsDir(), '.staging', `${spec.id}@${entry.version}`)
+  // 走清单那条有两个候选源，日志把两条都记下来：事后从 app.log 里要能看出「哪条是出路」
+  const candidates = spec.upstream ? [] : assetUrls(entry)
   const from = spec.upstream
     ? `${spec.upstream.repo}@${spec.upstream.commit.slice(0, 7)}`
-    : `${releaseBase()}/${entry.tag}/${entry.asset}`
+    : candidates.join(' → ')
   logger.info(TAG, 'install start', { id, from, sha256: entry.sha256, bytes: entry.bytes })
 
   try {
@@ -830,9 +1003,8 @@ async function doInstall(
     await mkdir(dirname(target), { recursive: true })
 
     if (spec.kind === 'binary') {
-      const url = `${releaseBase()}/${entry.tag}/${entry.asset}`
       const partFile = join(staging, entry.asset)
-      await downloadToPart(url, partFile, entry, inFlight, spec)
+      await downloadToPart(candidates, partFile, entry, inFlight, spec)
       if (process.platform !== 'win32') await chmod(partFile, 0o755)
       await promote(partFile, target)
       await recordInstalled(spec, entry, (await stat(target)).size)
@@ -851,7 +1023,8 @@ async function doInstall(
           throw new Error(`指纹表里的路径不合规矩：${file.path}`)
         }
         await downloadToPart(
-          upstreamFileUrl(source, file),
+          // 模型那条只有一个源（上游 hf-mirror，见 ttsModelUpstream），换不成候选表
+          [upstreamFileUrl(source, file)],
           join(filesDir, file.path),
           {
             version: entry.version,
@@ -888,9 +1061,8 @@ async function doInstall(
       return { ok: true, error: null, state: await buildState(spec, entry) }
     }
 
-    const url = `${releaseBase()}/${entry.tag}/${entry.asset}`
     const archive = join(staging, entry.asset)
-    await downloadToPart(url, archive, entry, inFlight, spec)
+    await downloadToPart(candidates, archive, entry, inFlight, spec)
 
     const unpacked = join(staging, 'unpacked')
     emit(inFlight, { id: spec.id, phase: 'extract', done: 0, total: entry.extractedBytes ?? 0 })
