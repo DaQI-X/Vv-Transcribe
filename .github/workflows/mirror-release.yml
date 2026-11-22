@@ -117,52 +117,96 @@ jobs:
             echo "::warning::HF_TOKEN 未配置，跳过 HF 同步。GitHub Release 与 R2 不受影响；配好后手工 dispatch 本 workflow 即可补上。"
             exit 0
           fi
-          python3 -m pip install -q huggingface_hub
+          # 钉版本：v1.2.2 那次红就是浮动依赖红——11-21 装的 hub 里 refs.tags 元素是 TagInfo(.tag)，
+          # 11-22 pip 拉到 1.8.0 换成 GitRefInfo(.name)，那行集合推导抛 AttributeError。
+          # 挂载在发版之后的镜像步骤不该被上游改名拦死，所以版本由这里决定，不由「今天 PyPI 上是谁」决定。
+          # 升级流程：本地按同版本跑通 list_repo_refs/create_tag 后改这一行。
+          python3 -m pip install -q huggingface_hub==1.8.0
           python3 - <<'PY'
           import os
           import sys
+
           from huggingface_hub import HfApi
 
           repo = os.environ["HF_REPO"]
           tag = os.environ["HF_TAG"]
           api = HfApi(token=os.environ["HF_TOKEN"])
 
-          # 公开性是前提：镜像链接给终端用户直连，私有仓传成功也没用，先拦住再说。
-          info = api.repo_info(repo_id=repo, repo_type="dataset")
-          if info.private:
-              print(f"::error::数据集 {repo} 是私有，镜像必须是公开的")
+          # phase 只服务于报错：原始日志匿名 404，只有 ::error:: 注解公开可读，
+          # 所以「挂在哪一段」必须自己写进注解。异常原文只留类名 + 首行前 280 字，
+          # 因为注解是公开的——绝不打印 token、请求头，或可能带凭据的完整 URL。
+          phase = "初始化"
+          try:
+              # 公开性是前提：镜像链接给终端用户直连，私有仓传成功也没用，先拦住再说。
+              phase = "repo_info（认证与可见性）"
+              info = api.repo_info(repo_id=repo, repo_type="dataset")
+              if info.private:
+                  print(f"::error::数据集 {repo} 是私有，镜像必须是公开的")
+                  sys.exit(1)
+
+              # 重跑幂等：上一轮「传成功、打 tag 挂了」时（v1.2.2 就是这样），
+              # 内容没变的 upload_folder 不产生新提交；没有这一句，重试等于白传 1.1GB。
+              phase = "upload_folder（本版全部资产，约 1.1GB）"
+              api.upload_folder(
+                  repo_id=repo,
+                  repo_type="dataset",
+                  folder_path="release-assets",
+                  commit_message=f"Sync GitHub Release {tag}",
+              )
+
+              # 体积对账：证「数据集当前修订里的每件 == 刚从 Release 下载的」。
+              # 只比大小不比哈希——LFS 大文件全量回读要再花一倍时间，
+              # 字节完整性由 SHA256SUMS.txt 锚定（用户下载后可自行复核）。
+              phase = "体积对账"
+              local = sorted(f for f in os.listdir("release-assets") if os.path.isfile(f"release-assets/{f}"))
+              sizes = {i.path: i.size for i in api.get_paths_info(repo_id=repo, paths=local, repo_type="dataset")}
+              bad = []
+              for name in local:
+                  expect = os.path.getsize(f"release-assets/{name}")
+                  got = sizes.get(name)
+                  mark = "ok" if got == expect else "MISMATCH"
+                  if got != expect:
+                      bad.append(name)
+                  print(f"{mark}\t{name}\tlocal={expect}\tremote={got}")
+              if bad:
+                  print(f"::error::HF 上体积对不上的文件：{', '.join(bad)}")
+                  sys.exit(1)
+
+              # refs.branches / refs.tags 在 1.x 都是 GitRefInfo(name, ref, target_commit)。
+              phase = "钉 tag"
+              refs = api.list_repo_refs(repo_id=repo, repo_type="dataset")
+              revision = next((b.target_commit for b in (refs.branches or []) if b.name == "main"), "main")
+              tagged = {t.name: t.target_commit for t in (refs.tags or [])}
+              if tagged.get(tag) == revision:
+                  print(f"tag {tag} 已指向本轮修订 {revision[:12]}，不动")
+              else:
+                  # 同名 tag 指在别的修订上（上一轮传完就红、或同一版本号重发过）才重指。
+                  # Release 不可变，所以「同一版本号两份内容」实际只会来自上一轮没打完，
+                  # 删建之间那几秒的空窗不会把在线链接长期留断。
+                  if tag in tagged:
+                      api.delete_tag(repo_id=repo, repo_type="dataset", tag=tag)
+                  api.create_tag(repo_id=repo, repo_type="dataset", tag=tag, revision=revision,
+                                 tag_message=f"mirror of GitHub Release {tag}")
+                  print(f"已打/重指 tag {tag} -> {revision[:12]}")
+              print(f"树：https://huggingface.co/datasets/{repo}/tree/{tag}")
+          except Exception as err:
+              print(f"::error::HF 同步在「{phase}」失败：{type(err).__name__}: {str(err).splitlines()[0][:280]}")
               sys.exit(1)
-
-          api.upload_folder(
-              repo_id=repo,
-              repo_type="dataset",
-              folder_path="release-assets",
-              commit_message=f"Sync GitHub Release {tag}",
-          )
-
-          # 体积对账：证「数据集当前修订里的每件 == 刚从 Release 下载的」。
-          # 只比大小不比哈希——LFS 大文件全量回读要再花一倍时间，
-          # 字节完整性由 SHA256SUMS.txt 锚定（用户下载后可自行复核）。
-          local = sorted(f for f in os.listdir("release-assets") if os.path.isfile(f"release-assets/{f}"))
-          sizes = {i.path: i.size for i in api.get_paths_info(repo_id=repo, paths=local, repo_type="dataset")}
-          bad = []
-          for name in local:
-              expect = os.path.getsize(f"release-assets/{name}")
-              got = sizes.get(name)
-              mark = "ok" if got == expect else "MISMATCH"
-              if got != expect:
-                  bad.append(name)
-              print(f"{mark}\t{name}\tlocal={expect}\tremote={got}")
-          if bad:
-              print(f"::error::HF 上体积对不上的文件：{', '.join(bad)}")
-              sys.exit(1)
-
-          # 给当前修订打版本 tag；已有同名 tag 视为上次跑到过上传之后，跳过。
-          existing = {t.tag for t in (api.list_repo_refs(repo_id=repo, repo_type="dataset").tags or [])}
-          if tag in existing:
-              print(f"tag {tag} 已存在，跳过 create_tag")
-          else:
-              api.create_tag(repo_id=repo, repo_type="dataset", tag=tag, tag_message=f"mirror of GitHub Release {tag}")
-              print(f"已打 tag {tag}")
-          print(f"https://huggingface.co/datasets/{repo}/tree/{tag}")
           PY
+
+      # tag 存在性独立成一步、只用匿名接口查（不带 token，所以这一步同时证了「公开读得到」）：
+      # 上一版的教训是资产传上去了、tag 那行挂了，job 红得很笼统。镜像链接钉 tag
+      # （.../resolve/<tag>/<file>），缺 tag 对用户等于「这一版没镜像」，而数据集里明明躺着 1.1GB。
+      - name: Verify mirror tag is resolvable
+        env:
+          HF_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          refs=$(curl -fsSL --max-time 60 \
+            "https://hf-mirror.com/api/datasets/Seven7Q/vv-transcribe-releases/refs")
+          if ! printf '%s' "$refs" | grep -q "\"name\":\"${HF_TAG}\""; then
+            echo "refs: $refs"
+            echo "::error::${HF_TAG} 不在数据集 refs 里——资产可能已上传，但钉 tag 没成功：镜像链接对这一版全是 404"
+            exit 1
+          fi
+          echo "hf-mirror 的 refs 里有 ${HF_TAG}"
