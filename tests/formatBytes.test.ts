@@ -109,9 +109,9 @@ describe('判据：体积换算只剩一把尺', () => {
    * 「界面上那些 KB/MB/GB 字样只可能出自换算器」是这一条真正想守的东西，但今天还不到不了：
    * 下面这些持有者是 #282 有意没收的，各有各的理由，列死在这里是为了让「再加一处自己拼体积」
    * 变成一次显式的决定——测试红了，要么改用 formatBytes，要么来加一行并说清为什么不能改。
-   * - `componentArchive` / `componentService` / `ytDlpUpdate`：下载超时、断流、解压对账那几句
-   *   走的是 `toFixed(0)` 的粗口径（`约 24MB`），报错时用户要判断的是「还要不要重试」，不是精确
-   *   体积。收进换算器会把每一句改成一位小数，属于另一次改动，本次没动。
+   * - `componentArchive` / `componentService`：下载超时、断流、解压对账那几句走的是 `toFixed(0)`
+   *   的粗口径（`约 24MB`），报错时用户要判断的是「还要不要重试」，不是精确体积。
+   *   `ytDlpUpdate` 原本也在这一列，#413 落地候选源时那几句改用了换算器，已归位。
    * - `logger`：见上一条用例，它量的是自己那个按 1024 定义的日志上限。
    * - `localASR` / `UploadStatus`：`${weightsMb}MB`，数字本来就出自档位表里按 MB 钉好的那一列，
    *   手上没有字节数，套不进这个函数。
@@ -132,7 +132,6 @@ describe('判据：体积换算只剩一把尺', () => {
         'electron/main/services/componentArchive.ts',
         'electron/main/services/componentService.ts',
         'electron/main/services/logger.ts',
-        'electron/main/services/ytDlpUpdate.ts',
         'src/components/transcription/UploadStatus.tsx',
         'src/utils/formatBytes.ts',
       ].sort(),

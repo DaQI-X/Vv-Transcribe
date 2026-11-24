@@ -7,9 +7,10 @@
  *
  * 信任模型（自家清单，不是上游自证）：
  * - 版本与 SHA2-256 指纹来自仓库里人工核对后提交的 yt-dlp-manifest.json；
- * - 下载地址由本文件拼死（官方 release 前缀 + 清单里的版本号与资产名，两者都过正则），
- *   清单里没有 URL 字段，所以换掉清单也指不到第三方服务器；
- * - 下载完先比对指纹再落地，不匹配就删掉临时文件，绝不留下半个二进制；
+ * - 下载地址由本文件拼死（下面的候选前缀表 + 清单里的版本号与资产名，两者都过正则），
+ *   清单里没有 URL 字段，所以换掉清单也指不到别的服务器；多出来那条加速前缀拼的是同一个
+ *   「版本号/资产名」，只换 host，而换 host 换不掉下面那道指纹闸门；
+ * - 下载完先比对字节数与指纹再落地，不匹配就删掉临时文件，绝不留下半个二进制；
  * - 剩下的边界：能写这个仓库的人可以同时换掉清单和官方 release 产物（同源自证，#182 记着）。
  *   构建期的第二道关（scripts/fetch-yt-dlp.mjs、pnpm check:yt-dlp-manifest 与上游 sums 对账）
  *   只覆盖安装包，覆盖不到用户机器上的这次下载。
@@ -19,7 +20,16 @@ import { existsSync } from 'node:fs'
 import { chmod, mkdir, open, rename, rm, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { net } from 'electron'
+import { formatBytes } from '../../../src/utils/formatBytes'
 import { logger } from './logger'
+import {
+  EARLY_BUDGET,
+  LAST_BUDGET,
+  WATCHDOG_MS,
+  hostOf,
+  stallReason,
+  type Budget,
+} from './componentService'
 import {
   hasActiveMediaDownload,
   invalidateYtDlpProbes,
@@ -43,8 +53,25 @@ const MANIFEST_URLS = [
   'https://api.github.com/repos/DaQI-X/Vv-Transcribe/contents/yt-dlp-manifest.json?ref=main',
 ]
 
-/** 官方 release 资产前缀，写死。清单改不了它 */
-const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/download'
+/**
+ * 拼下载地址的前缀表，顺序即试序：官方原件在前，公开加速前缀在后。两条拼的是同一个
+ * 「版本号/资产名」，换的只是 host，下面那道 SHA2-256 闸门来自清单、换 host 换不掉它。
+ *
+ * 为什么不把加速前缀放前面（#413 调研时另一种推荐）：那样每位用户的二进制默认都出自第三方镜像，
+ * 官方原件反倒只在镜像出问题时才用。放在第二腿，它只在「官方被速率判死」时上场——正常网络下
+ * 用户拿到的仍是官方那份，多花的成本是最坏 3 秒快刀时间。本机实测 2026-11-24 同一段时间窗：
+ * 官方 23 秒只漏进 351KB（≈13.8KB/s），加速前缀整份 37MB 用 9.9 秒（≈3.8MB/s）且落地指纹
+ * 与清单逐字符相同。第三方的可用性不作假设：它挂了就走「兜回第一腿」那条慢但正确的一棒。
+ */
+const RELEASE_BASES = [
+  'https://github.com/yt-dlp/yt-dlp/releases/download',
+  'https://ghfast.top/https://github.com/yt-dlp/yt-dlp/releases/download',
+]
+
+/** 拼这一版的候选地址；导出只为让单测钉得住表序与「两条拼的是同一份版本号/资产名」 */
+export function releaseUrls(entry: Pick<ManifestEntry, 'version' | 'asset'>): string[] {
+  return RELEASE_BASES.map((base) => `${base}/${entry.version}/${entry.asset}`)
+}
 
 /** 与 scripts/lib/yt-dlp-manifest.mjs 一致：日历版本号 */
 const VERSION_RE = /^\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+)?$/
@@ -159,8 +186,11 @@ function pickEntry(raw: unknown, key: string): ManifestEntry {
  * 只认 HTTP_PROXY 环境变量，看不见系统代理；net.fetch 走 Chromium 网络栈，会跟随系统的代理/PAC。
  * 本机实测（VPN 系统代理开着）：全局 fetch 直连 GitHub releases 约 19KB/s，37MB 要 30 分钟以上；
  * 同一个资产经代理约 0.5MB/s。这一栏能不能更新完，取决于这里用哪个。
+ *
+ * cache: 'no-store' 的理由同 componentService 的 netFetch —— 大二进制不进 Chromium 磁盘缓存。
  */
-const netFetch = (url: string, init: Parameters<typeof net.fetch>[1]) => net.fetch(url, init)
+const netFetch = (url: string, init: Parameters<typeof net.fetch>[1]) =>
+  net.fetch(url, { ...init, cache: 'no-store' })
 
 async function fetchJson(url: string): Promise<unknown> {
   const controller = new AbortController()
@@ -271,22 +301,16 @@ export async function applyYtDlpUpdate(
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
 
-  const url = `${RELEASE_BASE}/${entry.version}/${entry.asset}`
-  logger.info(TAG, 'downloading yt-dlp update', { url, sha256: entry.sha256, bytes: entry.bytes })
+  const urls = releaseUrls(entry)
+  logger.info(TAG, 'downloading yt-dlp update', { urls, sha256: entry.sha256, bytes: entry.bytes })
 
   try {
     await mkdir(dirname(target), { recursive: true })
-    await rm(partFile, { force: true })
-    const received = await downloadToPartFile(url, partFile, entry, onProgress)
-
-    if (received !== entry.bytes) {
-      await rm(partFile, { force: true })
-      return {
-        success: false,
-        error: `下载不完整（收到 ${received} / 应有 ${entry.bytes} 字节），已放弃`,
-      }
-    }
-    logger.info(TAG, 'download finished with matching fingerprint', { url, bytes: received })
+    const from = await downloadToPartFile(urls, partFile, entry, onProgress)
+    logger.info(TAG, 'download finished with matching fingerprint', {
+      url: from,
+      bytes: entry.bytes,
+    })
     return await promotePartFile(partFile, target, prevFile, entry)
   } catch (err) {
     await rm(partFile, { force: true }).catch(() => {})
@@ -303,19 +327,139 @@ export async function applyYtDlpUpdate(
   }
 }
 
-/** 边下边算 SHA2-256，进度按 200ms 节流上报（37MB 分块回来有几百个回调，每个都发等于刷屏） */
-async function downloadToPartFile(
-  url: string,
+/** 某个源亲口说「这一版里没有这份件」——对它的重跑只会再拿到同一个 404，不该兜回 */
+class AbsentAtSource extends Error {}
+
+/**
+ * 最后一棒的预算：沿用 #407 那份不设快刀的耐心阈值，只把硬上限收在本文件原本那句 20 分钟
+ * （37MB 的包，慢网里十几分钟是常态，但不能无限挂着把界面钉死在「更新中」）。
+ */
+const LAST_LEG: Budget = { ...LAST_BUDGET, hardMs: 20 * 60_000 }
+
+/**
+ * 按候选前缀的顺序把文件取到 `.part`，字节数与 SHA2-256 两道闸门都过才算成；任一棒没过就换下一棒，
+ * 全棒失败才抛。返回成功那一棒的地址——日志要靠它说清这份二进制是从哪个 host 拿的。
+ * 队列形状与阈值都取自组件那条链路（#407 导出的那一份），两条下载路径共用一把尺子，
+ * 免得日后调「这一棒算不算取不动」时只调了一边。
+ * 没有直接复用它的 downloadToPart：那一个要把用户的「取消」开关串进本棒 signal，进度还要按组件 id
+ * 归到另一根条上；这条一次性更新没有取消入口，硬套得先造两个假对象。
+ * 导出只为让单测能喂假网络：换源会不会真发生、换 host 换不换得掉指纹闸门，走公开 API 测要把
+ * 清单服务、归档、探测版本整条链都搭起来。
+ */
+export async function downloadToPartFile(
+  urls: string[],
   partFile: string,
   entry: ManifestEntry,
   onProgress?: (p: YtDlpProgress) => void
-): Promise<number> {
+): Promise<string> {
+  const problems: string[] = []
+  const absent = new Set<string>()
+  const delivered = new Set<string>()
+  /** 某一棒抛的是 EACCES/EPERM 时把 errno 带出去，界面那颗「打开隐私设置」的按钮靠它才点得出来 */
+  let blocked: string | undefined
+
+  const take = async (url: string, budget: Budget, note: string): Promise<boolean> => {
+    const label = `${hostOf(url)}${note}`
+    let taken: { received: number; digest: string }
+    try {
+      taken = await downloadOnce(url, partFile, entry, budget, onProgress)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (err instanceof AbsentAtSource) absent.add(url)
+      if (isExecBlocked(err)) blocked = (err as NodeJS.ErrnoException).code
+      problems.push(`${label}：${message}`)
+      logger.warn(TAG, 'yt-dlp download attempt failed', { url, error: message })
+      return false
+    }
+    if (taken.received !== entry.bytes) {
+      problems.push(
+        `${label}：下载不完整（收到 ${formatBytes(taken.received)} / 应有 ${formatBytes(entry.bytes)}）`
+      )
+      return false
+    }
+    // 走到这里，这个源已经把整份文件交出来了：下面拒的是内容，不是链路，重跑它等于再赌一次
+    delivered.add(url)
+    if (taken.digest !== entry.sha256) {
+      logger.error(TAG, 'yt-dlp fingerprint mismatch', {
+        url,
+        expected: entry.sha256,
+        actual: taken.digest,
+      })
+      problems.push(
+        `${label}：指纹和更新清单对不上（${taken.digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…）`
+      )
+      return false
+    }
+    return true
+  }
+
+  for (const [index, url] of urls.entries()) {
+    const budget = index === urls.length - 1 ? LAST_LEG : EARLY_BUDGET
+    if (await take(url, budget, '')) {
+      if (index > 0)
+        logger.info(TAG, 'yt-dlp recovered from another source', { url, attempts: index + 1 })
+      return url
+    }
+  }
+
+  /**
+   * 兜回第一腿：换源只能让这条链路变好，不能把「慢但本来能下完」变成彻底失败——快刀掐断官方、
+   * 加速前缀又恰好关站时，得有人用不设快刀的预算把官方那一棒跑完。判据与组件那条一致：
+   * 官方既没亲口说没有（absent），也没整份交出来过（delivered）才补跑。
+   */
+  const first = urls[0]
+  if (urls.length > 1 && !absent.has(first) && !delivered.has(first)) {
+    if (await take(first, LAST_LEG, '（换回官方源跑到底）')) return first
+  }
+
+  /**
+   * 「挂加速」只对链路有意义：指纹对不上是源上那份内容不对，网络再快拿回来的还是它
+   * （判据同 fetchEntry 里那句「404 不套 NETWORK_HINT」）。
+   */
+  const tail = problems.every((problem) => problem.includes('指纹'))
+    ? '（换网络不会让它对上）'
+    : '。可开启网络加速后重试'
+  const text =
+    problems.length === 1
+      ? `${problems[0]}${tail}`
+      : `几个源都没取到 ${entry.asset}：${problems.join('；')}${tail}`
+  const err = new Error(text)
+  if (blocked) (err as NodeJS.ErrnoException).code = blocked
+  throw err
+}
+
+/**
+ * 从一个源取一棒：边下边算 SHA2-256，进度按 200ms 节流上报（37MB 分块回来有几百个回调，
+ * 每个都发等于刷屏）。没有断点续传，换棒就是从 0 再来一遍，所以进棒先清掉上一棒的半件。
+ */
+async function downloadOnce(
+  url: string,
+  partFile: string,
+  entry: ManifestEntry,
+  budget: Budget,
+  onProgress?: (p: YtDlpProgress) => void
+): Promise<{ received: number; digest: string }> {
+  await rm(partFile, { force: true })
+
   const controller = new AbortController()
-  // 按 37MB 的包算：慢网里这一下可能是十几分钟。给足余量，但不能无限挂着把界面钉死在「更新中」
-  const timer = setTimeout(() => controller.abort(), 20 * 60_000)
-  let received = 0
+  const startedAt = Date.now()
+  let lastTouch = Date.now()
   let lastReport = 0
+  let received = 0
+  let stalled = ''
   const hash = createHash('sha256')
+  const watchdog = setInterval(() => {
+    const reason = stallReason(Date.now(), startedAt, lastTouch, received, budget)
+    if (reason) {
+      stalled = reason
+      controller.abort()
+    }
+  }, WATCHDOG_MS)
+  const hardTimer = setTimeout(() => {
+    stalled = `约 ${formatBytes(entry.bytes)} 在 ${Math.round(budget.hardMs / 60_000)} 分钟内没下完`
+    controller.abort()
+  }, budget.hardMs)
+
   try {
     const res = await netFetch(url, {
       redirect: 'follow',
@@ -323,9 +467,13 @@ async function downloadToPartFile(
       headers: { 'User-Agent': 'vv-transcribe' },
     })
     if (!res.ok) {
-      throw new Error(
-        `下载失败 ${res.status}（${entry.asset} 在 ${entry.version} 这个 release 里不存在？）`
-      )
+      // 只有 404 算「这个源亲口说没有」：上面兜回第一腿那条判据要靠它区分「重跑没意义」和「这棒没跑动」
+      if (res.status === 404) {
+        throw new AbsentAtSource(
+          `下载失败 ${res.status}（${entry.asset} 在 ${entry.version} 这一版里取不到？）`
+        )
+      }
+      throw new Error(`下载失败 ${res.status}（${hostOf(url)} 这一棒没取到文件）`)
     }
     if (!res.body) throw new Error('下载响应没有内容')
     const handle = await open(partFile, 'w')
@@ -337,6 +485,7 @@ async function downloadToPartFile(
         const chunk = Buffer.from(value)
         hash.update(chunk)
         received += chunk.length
+        lastTouch = Date.now()
         await handle.write(chunk)
         const now = Date.now()
         if (now - lastReport > 200) {
@@ -349,25 +498,23 @@ async function downloadToPartFile(
     }
     onProgress?.({ received, total: entry.bytes })
   } catch (err) {
-    // 超时中断原生抛的是 "The operation was aborted"，用户看了只会以为程序坏了
-    if ((err as { name?: string })?.name === 'AbortError') {
+    if (err instanceof AbsentAtSource) throw err
+    // 判死原因优先于错误本身：看门狗 abort 之后 body stream 抛回来的只是「流被中断」那句，
+    // 把它包成「请求没通到对端」就把「3 秒只进来 351KB」这条真判据弄丢了（顺序同 attemptDownload）
+    if (stalled || (err as { name?: string })?.name === 'AbortError') {
       throw new Error(
-        `下载超时：约 ${(entry.bytes / 1e6).toFixed(0)}MB 在 20 分钟内没下完（收到 ${(received / 1e6).toFixed(1)}MB）。可开启网络加速后重试`
+        `${stalled || '下载中断'}（已收到 ${formatBytes(received)} / 约 ${formatBytes(entry.bytes)}）`
       )
     }
+    const message = err instanceof Error ? err.message : String(err)
+    if (NETWORK_ERROR_RE.test(message)) throw new Error(`请求没通到对端（${message}）`)
     throw err
   } finally {
-    clearTimeout(timer)
+    clearInterval(watchdog)
+    clearTimeout(hardTimer)
   }
 
-  const digest = hash.digest('hex')
-  if (digest !== entry.sha256) {
-    logger.error(TAG, 'yt-dlp update hash mismatch', { expected: entry.sha256, actual: digest })
-    throw new Error(
-      `校验不通过：下载到的文件与更新清单的指纹不一致（${digest.slice(0, 12)}… ≠ ${entry.sha256.slice(0, 12)}…），已放弃`
-    )
-  }
-  return received
+  return { received, digest: hash.digest('hex') }
 }
 
 /**
