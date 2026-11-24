@@ -29,6 +29,7 @@ import { existsSync } from 'node:fs'
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { net } from 'electron'
+import { formatBytes } from '../../../src/utils/formatBytes'
 import { logger } from './logger'
 import { atomicWriteJson, componentsDir } from './userDataStore'
 import { ArchiveError, extractTarGz } from './componentArchive'
@@ -272,6 +273,11 @@ export interface ComponentProgress {
   done: number
   /** 这一阶段的分母；未知时为 0，界面按「不显示百分比」处理，不给假百分比 */
   total: number
+  /**
+   * 当前在做的这一步（模型那条要逐文件取十几个，一根跨全批的进度条会连着几分钟不动）。
+   * 只在有多个文件时给，单件下载不添这句噪音。
+   */
+  step?: string
 }
 
 export interface ComponentResult {
@@ -533,7 +539,12 @@ function pickEntry(raw: unknown, spec: ComponentSpec, key: string): AssetEntry {
 }
 
 /** 走 net.fetch 而不是全局 fetch：Chromium 网络栈会跟随系统代理/PAC，Node 全局 fetch 只认环境变量 */
-const netFetch = (url: string, init: Parameters<typeof net.fetch>[1]) => net.fetch(url, init)
+// 一律不进 HTTP 缓存：几百 MB 的组件包写进磁盘缓存会把后端撑坏，之后同一个 profile 里的
+// net.fetch 会卡在缓存事务上——headers 都不回来、0 字节直到超时，重启应用也没用（2026-11-24 本机实测：
+// 同一进程同一分钟，默认缓存 20 秒 0 字节，cache:'no-store' 1.2 秒拿到）。下载本来就要逐字节对 SHA2-256，
+// 缓存给不了任何价值。
+const netFetch = (url: string, init: Parameters<typeof net.fetch>[1]) =>
+  net.fetch(url, { ...init, cache: 'no-store' })
 
 async function fetchJson(url: string): Promise<unknown> {
   const controller = new AbortController()
@@ -742,9 +753,9 @@ function emit(inFlight: Task, p: ComponentProgress): void {
 export const EARLY_BUDGET: Budget = { idleMs: 8_000, floorBytes: 1_000_000, floorMs: 3_000, hardMs: 3 * 60_000 }
 export const LAST_BUDGET: Budget = { idleMs: IDLE_TIMEOUT_MS, floorBytes: 0, floorMs: 0, hardMs: HARD_TIMEOUT_MS }
 /** 看门狗的检查粒度；也是「取消之外」的故障最坏会被多容忍 1 秒的原因 */
-const WATCHDOG_MS = 1_000
+export const WATCHDOG_MS = 1_000
 
-interface Budget {
+export interface Budget {
   /** 连续多少秒没有新字节算断流 */
   idleMs: number
   /** 快刀阈值：floorMs 内没收到 floorBytes 就换源；0 表示不设这条 */
@@ -770,13 +781,13 @@ export function stallReason(
     return `连续 ${Math.round(budget.idleMs / 1000)} 秒没有新字节进来`
   }
   if (budget.floorBytes > 0 && now - startedAt > budget.floorMs && received < budget.floorBytes) {
-    return `${Math.round(budget.floorMs / 1000)} 秒只进来 ${(received / 1e6).toFixed(2)}MB，照这个速度取不完`
+    return `${Math.round(budget.floorMs / 1000)} 秒只进来 ${formatBytes(received)}，照这个速度取不完`
   }
   return ''
 }
 
-/** 从地址里取 host，只用于把「哪个源没取到」说清楚 */
-function hostOf(url: string): string {
+/** 从地址里取 host，只用于把「哪个源没取到」说清楚；导出是为了 ytDlpUpdate 那条链路用同一个标签 */
+export function hostOf(url: string): string {
   try {
     return new URL(url).host
   } catch {
@@ -822,7 +833,7 @@ async function attemptDownload(
     }
   }, WATCHDOG_MS)
   const hardTimer = setTimeout(() => {
-    stalled = `约 ${(entry.bytes / 1e6).toFixed(0)}MB 在 ${Math.round(budget.hardMs / 60_000)} 分钟内没下完`
+    stalled = `约 ${formatBytes(entry.bytes)} 在 ${Math.round(budget.hardMs / 60_000)} 分钟内没下完`
     attempt.abort()
   }, budget.hardMs)
 
@@ -868,13 +879,14 @@ async function attemptDownload(
     if (inFlight.reason === 'cancelled') throw new Error('已取消下载')
     if (err instanceof MissingAssetError) throw err
     if (stalled) {
-      throw new Error(
-        `${stalled}（已收到 ${(received / 1e6).toFixed(1)}MB / 约 ${(entry.bytes / 1e6).toFixed(0)}MB）`
-      )
+      throw new Error(`${stalled}（已收到 ${formatBytes(received)} / 约 ${formatBytes(entry.bytes)}）`)
     }
-    // net.fetch 失败抛的是 net::ERR_* 这类错误码，原样冒到界面上没人看得懂，包一句
+    // net.fetch 失败抛的是 net::ERR_* 这类错误码，原样冒到界面上没人看得懂，包一句。
+    // 这里不套 NETWORK_HINT：那句讲的是「连不上组件清单（直连 GitHub）」，而这一棒打的是自家 Release
+    // 或模型上游那两个 host（host 名由调用方那层 label 点出来），搬 GitHub 那句会让用户去查一条
+    // 根本没参与的链路。「挂加速」这句也只在整个队列输完时补一次，别每棒各带一遍。
     const message = err instanceof Error ? err.message : String(err)
-    if (NETWORK_ERROR_RE.test(message)) throw new Error(`${NETWORK_HINT}（${message}）`)
+    if (NETWORK_ERROR_RE.test(message)) throw new Error(`请求没通到对端（${message}）`)
     throw err
   } finally {
     clearInterval(watchdog)
@@ -901,12 +913,19 @@ export async function downloadToPart(
   entry: AssetEntry,
   inFlight: Task,
   spec: ComponentSpec,
-  progress?: { base: number; total: number }
+  progress?: { base: number; total: number },
+  step?: string
 ): Promise<number> {
   const doneOf = (received: number) => (progress ? progress.base + received : received)
   const totalOf = () => (progress ? progress.total : entry.bytes)
   const report = (received: number) =>
-    emit(inFlight, { id: spec.id, phase: 'download', done: doneOf(received), total: totalOf() })
+    emit(inFlight, {
+      id: spec.id,
+      phase: 'download',
+      done: doneOf(received),
+      total: totalOf(),
+      ...(step ? { step } : {}),
+    })
 
   const problems: string[] = []
   /** 哪个源亲口说过「这一版没有这份件」——对它的重跑只会再拿到同一个 404，不该做 */
@@ -992,8 +1011,15 @@ export async function downloadToPart(
     }
   }
 
-  if (problems.length === 1) throw new Error(`${problems[0]}。可开启网络加速后重试`)
-  throw new Error(`几个下载源都没取到 ${entry.asset}：${problems.join('；')}。可开启网络加速后重试`)
+  /**
+   * 「挂加速」只对链路有意义。指纹对不上是源上那份内容不对——网络再快拿回来的还是它，
+   * 这句劝下去等于把用户往错方向支（判据同上面 404 不套 NETWORK_HINT 那条）。
+   */
+  const tail = problems.every((problem) => problem.includes('指纹'))
+    ? '（换网络不会让它对上）'
+    : '。可开启网络加速后重试'
+  if (problems.length === 1) throw new Error(`${problems[0]}${tail}`)
+  throw new Error(`几个下载源都没取到 ${entry.asset}：${problems.join('；')}${tail}`)
 }
 
 /**
@@ -1062,7 +1088,7 @@ async function doInstall(
       const source = spec.upstream
       const filesDir = join(staging, 'files')
       let downloaded = 0
-      for (const file of source.files) {
+      for (const [fileIndex, file] of source.files.entries()) {
         // 指纹表是代码不是网络输入，但它会在未来某次编辑里写错：拼路径前先卡住「绝对路径 / 往上跳」，
         // 否则一个笔误就能把下载写到组件目录之外去
         if (file.path.startsWith('/') || file.path.includes('..')) {
@@ -1083,7 +1109,10 @@ async function doInstall(
           },
           inFlight,
           spec,
-          { base: downloaded, total: entry.bytes }
+          { base: downloaded, total: entry.bytes },
+          // 这一棒单独说第几个：跨全批那根条按 135MB 走，头几个文件再快也只挪动零点几个百分点，
+          // 用户看到的是一根几分钟不动的条，而它其实在正常出货
+          source.files.length > 1 ? `第 ${fileIndex + 1}/${source.files.length} 个文件` : undefined
         )
         // 只按表里的字节数累加：downloadToPart 已经逐字节验过收到量等于这个数，
         // 这里再读一次磁盘属于重复劳动，而进度条要的是「整批的分母别跳」

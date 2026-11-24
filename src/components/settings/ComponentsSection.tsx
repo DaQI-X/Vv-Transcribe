@@ -289,7 +289,8 @@ export function ComponentsSection() {
                   />
                 </div>
                 <span className="vv-component-progress__text">
-                  {PHASE_LABEL[p.phase]} {formatBytes(p.done)}
+                  {PHASE_LABEL[p.phase]}
+                  {p.step ? ` ${p.step}` : ''} {formatBytes(p.done)}
                   {p.total > 0 ? ` / ${formatBytes(p.total)}` : ''}
                   {percent !== null ? `（${percent}%）` : ''}
                 </span>

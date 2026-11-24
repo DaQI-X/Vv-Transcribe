@@ -36,6 +36,8 @@ export interface ComponentProgress {
   done: number
   /** 这一阶段的分母；未知时为 0，界面按「不显示百分比」处理，不给假百分比 */
   total: number
+  /** 逐文件取上游那条才给（如「第 3/17 个文件」），单件下载时为空 */
+  step?: string
 }
 
 export interface ComponentResult {
