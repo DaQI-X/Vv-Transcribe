@@ -111,6 +111,16 @@ const config = {
   },
   dmg: {
     writeUpdateInfo: false,
+    // #417：DMG 打开的那一屏是未签名应用的第一现场，把「右键 → 打开」和文档地址印进背景图，
+    // 而不是假设用户装之前读过安装文档。图由 scripts/make-dmg-background.js 生成（同目录留 @2x）。
+    background: 'src/assets/dmg/background.png',
+    iconSize: 80,
+    // x/y 是图标的中心点，必须与 scripts/make-dmg-background.js 里那三个常量一致：
+    // 背景图上箭头画在 y=150、两条边各留到 x=201 / x=339，图标挪了箭头就穿图。
+    contents: [
+      { x: 135, y: 150, type: 'file' },
+      { x: 405, y: 150, type: 'link', path: '/Applications' },
+    ],
   },
   win: {
     target: ['nsis', 'zip'],
