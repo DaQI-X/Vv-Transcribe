@@ -321,6 +321,26 @@ export interface YtDlpLocalSnapshot {
   error: string | null
 }
 
+/**
+ * 本地 Whisper 档位权重的落盘情况（#421），形状与 `asrModelUsage.ts` 的 `LocalModelUsage` 对齐。
+ * 这里不重抄判式：占用是主进程按 HuggingFace 缓存解析软链量出来的（照着仓库目录那一层念能少报约 180 倍），
+ * 单位也只在界面这一侧由 `utils/formatBytes` 换算一次。
+ */
+export interface LocalModelTierUsage {
+  tier: 'base' | 'small'
+  /** true＝这一档的权重已在本地，加载它不用再联网 */
+  cached: boolean
+  bytes: number
+}
+
+export interface LocalModelUsage {
+  /** 顺序固定是 base、small；`error` 非空时这里是空数组，那两个数字都不许读 */
+  tiers: LocalModelTierUsage[]
+  /** 跨档位按权重真身去重后的合计，可能小于各档相加 */
+  totalBytes: number
+  error: string | null
+}
+
 export interface TTSSynthesizeResult {
   /** 取消与释放都按这个 id 找主进程自己的记录；一段都没成时为 null */
   jobId: string | null
@@ -497,6 +517,8 @@ export interface ElectronAPI {
   cancelTranscription: (jobId: string) => Promise<{ ok: boolean; error: string | null }>
   /** 应用内重启本地引擎。转写进行中会被拒绝；最长可能等 60 秒（首次要下载模型） */
   restartLocalEngine: () => Promise<{ ok: boolean; error: string | null }>
+  /** 本地档位权重各占多少盘（只读磁盘，转写进行中也能问）；见 LocalModelUsage */
+  getLocalModelUsage: () => Promise<LocalModelUsage>
 
   onTranscriptionProgress: (
     callback: (data: {

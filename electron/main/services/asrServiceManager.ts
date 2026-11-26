@@ -23,9 +23,9 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
-import { homedir } from 'node:os'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { app } from 'electron'
+import { isModelCached } from './asrModelUsage'
 import { loadSettings, normalizeEngineAuth, normalizeLocalModel, type LocalModelTier } from './settingsService'
 import { logger } from './logger'
 
@@ -120,32 +120,6 @@ function getBinaryPath(): string {
   }
   // 打包模式：extraResources 已将对应架构产物复制到 resources/python-asr/
   return join(process.resourcesPath, 'python-asr', exeName)
-}
-
-/**
- * faster-whisper 的权重默认落在 HuggingFace 缓存里，repo 名由档位拼成
- * Systran/faster-whisper-<档位>。命中缓存时给引擎下发 HF_HUB_OFFLINE=1：
- * huggingface_hub 平时每次加载都会向 hf-mirror 发一次「有没有新版本」的在线请求，
- * 弱网/挂代理时这一步能卡十几秒——模型明明已在本地，却被它拖成「首次加载慢了很多」。
- * 没命中缓存必须保持在线，否则用户第一次下载会直接失败，所以只在权重真的在场时才离线。
- *
- * 必须按档位判断：缓存里有 base 不代表有 small。用户在设置里切到 small 后如果照 base 的
- * 命中结果下发离线标志，首次转写会连不上 hf-mirror，报一个「模型没下载完」却又下载不了的死结。
- */
-function isModelCached(tier: string): boolean {
-  const hubCache = process.env.HF_HUB_CACHE
-    || process.env.HUGGINGFACE_HUB_CACHE
-    || (process.env.HF_HOME ? join(process.env.HF_HOME, 'hub') : undefined)
-    || join(homedir(), '.cache', 'huggingface', 'hub')
-
-  const snapshots = join(hubCache, `models--Systran--faster-whisper-${tier}`, 'snapshots')
-  if (!existsSync(snapshots)) return false
-  try {
-    // 快照目录里的 model.bin 是指向 blobs/ 的软链，只有权重完整下载过才存在
-    return readdirSync(snapshots).some((rev) => existsSync(join(snapshots, rev, 'model.bin')))
-  } catch {
-    return false
-  }
 }
 
 /** 获取 ffmpeg/ffprobe 二进制路径（与 audioProcessor 逻辑一致） */

@@ -1,7 +1,7 @@
 /**
  * ASR 语音转写 IPC 处理器
  *
- * 这一层只剩三件事：把发起方那个窗口接成作业本体的进度 sink、把取消与重启两条通道对上服务、
+ * 这一层只剩三件事：把发起方那个窗口接成作业本体的进度 sink、把取消/重启/权重占用三条通道对上服务、
  * 以及逐条声明「失败时回什么值」。整单转写的流程在 services/transcribeJob.ts——搬过去的理由是
  * #355 的门面要跑同一单作业，而它没有 event.sender 可问（#375）。
  *
@@ -10,6 +10,7 @@
  * guard 收的是记账开始之前的那几步（拿不到窗口引用、作业体在登记任务之前抛出），所以窗口还是在这一侧取。
  */
 import { BrowserWindow } from 'electron'
+import { measureLocalModelUsage, type LocalModelUsage } from '../services/asrModelUsage'
 import { restartLocalEngine } from '../services/asrServiceManager'
 import { cancelTranscribeJob, hasActiveTranscription, startTranscribeJob } from '../services/transcribeJob'
 import { failOkError, ipcHandle } from './guard'
@@ -54,5 +55,16 @@ export function registerASRHandlers() {
       return restartLocalEngine()
     },
     failOkError
+  )
+
+  /**
+   * 本地档位权重的落盘情况（#421）：设置页那一格「权重占用」的数由这里量，界面自己不算路径也不猜单位。
+   * 只读磁盘、不碰引擎，所以转写进行中也能问；但它读的是用户缓存那一层，权限或卷的问题要如实回。
+   * `error` 非空时 `tiers` 是空数组——「没读到」长成「两档都没占地方」就是一句谎。
+   */
+  ipcHandle(
+    'asr:localModelUsage',
+    async (): Promise<LocalModelUsage> => measureLocalModelUsage(),
+    (message) => ({ tiers: [], totalBytes: 0, error: message })
   )
 }

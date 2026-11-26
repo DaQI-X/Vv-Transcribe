@@ -590,8 +590,10 @@ function buildCache(raw: SettingsStore): SettingsCache {
  * 档位只有界面给出的这两档，值同时也是 Python 侧白名单里的 key。
  * 必须收口：档位名会被 faster-whisper 直接拼成 HuggingFace repo 名去下载，
  * 也用来决定要不要给引擎下发 HF_HUB_OFFLINE，手改过的 settings.json 不能把这两个用途带偏。
+ * 设置页那一行「权重占用」（#421）量的也是这份名单：界面上能选的档位、引擎认的 key、
+ * 要去数的目录三处同名单，缺一档就会出现「界面选得出这一档、却报不出它占多少」。
  */
-const LOCAL_MODEL_TIERS = ['base', 'small'] as const
+export const LOCAL_MODEL_TIERS = ['base', 'small'] as const
 export type LocalModelTier = (typeof LOCAL_MODEL_TIERS)[number]
 
 export function normalizeLocalModel(raw: unknown): LocalModelTier {

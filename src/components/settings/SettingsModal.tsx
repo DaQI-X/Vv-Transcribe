@@ -191,6 +191,37 @@ const LOCAL_MODEL_OPTIONS: { value: string; label: string }[] = [
   { value: 'small', label: '精准（small 档）' },
 ]
 
+/** 跨 IPC 的权重占用形状，与 electron/preload/index.d.ts 的同名类型对齐（渲染层自己声明是本仓惯例） */
+interface LocalModelUsage {
+  tiers: { tier: string; cached: boolean; bytes: number }[]
+  totalBytes: number
+  error: string | null
+}
+
+/** 占用那一行叫档位用的是听感名字，不重抄下拉里那句「（base 档）」：一行里出现两套名字读起来像两张表拼的 */
+const LOCAL_MODEL_USAGE_NAMES: Record<string, string> = {
+  base: '快速档',
+  small: '精准档',
+}
+
+/**
+ * 把主进程那次测量念成一句话。三种「没有数」分开说：还没读到、读不出来、确实没下过。
+ * 前两种要是念成第三种，用户会以为本机从没本地转写过，接着去删一个里面真有东西的目录。
+ */
+function describeLocalModelUsage(usage: LocalModelUsage | null): string {
+  if (!usage) return '权重占用读取中…'
+  if (usage.error) return `权重占用读不出来：${usage.error}`
+  if (!usage.tiers.some((row) => row.cached)) return '两档权重都还没下载到本机'
+  const parts = usage.tiers.map((row) => {
+    const name = LOCAL_MODEL_USAGE_NAMES[row.tier] ?? row.tier
+    return row.cached ? `${name}已占 ${formatBytes(row.bytes)}` : `${name}未下载`
+  })
+  const tierSum = usage.tiers.reduce((sum, row) => sum + row.bytes, 0)
+  // 合计比两档相加小，只可能是两档共用同一枚权重（真身只有一个）。不说明这句就像个算错的数
+  const dedupNote = usage.totalBytes < tierSum ? '（两档共用的那份只算一次）' : ''
+  return `${parts.join(' · ')}，合计 ${formatBytes(usage.totalBytes)}${dedupNote}`
+}
+
 /** 只是给关于页显示和「复制」用；真正拼 mailto 的是主进程 app:contactDeveloper，改地址要同步改那边 */
 const CONTACT_EMAIL = 'hi@vvscribe.com'
 
@@ -360,6 +391,13 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
         : '没有「当前使用」的那一条，这颗按不动：进要用的那一行的「编辑」，勾上再保存'
   const [restarting, setRestarting] = useState(false)
   const [restartingVoice, setRestartingVoice] = useState(false)
+  /**
+   * 本地 Whisper 权重各占多少盘（#421）。null＝这一页还没读到；`error` 非空时那一句直接把原因念出来，
+   * 不回落成「还没下载」——缓存那一层读不出来（权限、外接卷没挂）跟真的一颗权重都没有，是两件事。
+   */
+  const [localModelUsage, setLocalModelUsage] = useState<LocalModelUsage | null>(null)
+  /** 重启过引擎就再量一遍：首启那一次下载正是「重启」期间发生的，不重读那一行会一直停在「未下载」 */
+  const [modelUsageTick, setModelUsageTick] = useState(0)
   const [ytDlpLocal, setYtDlpLocal] = useState<YtDlpLocalSnapshot | null>(null)
   const [ytDlpRemote, setYtDlpRemote] = useState<YtDlpCheckResult['remote'] | null>(null)
   const [ytDlpHasUpdate, setYtDlpHasUpdate] = useState(false)
@@ -979,6 +1017,23 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
   }, [tab, api, ttsLocal, selectedTtsEngine, voiceStateTick])
 
   /**
+   * 本地权重的占用只在「转写配置」这一页、且转写模式不是云端时才量（#421）：云端模式下那一行根本不出现，
+   * 而这一趟要把缓存目录逐条 realpath + stat 走一遍，没有读者就不该读。
+   * 换档位不用重读（两档是同一趟一起量的），换模式要——那一行刚从「不出现」变成「出现」。
+   */
+  useEffect(() => {
+    if (tab !== 'asr' || !api || values.asrProvider === 'cloud') return
+    let cancelled = false
+    void api.getLocalModelUsage().then((res) => {
+      if (cancelled) return
+      setLocalModelUsage(res)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [tab, api, values.asrProvider, modelUsageTick])
+
+  /**
    * 片段缓存的体积只在开到「关于与更新」时读一次：那一步要把整层目录 readdir 一遍再逐个 stat，
    * 而这一行不显示的时候读它没有任何读者。error 非空时保持 null——读不到就说读不到，
    * 不能把主进程失败值里那份占位的 0 演成「缓存是空的」。
@@ -1086,6 +1141,8 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     } finally {
       restartingRef.current = false
       setRestarting(false)
+      // 权重是按需在引擎加载那一步才落盘的，成败都重量一遍：失败那次也可能已经下完、只是健康检查没过
+      setModelUsageTick((prev) => prev + 1)
     }
   }
 
@@ -1473,6 +1530,9 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     {values.asrLocalModel === 'small'
                       ? '精准档实测能把「英雄觉醒在即」听对，快速档这一段听成了「英雄绝性在急」。代价：首次下载约 461MB，耗时约为快速档的 2.8 倍。保存后引擎自动重启一次'
                       : '快速档：权重约 138MB，实测转一分钟音频约 5–9 秒；中文里偶有「英雄觉醒在即」被听成「英雄绝性在急」这类改意思的同音错字，字幕要求严就切精准档。保存后引擎自动重启一次'}
+                  </span>
+                  <span className="settings-form-hint">
+                    {describeLocalModelUsage(localModelUsage)}
                   </span>
                 </div>
               )}

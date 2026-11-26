@@ -96,6 +96,8 @@ const api = {
     ipcRenderer.invoke('asr:start', filePath, options),
   cancelTranscription: (jobId: string) => ipcRenderer.invoke('asr:cancel', jobId),
   restartLocalEngine: () => ipcRenderer.invoke('asr:restartEngine'),
+  // 只读磁盘量一遍本地档位的权重占用；主进程那次读数与引擎无关，转写进行中也可以问
+  getLocalModelUsage: () => ipcRenderer.invoke('asr:localModelUsage'),
 
   onTranscriptionProgress: (
     callback: (data: {
