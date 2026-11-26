@@ -225,6 +225,40 @@ app.whenReady().then(async () => {
   })
 })
 
+/**
+ * 退出链路的时限。
+ *
+ * `e.preventDefault()` 之后整条链全靠最后那句 `app.exit()` 收尾，所以链上任何一步挂住就等于
+ * 「应用关不掉」：用户只能强杀，而强杀留下的孤儿进程（占着 8000/8010）正是这条链路本来在防的事。
+ * 现场是引擎那两家的 `stop*()` 只在子进程的 `exit` 事件上 resolve —— SIGKILL 发出去了、
+ * 事件却因为进程已是残尸而再也不来，那个 await 就永远落地不了。
+ *
+ * 两层闸：
+ * - 单步 `QUIT_STEP_MS` 取 20 秒，因为一步自己**跑完**的最坏算术就接近这个数
+ *   （SIGTERM 宽限 5 秒 + `ensureTreeGone` 6 轮 ×（300ms 间隔 + 探针 2 秒）≈ 18.8 秒）。
+ *   低于它会把正在正常收尾的引擎掐掉，那正好制造我们要避免的孤儿。
+ * - 整链 `QUIT_CHAIN_MS` 取 45 秒（四步各自的上限之和没意义，那等于允许每一步都拖满），
+ *   到点直接 exit：宁可留一个孤儿给下次启动的端口回收兜（#129），也不留一个关不掉的窗口。
+ */
+const QUIT_STEP_MS = 20_000
+const QUIT_CHAIN_MS = 45_000
+
+/** 跑一步收尾：既不抛、也不许挂住，并把结果落进日志（事后要能看出是哪一步没跑完） */
+async function settleQuitStep(label: string, run: () => Promise<unknown>): Promise<void> {
+  const started = Date.now()
+  const outcome = await Promise.race([
+    run().then(
+      () => 'done' as const,
+      (err) => {
+        logger.warn('App', 'Quit step failed', { label, error: err instanceof Error ? err.message : String(err) })
+        return 'error' as const
+      }
+    ),
+    new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), QUIT_STEP_MS)),
+  ])
+  logger.info('App', 'Quit step settled', { label, outcome, ms: Date.now() - started })
+}
+
 app.on('before-quit', async (e) => {
   if (isQuitting) return
   isQuitting = true
@@ -232,16 +266,24 @@ app.on('before-quit', async (e) => {
   e.preventDefault()
   // 门面先收：它是「别的进程能不能连进来」那一道，退出流程一开始就该关掉，
   // 顺手把那份每次运行随机的 token 从磁盘上删掉（留着会出现旧 token 配上被别人占走的端口）
-  await stopAgentFacade().catch(() => {})
-  // 链接转写的那份临时媒体是播放器一路在用的，只能等到这里才没人用；被强杀时走不到这步，
-  // 由下次启动的 sweepStaleMediaTempDirs 兜底
-  await releaseAllMediaSessions().catch(() => {})
-  await stopASRService()
-  logger.info('App', 'ASR service stopped')
-  // 本地配音引擎是懒启动的：没配音过就从没存在过，这一步是空操作；配过的话它占着 370–878MB，
-  // 必须连进程组一起收掉，否则下次启动只能靠端口回收兜住
-  await stopLocalTtsEngine()
-  logger.info('App', 'Local TTS engine stopped')
+  const chain = (async () => {
+    await settleQuitStep('agent-facade', stopAgentFacade)
+    // 链接转写的那份临时媒体是播放器一路在用的，只能等到这里才没人用；被强杀时走不到这步，
+    // 由下次启动的 sweepStaleMediaTempDirs 兜底
+    await settleQuitStep('media-sessions', releaseAllMediaSessions)
+    await settleQuitStep('asr-service', stopASRService)
+    // 本地配音引擎是懒启动的：没配音过就从没存在过，这一步是空操作；配过的话它占着 370–878MB，
+    // 必须连进程组一起收掉，否则下次启动只能靠端口回收兜住
+    await settleQuitStep('local-tts-engine', stopLocalTtsEngine)
+  })()
+  // settleQuitStep 自己不抛，所以这里不需要给 chain 挂 rejection
+  const raced = await Promise.race([
+    chain.then(() => 'done' as const),
+    new Promise<'deadline'>((resolve) => setTimeout(() => resolve('deadline'), QUIT_CHAIN_MS)),
+  ])
+  if (raced === 'deadline') {
+    logger.warn('App', 'Quit chain hit its deadline, exiting with steps unfinished', { ms: QUIT_CHAIN_MS })
+  }
   app.exit()
 })
 

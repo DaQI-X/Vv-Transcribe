@@ -237,7 +237,7 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
   logger.warn(TAG, 'Reaping leftover engine processes', { pids: targets.join(', ') })
   for (const pid of targets) {
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      runTaskkill(pid)
       continue
     }
     try {
@@ -471,11 +471,28 @@ function readyFailureMessage(outcome: 'ready' | 'foreign' | 'died' | 'timeout'):
 }
 
 /** 对整棵引擎进程树发信号。只杀直接子进程会留下继承了 8010 socket 的孙进程 */
+/**
+ * 与 asrServiceManager 同名的那把闸：taskkill 起不来时（缺程序、被策略拦）spawn 可能同步抛，
+ * 而异步的 'error' 若没人接，Node 是按未捕获异常抛出去的。
+ * 这两句分别坐在「启动时回收残留」和「退出」两条链路上，任一处崩都等于应用崩在那一刻。
+ */
+function runTaskkill(pid: number): void {
+  try {
+    spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      .once('error', (err) => logger.warn(TAG, 'taskkill failed', { pid, error: err.message }))
+  } catch (err) {
+    logger.warn(TAG, 'taskkill could not be spawned', {
+      pid,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
 function signalEngineTree(signal: 'SIGTERM' | 'SIGKILL') {
   // 没有 pid 就绝不能走 kill(-0)：那等于给 Electron 自己所在的进程组发信号
   if (!enginePid) return
   if (process.platform === 'win32') {
-    spawn('taskkill', ['/PID', String(enginePid), '/T', '/F'], { stdio: 'ignore' })
+    runTaskkill(enginePid)
     return
   }
   try {

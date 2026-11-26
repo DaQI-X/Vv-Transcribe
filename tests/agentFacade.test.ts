@@ -757,7 +757,10 @@ describe('结构判据：写在注释里的规矩得有机械判式', () => {
     const index = code(await read('electron/main/index.ts'))
     expect(index).toMatch(/startAgentFacade\(\)/)
     const quit = index.slice(index.indexOf("app.on('before-quit'"))
-    expect(quit).toMatch(/stopAgentFacade\(\)/)
+    // 判式跟着 #427 的改法走：退出链每一步现在都套在有界跑法里（既不抛也不许挂住），
+    // 门面那一步是以回调形式交出去的，所以这里钉「标签 + 那个函数确实交给了这一步」，
+    // 而不是钉原来那句 `stopAgentFacade()` ——后者会把带 catch 的写法一起判掉
+    expect(quit).toMatch(/settleQuitStep\(\s*'agent-facade'\s*,\s*stopAgentFacade\s*\)/)
     // 网络边界先关：引擎还活着的时候不该还有一个能收文件路径的端口开着
     expect(quit.indexOf('stopAgentFacade')).toBeLessThan(quit.indexOf('stopASRService'))
     // #385：保存即生效走的是 `settings:save` 里主进程自己拉齐，**不新开 IPC 通道**——

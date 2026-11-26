@@ -241,7 +241,7 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
   logger.warn(TAG, 'Reaping leftover engine processes', { pids: targets.join(', ') })
   for (const pid of targets) {
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      runTaskkill(pid)
       continue
     }
     try {
@@ -459,13 +459,29 @@ function readyFailureMessage(outcome: 'ready' | 'foreign' | 'died' | 'timeout'):
   }
 }
 
+/**
+ * Windows 上 Node 的 kill 做不到「只优雅」，只能按进程树强制结束。
+ * taskkill 起不来时（缺程序、被策略拦）：spawn 可能同步抛，异步的 'error' 若没人接，
+ * Node 是按未捕获异常抛出去的——那会让「回收残留引擎」和「关闭应用」都变成「应用崩在那一刻」。
+ */
+function runTaskkill(pid: number): void {
+  try {
+    spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      .once('error', (err) => logger.warn(TAG, 'taskkill failed', { pid, error: err.message }))
+  } catch (err) {
+    logger.warn(TAG, 'taskkill could not be spawned', {
+      pid,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
 /** 对整棵引擎进程树发信号。只杀直接子进程会留下继承了 8000 socket 的孙进程 */
 function signalAsrTree(signal: 'SIGTERM' | 'SIGKILL') {
   // 没有 pid 就绝不能走 kill(-0)：那等于给 Electron 自己所在的进程组发信号
   if (!asrPid) return
   if (process.platform === 'win32') {
-    // Windows 上 Node 的 kill 无法只做到「优雅」，直接按进程树强制结束
-    spawn('taskkill', ['/PID', String(asrPid), '/T', '/F'], { stdio: 'ignore' })
+    runTaskkill(asrPid)
     return
   }
   try {
