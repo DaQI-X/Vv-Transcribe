@@ -33,8 +33,22 @@ import { join } from 'node:path'
 import { LOCAL_MODEL_TIERS, type LocalModelTier } from './settingsService'
 import { ASR_MODEL_SOURCES, asrModelDir, hasAsrModelDownload } from './asrModelUpstream'
 
-/** faster-whisper 的权重文件名：它在不在，决定这一档算不算「已下载」 */
+/**
+ * 权重文件名，也是指纹表缺位时（认不出的档位）唯一的判据。
+ * 注意它**不是**「这一档算不算已缓存」的完整答案——那要看下面 requiredFiles 的四枚。
+ */
 const WEIGHT_FILE = 'model.bin'
+
+/**
+ * 判定某一档「已缓存」时要看的那几枚文件名，全部取自 `ASR_MODEL_SOURCES`（#422）。
+ *
+ * 不在这儿再抄一份四枚的清单：引擎侧 `python-asr/main.py` 的 `MODEL_FILES` 与指纹表本来就要
+ * 对得上（见 localEngineAuth.test 那条守卫），宿主写第三份只会让「宿主说齐了、引擎说少了」
+ * 这种分叉重新长出来。
+ */
+function requiredFiles(tier: string): string[] {
+  return hasAsrModelDownload(tier) ? ASR_MODEL_SOURCES[tier].files.map((file) => file.path) : [WEIGHT_FILE]
+}
 /** 档位名会被拼成 HuggingFace 的 repo 目录名，与引擎侧 `Systran/faster-whisper-<档位>` 同一个拼法 */
 const REPO_DIR_PREFIX = 'models--Systran--faster-whisper-'
 
@@ -79,26 +93,49 @@ export function localWeightsComplete(tier: string): boolean {
 }
 
 /**
- * 这一档的权重是否已在本地。快照里的 `model.bin` 是指向 blobs 的软链，只有权重完整下载过才解析得到，
- * 所以判它而不是判仓库目录在不在。
+ * 这一档的权重是否已在本地。**四枚文件都在**才算，只数 `model.bin` 会把死结留给用户。
  *
- * 调用方（`asrServiceManager` 的 spawn）拿这个结论决定给不给引擎下发 `HF_HUB_OFFLINE=1`：
- * huggingface_hub 平时每次加载都会向 hf-mirror 发一次「有没有新版本」的在线请求，弱网/挂代理时
- * 这一步能卡十几秒——模型明明已在本地，却被它拖成「首次加载慢了很多」。没命中缓存必须保持在线，
- * 否则用户第一次下载会直接失败，所以只在权重真的在场时才离线。
+ * 为什么收紧到四枚（2026-11-26 实测，#422）：宿主拿这个结论决定给不给引擎下发
+ * `HF_HUB_OFFLINE=1`，而 huggingface_hub 认快照的判式本来就是「那一版里点名的文件全在」——
+ * 本机造一棵「model.bin 在、tokenizer.json 缺」的树、照旧下发离线标志，引擎回的是
+ * `Cannot find an appropriate cached snapshot folder for the specified revision on the local disk
+ * and outgoing traffic has been disabled`。旧判式（只看 model.bin）在这种机器上会判「已缓存」，
+ * 于是界面那行写「已缓存」、加载必然失败、而它唯一能自愈的那条路（联网补齐那 2.2MB）被自己掐死了。
+ * 更糟的是宿主那句失败文案会把它念成「去确认能不能访问 hf-mirror.com」（引擎自报
+ * `modelSource: repo`、`missingFiles: []`，它确实不知道少了什么）——把用户支去查网络。
+ *
+ * 代价说清楚：这么一改，那极少数「手工删过附属文件」的用户会重新取**整档**（147.9MB/486.2MB，
+ * 有进度、可取消），而不是只补那一枚。取整档是因为下载器按组件整批工作（#430 的清单形状），
+ * 逐文件补齐属于 #416；拿一次可见的整档下载换掉一个不可自愈的死结，是这笔账的答案。
+ *
+ * 只按文件名对，不按字节对：按字节要么读 145MB/483MB 全盘（每次启动付这个代价不值），要么信表里
+ * 钉的那个 commit——而 HF 缓存里可能是别的 revision，一比尺寸正常缓存就集体误判成「没缓存」，
+ * 把这轮省下的下载全赔回去。半份文件本来就不可能有软链：huggingface_hub 只为下载完整的文件建链，
+ * 没下完的证据是 blob 那层的 `.incomplete`（所以下面 `collectSnapshot` 跟不到真身就当它不在）。
+ *
+ * 反过来为什么仍然要这个离线标志：huggingface_hub 平时每次加载都会向 hf-mirror 发一次「有没有
+ * 新版本」的在线请求，弱网/挂代理时这一步能卡十几秒——模型明明已在本地，却被它拖成「首次加载慢了
+ * 很多」。没命中缓存必须保持在线，否则用户第一次下载会直接失败。
+ *
+ * 调用方还有 `asrManager.fetchLocalWeights`：它拿同一个结论决定要不要自己下（#435），
+ * 所以「界面说已缓存」「spawn 下发离线标志」「首转不重下」这三件事天然是同一个答案。
  *
  * 必须按档位判断：缓存里有 base 不代表有 small。用户在设置里切到 small 后如果照 base 的
  * 命中结果下发离线标志，首次转写会连不上 hf-mirror，报一个「模型没下载完」却又下载不了的死结。
  *
  * 两棵树任一到齐都算「在本地」（#434）：旧那棵是引擎自己去 hf-mirror 拉的 HF 缓存，新那棵是应用
- * 按指纹表自取的组件目录。哪棵在就用哪棵，所以 offline 这一票两边都有资格投。
+ * 按指纹表自取的组件目录（那棵由 `localWeightsComplete` 按字节把关）。
  */
 export function isModelCached(tier: string): boolean {
   if (localWeightsComplete(tier)) return true
   const snapshots = join(repoDir(tier), 'snapshots')
   if (!existsSync(snapshots)) return false
+  const required = requiredFiles(tier)
   try {
-    return readdirSync(snapshots).some((rev) => existsSync(join(snapshots, rev, WEIGHT_FILE)))
+    return readdirSync(snapshots).some((rev) => {
+      const dir = join(snapshots, rev)
+      return required.every((name) => existsSync(join(dir, name)))
+    })
   } catch {
     return false
   }
@@ -130,40 +167,47 @@ async function readDir(dir: string) {
   }
 }
 
-/** 把一个快照版本目录里的文件按真身收进 sizes，返回这一版是否有能解析到的权重 */
-async function collectSnapshot(revDir: string, sizes: Map<string, number>): Promise<boolean> {
-  let hasWeights = false
+/**
+ * 把一个快照版本目录里的文件按真身收进 sizes，并回一句「这一版里能解析到哪几枚文件名」。
+ * 返回值只看名字，不看字节：齐不齐这一档由调用方拿 `requiredFiles` 去对，字节尺在 `localWeightsComplete`。
+ */
+async function collectSnapshot(revDir: string, sizes: Map<string, number>): Promise<Set<string>> {
+  const names = new Set<string>()
   for (const entry of (await readDir(revDir)) ?? []) {
     // 快照层是平铺的（本机两档都只有文件）；目录条目当没看见，不当占用也不当权重
     if (entry.isDirectory()) continue
     let real: string
     let info
     try {
-      // 两跳软链一次到底；悬空的（目标没落盘）在这里就抛，那份不计
+      // 两跳软链一次到底；悬空的（目标没落盘）在这里就抛，那份既不计进字节、也不算解析得到
       real = await realpath(join(revDir, entry.name))
       info = await stat(real)
     } catch {
       continue
     }
     if (!info.isFile()) continue
-    if (entry.name === WEIGHT_FILE) hasWeights = true
+    names.add(entry.name)
     if (!sizes.has(real)) sizes.set(real, info.size)
   }
-  return hasWeights
+  return names
 }
 
-/** 一档的落盘情况：真身→字节数收进 sizes，另回一句权重在不在 */
+/** 一档的落盘情况：真身→字节数收进 sizes，另回一句「这一档的权重齐了没」 */
 async function measureTier(tier: LocalModelTier, sizes: Map<string, number>): Promise<boolean> {
   const snapshotsPath = join(repoDir(tier), 'snapshots')
   const snapshots = await readDir(snapshotsPath)
+  const required = requiredFiles(tier)
   let cached = false
   for (const rev of snapshots ?? []) {
     if (!rev.isDirectory()) continue
     // 同一档位可能被 checkout 过两个 revision：每一版的文件都真的占着盘，逐版收完再合计
-    if (await collectSnapshot(join(snapshotsPath, rev.name), sizes)) cached = true
+    const names = await collectSnapshot(join(snapshotsPath, rev.name), sizes)
+    // 每一版各自算齐不齐：只在一版里凑齐四枚也算（另一版的残件不能把整档判成没下载）
+    if (required.every((name) => names.has(name))) cached = true
   }
   // 应用自取那棵树（#434）也占盘，同样逐文件 realpath 后收进来。两棵都装过时这一档报的是两份之和，
-  // 那是真话不是重复计数——磁盘上确实有两份东西；把它们并成一份属于 #416 的活儿
+  // 那是真话不是重复计数——磁盘上确实有两份东西；把它们并成一份属于 #416 的活儿。
+  // 它的名字不计进上面的判式：那棵树的权威结论是下面 `localWeightsComplete` 的字节尺
   await collectSnapshot(asrModelDir(tier), sizes)
   // 「算不算已缓存」必须与 isModelCached 同一把尺（尺寸齐了才算），不然界面会说「已缓存」、
   // spawn 却按没缓存下发在线许可——那正是本模块开头要避免的分叉
