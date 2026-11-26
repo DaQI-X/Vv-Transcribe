@@ -138,8 +138,8 @@ export class OpenAICompatibleProvider implements AIProvider {
         signal: controller.signal,
       })
 
-      clearTimeout(timeoutId)
-
+      // 计时器要活到正文读完：拿到 200 头就 clear 等于只限了首包，
+      // 对方回完头不再吐 body 时这里就是无限转圈，那 60 秒的闸形同虚设。
       if (!response.ok) {
         const errorText = await response.text()
         throw new Error(`AI 校对请求失败 (${response.status}): ${errorText}`)
@@ -164,11 +164,12 @@ export class OpenAICompatibleProvider implements AIProvider {
         return { corrected: content, changes: ['AI 返回格式异常，已返回原始响应'] }
       }
     } catch (err) {
-      clearTimeout(timeoutId)
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error('AI 校对请求超时（60秒），请检查网络连接或 API 配置')
       }
       throw err
+    } finally {
+      clearTimeout(timeoutId)
     }
   }
 
@@ -215,8 +216,6 @@ ${dictContext}`
         signal: controller.signal,
       })
 
-      clearTimeout(timeoutId)
-
       if (!response.ok) {
         const errorText = await response.text()
         throw new Error(`AI 解释请求失败 (${response.status}): ${errorText}`)
@@ -242,11 +241,12 @@ ${dictContext}`
         return differences.map(() => ({ explanation: 'AI 返回格式异常' }))
       }
     } catch (err) {
-      clearTimeout(timeoutId)
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error('AI 解释请求超时（60秒），请检查网络连接或 API 配置')
       }
       throw err
+    } finally {
+      clearTimeout(timeoutId)
     }
   }
 
@@ -306,8 +306,6 @@ ${dictContext}`
         signal: controller.signal,
       })
 
-      clearTimeout(timeoutId)
-
       if (!response.ok) {
         const errorText = await response.text()
         throw new Error(`AI 参考文本分析请求失败 (${response.status}): ${errorText}`)
@@ -337,11 +335,12 @@ ${dictContext}`
         return []
       }
     } catch (err) {
-      clearTimeout(timeoutId)
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error('AI 参考文本分析请求超时（60秒），请检查网络连接或 API 配置')
       }
       throw err
+    } finally {
+      clearTimeout(timeoutId)
     }
   }
 }

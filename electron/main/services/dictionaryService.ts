@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, access } from 'node:fs/promises'
 import { join } from 'node:path'
+import { net } from 'electron'
 import { dictionaryDir } from './userDataStore'
 import { logger } from './logger'
 
@@ -34,6 +35,18 @@ const SOURCE_REPO = 'pwxcoo/chinese-xinhua'
 const SOURCE_BRANCH = 'master'
 const RAW_BASE = `https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_BRANCH}/data`
 const GITHUB_API = `https://api.github.com/repos/${SOURCE_REPO}`
+
+/**
+ * 词库这两条腿原先一个 signal 都没带：GitHub 挂住时「检查更新」那颗按钮能转到天荒地老，
+ * 连取消的入口都没有。走 net.fetch 而不是全局 fetch 的理由与组件下载那条一致——
+ * Chromium 网络栈看得见系统代理/PAC，Node 全局 fetch 只认环境变量。
+ * 时限分两档是因为件大：随包 ci.json 实测 26,129,191 字节，而境内直连 GitHub 最慢测过
+ * 15.9KB/s，光正文就要近半小时，按「20 秒没下完就断」判死等于把慢网用户全拦在外面。
+ * 至于「断流 30 秒就判死」那一档要逐块读才做得到，归统一的有界跑法那一件。
+ */
+const COMMIT_LOOKUP_MS = 15_000
+const DOWNLOAD_FIRST_BYTE_MS = 20_000
+const DOWNLOAD_HARD_MS = 45 * 60_000
 
 /**
  * 词库两份数据的指纹，按 2026-11-21 实测钉死（那两份的 SHA2-256 与随包 resources/dictionary 下的
@@ -245,8 +258,10 @@ export async function lookupMultipleWords(words: string[]): Promise<Record<strin
 
 async function getLatestCommitHash(): Promise<string | null> {
   try {
-    const response = await fetch(`${GITHUB_API}/commits?path=data/ci.json&per_page=1`, {
+    const response = await net.fetch(`${GITHUB_API}/commits?path=data/ci.json&per_page=1`, {
       headers: { 'Accept': 'application/vnd.github.v3+json' },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(COMMIT_LOOKUP_MS),
     })
 
     if (!response.ok) return null
@@ -284,6 +299,50 @@ export async function checkForUpdate(): Promise<{ hasUpdate: boolean; latestComm
   }
 }
 
+/**
+ * 取一份词库数据，返回字节或者一句能直接给用户看的原因。
+ *
+ * 两档时限分管两件不同的事：20 秒没回头判死，治的是原来那个「GitHub 挂住时按钮转到天荒地老」；
+ * 头回来了就把闸门换成 45 分钟硬上限，因为件大——慢网下正文本来就要几十分钟，短闸会把人全拦在外面。
+ * 至于「开始流了却断流 30 秒」那一档要逐块读 body 才做得到，归统一的有界跑法（#428）。
+ * 用返回值而不是抛错：调用点本来就在逐份早退，抛出去只会多一层对 error.message 的类型猜测。
+ */
+async function fetchDictionaryFile(
+  filename: string,
+  url: string
+): Promise<{ content: Buffer } | { error: string }> {
+  const controller = new AbortController()
+  let timedOutStage: 'first-byte' | 'body' | null = null
+  let timer = setTimeout(() => {
+    timedOutStage = 'first-byte'
+    controller.abort()
+  }, DOWNLOAD_FIRST_BYTE_MS)
+
+  try {
+    const response = await net.fetch(url, { cache: 'no-store', signal: controller.signal })
+    if (!response.ok) return { error: `下载 ${filename} 失败 (${response.status})` }
+
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      timedOutStage = 'body'
+      controller.abort()
+    }, DOWNLOAD_HARD_MS)
+
+    // 按字节验，不走 text()：重新编码过一次 UTF-8 之后再比长度与指纹，量的就不是拿到的那份东西了
+    return { content: Buffer.from(await response.arrayBuffer()) }
+  } catch (error) {
+    if (timedOutStage === 'first-byte') {
+      return { error: `${filename} 连接超时（${DOWNLOAD_FIRST_BYTE_MS / 1000} 秒未响应），请检查网络后重试` }
+    }
+    if (timedOutStage === 'body') {
+      return { error: `${filename} 下载超时（超过 ${Math.round(DOWNLOAD_HARD_MS / 60_000)} 分钟），请检查网络后重试` }
+    }
+    return { error: `${filename} 下载失败：${error instanceof Error ? error.message : String(error)}` }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function downloadUpdate(): Promise<{ success: boolean; error?: string }> {
   try {
     const latestCommit = await getLatestCommitHash()
@@ -300,15 +359,10 @@ export async function downloadUpdate(): Promise<{ success: boolean; error?: stri
     // 不会出现「ci.json 是新的、idiom.json 还是旧的」那种混合态
     const pending: Array<{ filename: string; content: Buffer }> = []
     for (const filename of filesToDownload) {
-      const url = `${RAW_BASE}/${filename}`
-      const fileResponse = await fetch(url)
+      const fetched = await fetchDictionaryFile(filename, `${RAW_BASE}/${filename}`)
+      if ('error' in fetched) return { success: false, error: fetched.error }
 
-      if (!fileResponse.ok) {
-        return { success: false, error: `下载 ${filename} 失败 (${fileResponse.status})` }
-      }
-
-      // 按字节验，不走 text()：重新编码过一次 UTF-8 之后再比长度与指纹，量的就不是拿到的那份东西了
-      const content = Buffer.from(await fileResponse.arrayBuffer())
+      const content = fetched.content
       const mismatch = verifyDictionaryBytes(filename, content)
       if (mismatch) {
         logger.error(TAG, 'Dictionary update rejected by checksum', { filename, mismatch })
