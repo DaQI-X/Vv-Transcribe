@@ -331,6 +331,8 @@ export interface LocalModelTierUsage {
   /** true＝这一档的权重已在本地，加载它不用再联网 */
   cached: boolean
   bytes: number
+  /** 按指纹表这一档要下多少字节（#438）；表里没有这一档时为 null，界面就不报数 */
+  downloadBytes: number | null
 }
 
 export interface LocalModelUsage {

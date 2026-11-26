@@ -38,6 +38,13 @@ const REQUIRED = ASR_MODEL_SOURCES.base.files.map((file) => file.path)
 /** 除权重外的三枚附属文件：写 0 字节，只为让「齐不齐」这一维可控，不搅动按字节的断言 */
 const AUX = REQUIRED.filter((name) => name !== 'model.bin')
 
+/**
+ * 表内的整档字节数（#438）：档位提示那句「首次下载约多少」和组件行报的是同一枚数，
+ * 所以这里按字面钉住——它和 `formatBytes` 到界面上的 147.9MB／486.2MB 是一对一的关系，
+ * 表被改动却没同步这句提示时，这条先红。
+ */
+const DOWNLOAD_BYTES = { base: 147882941, small: 486212372 }
+
 /** 造一枚权重真身（内容无所谓，这一层只认字节数） */
 async function makeBlob(path: string, bytes: number): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true })
@@ -135,7 +142,7 @@ describe('measureLocalModelUsage：软链必须跟到真身', () => {
     await linkWeight('base', 'rev1', '../../blobs/a1b2c3')
     const got = await measureLocalModelUsage()
     expect(got.error).toBeNull()
-    expect(got.tiers[0]).toEqual({ tier: 'base', cached: true, bytes: 4096 })
+    expect(got.tiers[0]).toEqual({ tier: 'base', cached: true, bytes: 4096, downloadBytes: DOWNLOAD_BYTES.base })
   })
 
   it('两跳软链（真身在 hub/blobs/<两位>/ 那层共享存储）也量到真身，而不是链本身那几个字节', async () => {
@@ -149,6 +156,7 @@ describe('measureLocalModelUsage：软链必须跟到真身', () => {
       tier: 'small',
       cached: true,
       bytes: 120000,
+      downloadBytes: DOWNLOAD_BYTES.small,
     })
     expect(got.tiers.find((row) => row.tier === 'base')?.cached).toBe(false)
     expect(got.totalBytes).toBe(120000)
@@ -159,7 +167,7 @@ describe('measureLocalModelUsage：软链必须跟到真身', () => {
     await solidWeight('base', 'rev1', 4096)
     await writeFile(join(await snapshot('base', 'rev1'), 'config.json'), '{}')
     const got = await measureLocalModelUsage()
-    expect(got.tiers[0]).toEqual({ tier: 'base', cached: true, bytes: 4098 })
+    expect(got.tiers[0]).toEqual({ tier: 'base', cached: true, bytes: 4098, downloadBytes: DOWNLOAD_BYTES.base })
   })
 
   it('同一档位 checkout 过两个 revision：两版都真占着盘，逐版合计', async () => {
@@ -168,7 +176,7 @@ describe('measureLocalModelUsage：软链必须跟到真身', () => {
     await linkWeight('base', 'revA', '../../blobs/one')
     await linkWeight('base', 'revB', '../../blobs/two')
     const got = await measureLocalModelUsage()
-    expect(got.tiers[0]).toEqual({ tier: 'base', cached: true, bytes: 3000 })
+    expect(got.tiers[0]).toEqual({ tier: 'base', cached: true, bytes: 3000, downloadBytes: DOWNLOAD_BYTES.base })
   })
 
   it('两档共用同一枚真身时各档照报自己读到的量，合计只算一份', async () => {
@@ -189,7 +197,7 @@ describe('measureLocalModelUsage：不许把读不出来演成没占地方', () 
     await mkdir(join(repo('base'), 'blobs'), { recursive: true })
     await linkWeight('base', 'rev1', '../../blobs/never-downloaded')
     const got = await measureLocalModelUsage()
-    expect(got.tiers[0]).toEqual({ tier: 'base', cached: false, bytes: 0 })
+    expect(got.tiers[0]).toEqual({ tier: 'base', cached: false, bytes: 0, downloadBytes: DOWNLOAD_BYTES.base })
     expect(got.totalBytes).toBe(0)
     expect(got.error).toBeNull()
     expect(isModelCached('base')).toBe(false)

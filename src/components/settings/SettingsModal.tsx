@@ -182,9 +182,12 @@ const AGENT_API_OPTIONS: { value: string; label: string }[] = [
 
 /**
  * 本地引擎的 Whisper 档位。数字与错字样本都是本机实测（10 核 M 系、105.59 秒中文素材，每档预热 1 次后计时 3 次）：
- * base 权重 138MB、单次 9.1–16.5 秒（折合转一分钟约 5–9 秒）；small 461MB、26.6–30.3 秒（约 15–17 秒），
+ * base 单发 9.1–16.5 秒（折合转一分钟约 5–9 秒）；small 26.6–30.3 秒（约 15–17 秒），
  * 按中位数 small 是 base 的 2.83 倍。文本上 base 把「英雄觉醒在即」听成「英雄绝性在急」
  * （20 秒切片那次是「英雄决性在急」），small 两处都听对——改意思的同音错字就是把档位交给用户的理由。
+ *
+ * 这里**不写权重体积**（早先那两位「138MB／461MB」是引擎自己按 `model.bin` 的 MiB 数的，与界面那把尺不同）：
+ * 提示语要的数由 `asr:localModelUsage` 带下来，与「按需组件」那两行同源，见 `localModelTierHint`。
  */
 const LOCAL_MODEL_OPTIONS: { value: string; label: string }[] = [
   { value: 'base', label: '快速（base 档）' },
@@ -193,7 +196,7 @@ const LOCAL_MODEL_OPTIONS: { value: string; label: string }[] = [
 
 /** 跨 IPC 的权重占用形状，与 electron/preload/index.d.ts 的同名类型对齐（渲染层自己声明是本仓惯例） */
 interface LocalModelUsage {
-  tiers: { tier: string; cached: boolean; bytes: number }[]
+  tiers: { tier: string; cached: boolean; bytes: number; downloadBytes: number | null }[]
   totalBytes: number
   error: string | null
 }
@@ -220,6 +223,21 @@ function describeLocalModelUsage(usage: LocalModelUsage | null): string {
   // 合计比两档相加小，只可能是两档共用同一枚权重（真身只有一个）。不说明这句就像个算错的数
   const dedupNote = usage.totalBytes < tierSum ? '（两档共用的那份只算一次）' : ''
   return `${parts.join(' · ')}，合计 ${formatBytes(usage.totalBytes)}${dedupNote}`
+}
+
+/**
+ * 档位下拉下面那句选择依据（#438）：体积只能取自 `asr:localModelUsage` 带下来的那份表内字节数。
+ * 原先这里手抄了「约 138MB／461MB」，而同屏的组件行报的是 147.9MB／486.2MB——同一份东西两个数，
+ * 用户会挑一个不信。表里没这一档、或那次测量还没回来时，这一句整段不提体积，而不是退回抄来的数。
+ */
+function localModelTierHint(tier: string, usage: LocalModelUsage | null): string {
+  const bytes = usage?.tiers.find((row) => row.tier === tier)?.downloadBytes ?? null
+  const size = bytes ? `约 ${formatBytes(bytes)}` : ''
+  return tier === 'small'
+    ? `精准档实测能把「英雄觉醒在即」听对，快速档这一段听成了「英雄绝性在急」。代价：${
+        size ? `首次下载${size}，` : ''
+      }耗时约为快速档的 2.8 倍。保存后引擎自动重启一次`
+    : `快速档：${size ? `权重${size}，` : ''}实测转一分钟音频约 5–9 秒；中文里偶有「英雄觉醒在即」被听成「英雄绝性在急」这类改意思的同音错字，字幕要求严就切精准档。保存后引擎自动重启一次`
 }
 
 /** 只是给关于页显示和「复制」用；真正拼 mailto 的是主进程 app:contactDeveloper，改地址要同步改那边 */
@@ -1527,9 +1545,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                     ))}
                   </select>
                   <span className="settings-form-hint">
-                    {values.asrLocalModel === 'small'
-                      ? '精准档实测能把「英雄觉醒在即」听对，快速档这一段听成了「英雄绝性在急」。代价：首次下载约 461MB，耗时约为快速档的 2.8 倍。保存后引擎自动重启一次'
-                      : '快速档：权重约 138MB，实测转一分钟音频约 5–9 秒；中文里偶有「英雄觉醒在即」被听成「英雄绝性在急」这类改意思的同音错字，字幕要求严就切精准档。保存后引擎自动重启一次'}
+                    {localModelTierHint(values.asrLocalModel, localModelUsage)}
                   </span>
                   <span className="settings-form-hint">
                     {describeLocalModelUsage(localModelUsage)}

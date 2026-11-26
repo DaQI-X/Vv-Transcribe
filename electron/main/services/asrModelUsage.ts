@@ -32,6 +32,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { LOCAL_MODEL_TIERS, type LocalModelTier } from './settingsService'
 import { ASR_MODEL_SOURCES, asrModelDir, hasAsrModelDownload } from './asrModelUpstream'
+// 「这一档一共多少字节」由同一份通用实现说（componentService 报 remoteBytes 用的也是它），
+// 这里再 reduce 一遍 files.bytes 就是第二把尺（#438）
+import { upstreamTotalBytes } from './ttsModelUpstream'
 
 /**
  * 权重文件名，也是指纹表缺位时（认不出的档位）唯一的判据。
@@ -147,6 +150,12 @@ export interface LocalModelTierUsage {
   cached: boolean
   /** 这一档快照可达的文件合计（同一枚真身在本档内只算一次） */
   bytes: number
+  /**
+   * 这一档按指纹表要下多少字节（#438）——表里没有这一档时为 null，界面宁可不报数。
+   * 它是「还没下载」那一侧唯一的出处：档位提示再说一句「约 138MB」，同屏就会出现
+   * 「147.9MB（组件行，表算）」与「138MB（手抄）」两个数（`ASR_MODEL_ROW_TITLES` 那条注释立的就是这条规矩）。
+   */
+  downloadBytes: number | null
 }
 
 export interface LocalModelUsage {
@@ -236,7 +245,13 @@ export async function measureLocalModelUsage(): Promise<LocalModelUsage> {
       for (const [real, size] of sizes) {
         if (!union.has(real)) union.set(real, size)
       }
-      tiers.push({ tier, cached, bytes: sumBytes(sizes) })
+      tiers.push({
+        tier,
+        cached,
+        bytes: sumBytes(sizes),
+        // 表里没有这一档（认不出的档位）就报 null：界面宁可少说半句，也不报一个抄来的数
+        downloadBytes: hasAsrModelDownload(tier) ? upstreamTotalBytes(ASR_MODEL_SOURCES[tier]) : null,
+      })
     }
     return { tiers, totalBytes: sumBytes(union), error: null }
   } catch (err) {
