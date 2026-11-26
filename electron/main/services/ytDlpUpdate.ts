@@ -54,7 +54,7 @@ const MANIFEST_URLS = [
 ]
 
 /**
- * 拼下载地址的前缀表，顺序即试序：官方原件在前，公开加速前缀在后。两条拼的是同一个
+ * 拼下载地址的前缀表，顺序即试序：官方原件在前，公开加速前缀在后。三条拼的是同一个
  * 「版本号/资产名」，换的只是 host，下面那道 SHA2-256 闸门来自清单、换 host 换不掉它。
  *
  * 为什么不把加速前缀放前面（#413 调研时另一种推荐）：那样每位用户的二进制默认都出自第三方镜像，
@@ -62,13 +62,22 @@ const MANIFEST_URLS = [
  * 用户拿到的仍是官方那份，多花的成本是最坏 3 秒快刀时间。本机实测 2026-11-24 同一段时间窗：
  * 官方 23 秒只漏进 351KB（≈13.8KB/s），加速前缀整份 37MB 用 9.9 秒（≈3.8MB/s）且落地指纹
  * 与清单逐字符相同。第三方的可用性不作假设：它挂了就走「兜回第一腿」那条慢但正确的一棒。
+ *
+ * 第三腿（gh-proxy.com，#423）是为「单点」本身加的，不是为了提速：#423 摸底时试了几枚公开前缀，
+ * 从本机直连只有这两枚能整份取回（其余要么不通，要么慢到取不完，`ghproxy.net` 实测 5.9KB/s），
+ * 只留一枚等于把换源这件事押在一家的心情上。本机实测 2026-11-26 同一份资产
+ * （37,180,736 字节，落地 SHA2-256 与清单逐字符相同）：gh-proxy.com 74.6 秒、ghfast.top 119.6 秒，
+ * 官方直连 15 秒内 0 字节——同一枚前缀的速率在两天之间从 3.8MB/s 掉到 0.3MB/s，
+ * 这正是不能只靠一枚的实测理由。新那枚放在最后一棒而不是第二棒：最后一棒不吃快刀、有 20 分钟
+ * 耐心，把它给已经在 1.2.3 真实用户链路上跑通过的那一枚，未经使用的候选先只当兜底。
  */
 const RELEASE_BASES = [
   'https://github.com/yt-dlp/yt-dlp/releases/download',
   'https://ghfast.top/https://github.com/yt-dlp/yt-dlp/releases/download',
+  'https://gh-proxy.com/https://github.com/yt-dlp/yt-dlp/releases/download',
 ]
 
-/** 拼这一版的候选地址；导出只为让单测钉得住表序与「两条拼的是同一份版本号/资产名」 */
+/** 拼这一版的候选地址；导出只为让单测钉得住表序与「每条拼的是同一份版本号/资产名」 */
 export function releaseUrls(entry: Pick<ManifestEntry, 'version' | 'asset'>): string[] {
   return RELEASE_BASES.map((base) => `${base}/${entry.version}/${entry.asset}`)
 }
