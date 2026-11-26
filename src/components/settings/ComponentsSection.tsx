@@ -1,8 +1,9 @@
 /**
  * 设置 → 关于与更新里的「按需组件」栏
  *
- * 装的是本地配音的引擎二进制与两份模型。它们不进安装包（合计 500MB 以上，
- * 而大部分用户根本不用本地配音），所以这一栏存在的意义就是把「缺了怎么补上」这件事
+ * 装的是本地配音的引擎二进制与两份模型，外加本地转写用的两档 Whisper 权重（#434）。它们都不进
+ * 安装包（本地配音那三行合计 500MB 以上，两档权重再加 147.9MB / 486.2MB，而大部分用户用不到全部），
+ * 所以这一栏存在的意义就是把「缺了怎么补上」这件事
  * 放在用户已经知道的地方——和「链接解析组件」并排，不再新开一个 Tab。
  *
  * 三条口径跟着主进程走，界面自己不发明：
@@ -13,6 +14,10 @@
  *   不拿 0 冒充已知。体积数字只有一处算法（主进程按表内字节数报，界面走 utils/formatBytes.ts），
  *   所以组件行和提示语不会出现「129MB」与「135.5MB」并排这种同一份东西两个数。
  * - 下载体积的分母可能是 0（清单没写 bytes），这时只显示已下载的字节数，不给假百分比。
+ *
+ * 面板顶部那两颗「停止」是闸门留下的（#434/#230）：两个引擎都在应用里常驻，权重和模型文件正被
+ * 进程占着，主进程一律拦住不让动。界面只把 `component:busy` 那三个布尔换成按钮，
+ * 「到底占没占」由主进程说——它自己不猜，也从不因为按钮在转圈就写一份自己的状态。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Download, RefreshCw, Square, Trash2 } from 'lucide-react'
@@ -67,8 +72,15 @@ export function ComponentsSection() {
   const [progress, setProgress] = useState<Record<string, ComponentProgress>>({})
   /** 正在等结果的组件，按动作记，避免下载/删除按钮在 await 期间还能再点一次 */
   const [pending, setPending] = useState<Record<string, 'install' | 'remove' | 'cancel'>>({})
-  const [busy, setBusy] = useState<{ engineRunning: boolean; synthesizing: boolean } | null>(null)
+  const [busy, setBusy] = useState<{
+    engineRunning: boolean
+    synthesizing: boolean
+    asrEngineRunning: boolean
+  } | null>(null)
+  /** 两颗「停止」各等各的结果：共用一个布尔时按下一颗会让另一颗一起转圈，那是在假报进度 */
   const [stopping, setStopping] = useState(false)
+  const [stoppingAsr, setStoppingAsr] = useState(false)
+  const [restartingAsr, setRestartingAsr] = useState(false)
   const api = getElectronAPI()
   /** 卸载时进度流要能退订，否则设置窗关了事件还在往已销毁的组件上 setState */
   const mounted = useRef(true)
@@ -230,6 +242,46 @@ export function ComponentsSection() {
     }
   }
 
+  /**
+   * 停掉本地转写引擎（#434）：Whisper 权重那两行动目录前必须先停，理由与上面那颗一样。
+   * 转写正在进行中时主进程会拒绝（停引擎等于截断这条 NDJSON 流），拒绝的原话直接弹出来。
+   */
+  const handleStopAsrEngine = async () => {
+    if (!api || stoppingAsr) return
+    setStoppingAsr(true)
+    try {
+      const result = await api.stopLocalEngine()
+      if (!mounted.current) return
+      if (result.ok) toast.success(result.stopped ? '本地转写引擎已停止' : '本地转写引擎本来就没在跑')
+      else toast.error(result.error || '停止本地转写引擎失败', 10000)
+      void refresh()
+    } catch (err) {
+      toast.error(`停止本地转写引擎失败：${err instanceof Error ? err.message : String(err)}`, 10000)
+    } finally {
+      if (mounted.current) setStoppingAsr(false)
+    }
+  }
+
+  /**
+   * 停完得能起回去：这一颗存在的全部理由是让「停止」不是一句单向的劝告。
+   * 重启最长可能等 60 秒（首次还要下模型），所以必须有「重启中」态，否则像坏了。
+   */
+  const handleRestartAsrEngine = async () => {
+    if (!api || restartingAsr) return
+    setRestartingAsr(true)
+    try {
+      const result = await api.restartLocalEngine()
+      if (!mounted.current) return
+      if (result.ok) toast.success('本地转写引擎已重启，可以直接开始转写')
+      else toast.error(result.error || '本地转写引擎重启失败，请稍后再试', 10000)
+      void refresh()
+    } catch (err) {
+      toast.error(`本地转写引擎重启失败：${err instanceof Error ? err.message : String(err)}`, 10000)
+    } finally {
+      if (mounted.current) setRestartingAsr(false)
+    }
+  }
+
   const totalBytes = (states ?? []).reduce((sum, s) => sum + s.bytes, 0)
   const anyInstalling = Object.keys(pending).some((id) => pending[id] === 'install')
 
@@ -257,6 +309,35 @@ export function ComponentsSection() {
           >
             <Square size={12} />
             {stopping ? '停止中...' : '停止本地配音引擎'}
+          </button>
+        )}
+        {/*
+          转写引擎同样是常驻进程（转写完不退），而权重那两行的目录正躺在它的读取路径上，
+          所以 #434 的闸门必须配这颗「停止」——否则同一会话里那两行永远点不动，只能退出应用重开。
+          下面那颗「重启」是给这颗按钮收尾的：停完起不回去，「停止」就成了一句单向的劝告。
+        */}
+        {busy?.asrEngineRunning && (
+          <button
+            type="button"
+            onClick={handleStopAsrEngine}
+            disabled={stoppingAsr}
+            className="settings-modal__dict-update-btn"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          >
+            <Square size={12} />
+            {stoppingAsr ? '停止中...' : '停止本地转写引擎'}
+          </button>
+        )}
+        {busy && !busy.asrEngineRunning && (
+          <button
+            type="button"
+            onClick={handleRestartAsrEngine}
+            disabled={restartingAsr}
+            className="settings-modal__dict-update-btn"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          >
+            <RefreshCw size={12} />
+            {restartingAsr ? '重启中...' : '重启本地转写引擎'}
           </button>
         )}
         <span style={{ fontSize: 11, color: '#9AA5B8' }}>

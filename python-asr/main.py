@@ -2,6 +2,7 @@
 Vv Transcribe 本地 ASR 服务
 基于 FastAPI + faster-whisper 实现本地语音转写
 - 首次调用时自动下载并加载宿主指定的 Whisper 档位（base 138MB / small 461MB，本机实测权重体积）
+- 宿主已经把权重按指纹取好并下发 `VV_ASR_MODEL_DIR` 时，直接吃那个目录，不再联网（1.2.5 #436）
 - 使用 hf-mirror.com 镜像加速国内下载
 - 支持任意音频格式输入（内部通过 ffmpeg 转换为 16kHz WAV）
 - /transcribe 返回 NDJSON 流：每转完一句立刻吐一行，供上层显示真实进度并逐句上屏
@@ -68,6 +69,35 @@ BOOT_ID = os.environ.get("ASR_BOOT_ID", "")
 # 和「谁有资格让我转写一段音频」是两件事。
 ASR_TOKEN = os.environ.get("VV_ASR_TOKEN", "")
 
+# 宿主按指纹表自己取下来的那一档权重目录（1.2.5 #434/#436，`userData/components/asr-models/<档位>`）。
+# 宿主只在「四个文件都在且字节逐个对得上」的那一刻才下发这个变量，所以它代表的是 spawn 时的真相。
+# 之后文件可能被动过（用户手删、或以后那套「应用内清空本机数据」），所以这里每次加载都再看一眼：
+# 缺哪几个必须说出来——少了这一句，一次删文件的失败只会变成 CTranslate2 里那句
+# "model.bin not found"，谁也不知道它指的是哪一份。
+MODEL_DIR = os.environ.get("VV_ASR_MODEL_DIR", "")
+
+# faster-whisper 加载一个本地目录时点名的四份文件，与 asrModelUpstream 的指纹表同一份清单
+MODEL_FILES = ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt")
+
+
+def missing_model_files(directory: str) -> list:
+    return [name for name in MODEL_FILES if not os.path.isfile(os.path.join(directory, name))]
+
+
+def resolve_model_source(name: str):
+    """这一档真从哪儿加载，回 (交给 WhisperModel 的参数, 宿主目录里缺的文件名)。
+
+    优先吃宿主下发的目录（那几枚字节验过 SHA256），缺文件才退回按档位名走 HuggingFace 缓存/下载。
+    退回那一条路可能正被宿主的 `HF_HUB_OFFLINE=1` 掐着（下发目录时宿主认为本地已齐），
+    这时失败的是宿主与磁盘之间的一致性，不是用户的网络——所以缺的文件名要一路带到 error 事件里。
+    """
+    if MODEL_DIR:
+        missing = missing_model_files(MODEL_DIR)
+        if missing:
+            return name, missing
+        return MODEL_DIR, []
+    return name, []
+
 
 def require_token(request: Request) -> None:
     """FastAPI 依赖：ASR_TOKEN 非空时，请求必须带 `Authorization: Bearer <ASR_TOKEN>`。"""
@@ -78,7 +108,7 @@ def require_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Missing or invalid bearer token")
 
 
-def load_model(name: str):
+def load_model(name: str, source: str, missing: list):
     global model, loaded_model_name
     if model is not None and loaded_model_name == name:
         return
@@ -89,9 +119,15 @@ def load_model(name: str):
         loaded_model_name = ""
         gc.collect()
 
-    log(f"[ASR] Loading Whisper model '{name}' (first run downloads ~{MODEL_WEIGHTS_MB[name]}MB)...")
+    if missing:
+        log(f"[ASR] Host model dir '{MODEL_DIR}' is missing {', '.join(missing)}, falling back to '{name}'")
+    if source != name:
+        # 吃本地目录时不再提「首次要下载」：那会儿磁盘上已经有货，说下载是把人往网络上引
+        log(f"[ASR] Loading Whisper model '{name}' from local directory {source}...")
+    else:
+        log(f"[ASR] Loading Whisper model '{name}' (first run downloads ~{MODEL_WEIGHTS_MB[name]}MB)...")
     from faster_whisper import WhisperModel
-    model = WhisperModel(name, device="cpu", compute_type="int8")
+    model = WhisperModel(source, device="cpu", compute_type="int8")
     loaded_model_name = name
     log(f"[ASR] Model loaded successfully: {name}")
 
@@ -140,16 +176,25 @@ def _transcribe_events(audio_path: str, language: Optional[str], model_name: str
     # 出错时把「挂在哪一步」原样带出去。宿主只见过 status 事件就断言「是模型下载失败」的话，
     # ffmpeg 抽音频失败也会被报成「首次下载的模型没下来」——那是把人往错的网络上引
     stage = "loading_model"
+    # 缺文件那句要一路活到 error 事件里（#436）：status 与 error 之间隔着一次加载，
+    # 宿主只留最后一次 status，不带这份账就只能看到一句 CTranslate2 的原文
+    missing = []
     try:
+        source, missing = resolve_model_source(model_name)
         # 首次转写要下载档位对应的权重（base 138MB / small 461MB），先下发状态让宿主给出可见说明，
-        # 别让用户对着不动的进度条干等；体积按档位给，笼统说「约 150MB」会对 small 用户撒谎
+        # 别让用户对着不动的进度条干等；体积按档位给，笼统说「约 150MB」会对 small 用户撒谎。
+        # modelSource 说的是「这一档真从哪儿读」：directory＝吃宿主按指纹表取好的那份（不联网），
+        # repo＝按档位名走 HuggingFace 缓存/下载。宿主在 spawn 时按同一份判式记过日志，
+        # 这里再报一次是为了让「装好了却没吃到」这件事在流里就对得上，而不是只能去比两份日志
         yield _event({
             "type": "status",
             "stage": stage,
             "model": model_name,
             "weightsMb": MODEL_WEIGHTS_MB[model_name],
+            "modelSource": "directory" if source != model_name else "repo",
+            "missingFiles": missing,
         })
-        load_model(model_name)
+        load_model(model_name, source, missing)
         stage = "transcribing"
 
         wav_path = convert_to_16k_wav(audio_path)
@@ -180,9 +225,18 @@ def _transcribe_events(audio_path: str, language: Optional[str], model_name: str
         yield _event({"type": "done", "segments": count, "elapsed": round(elapsed, 2)})
 
     except Exception as e:
-        # 响应头早已发出（200 + 流），失败只能作为事件下发，由上层转成用户可见的报错
-        log(f"[ASR] Error: {e}")
-        yield _event({"type": "error", "detail": str(e), "stage": stage})
+        # 响应头早已发出（200 + 流），失败只能作为事件下发，由上层转成用户可见的报错。
+        # 从宿主目录退回档位名时（missing 非空），那句原文会被宿主念成「去确认能不能访问
+        # hf-mirror.com」，而真凶是那几枚文件不在了——所以这一条前缀必须跟着原文一起下去，
+        # 否则最像「网络坏了」的恰好是唯一一件与网络无关的失败
+        detail = str(e)
+        if missing:
+            detail = (
+                f"宿主下发的权重目录 {MODEL_DIR} 缺少 {'、'.join(missing)}，"
+                f"退回按档位名 '{model_name}' 加载也没成：{detail}"
+            )
+        log(f"[ASR] Error: {detail}")
+        yield _event({"type": "error", "detail": detail, "stage": stage})
     finally:
         if wav_path and os.path.exists(wav_path):
             os.unlink(wav_path)

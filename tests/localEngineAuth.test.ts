@@ -15,6 +15,9 @@
  * CI 各平台 `VV_ENGINE_SMOKE=1` 那一档验得到（tests/engineSmoke.test.ts 的转写用例钉的是
  * 「不带凭证→401、带错→401、带对才放进 handler」）。源码形状 + 真进程行为两边合起来才是完整证据，
  * 缺一半就有一半是假设。
+ *
+ * 这一层还顺带钉住宿主读 NDJSON 流的那段契约（LocalASRProvider 与 main.py 之间只有这一个形状），
+ * 所以 #436 那三种「模型加载失败怎么说」也归在这里，不再另开一份 fetch 桩。
  */
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -22,6 +25,7 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getLocalEngineAuthHeader } from '../electron/main/services/asrServiceManager'
+import { ASR_MODEL_SOURCES } from '../electron/main/services/asrModelUpstream'
 import { LocalASRProvider } from '../electron/main/services/asr/localASR'
 
 /**
@@ -105,6 +109,110 @@ describe('宿主这一侧真的带上凭证', () => {
     expect(err).toBeInstanceOf(Error)
     expect((err as Error).message).toContain('重启本地引擎')
     expect((err as Error).message).not.toContain('Missing or invalid')
+  })
+})
+
+/**
+ * 「首转要下载模型」那句劝告，从 1.2.5 #436 起不再是唯一出路。
+ *
+ * 权重现在可能压根没从网上取（宿主按指纹表装在 `components/asr-models/<档位>`，引擎吃
+ * `VV_ASR_MODEL_DIR`）。这一档失败分成三种，说错一种就是把人支到查不到的地方：
+ * 目录缺文件（与网络无关）劝人查 hf-mirror、目录整份读不出来劝人查网络、真下载失败却说「不联网」。
+ * 所以判式吃的是**引擎在 status/error 事件里自报的出处**，而不是宿主自己的猜测。
+ * 最后那一条把引擎的 `MODEL_FILES` 与指纹表钉在一起——两边各写一份文件名，迟早分叉，
+ * 而分叉的症状是「组件面板说装好了、引擎说少文件」，两边日志各自都挺有道理。
+ */
+describe('模型加载失败按引擎自报的出处分说（#436）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const failDuringLoad = (status: Record<string, unknown>) => {
+    const body = `${JSON.stringify({ type: 'status', stage: 'loading_model', model: 'base', weightsMb: 138, ...status })}\n${JSON.stringify(
+      { type: 'error', stage: 'loading_model', detail: 'Cannot find an appropriate cached snapshot folder' },
+    )}\n`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-ndjson' } })),
+    )
+    return new LocalASRProvider().transcribe('/tmp/不存在.wav', { localModel: 'base' })
+  }
+
+  it('目录缺文件：点名缺了哪几枚，并且不说网络', async () => {
+    const err = await failDuringLoad({
+      modelSource: 'directory',
+      missingFiles: ['model.bin', 'vocabulary.txt'],
+    }).catch((e) => e)
+    const message = (err as Error).message
+    expect(message).toContain('model.bin')
+    expect(message).toContain('vocabulary.txt')
+    expect(message).toContain('这与网络无关')
+    expect(message).toContain('重新下载')
+    expect(message).not.toContain('hf-mirror')
+  })
+
+  it('整份目录都在却读不出来：出处指到按需组件，仍然不提网络', async () => {
+    const err = await failDuringLoad({ modelSource: 'directory' }).catch((e) => e)
+    const message = (err as Error).message
+    expect(message).toContain('按需组件')
+    expect(message).toContain('这一步不联网')
+    expect(message).not.toContain('hf-mirror')
+  })
+
+  it('按档位名走缓存/下载（含旧引擎不发这两位字段）：保留原先那句网络指引与档位体积', async () => {
+    for (const status of [{ modelSource: 'repo' }, {}]) {
+      const err = await failDuringLoad(status).catch((e) => e)
+      const message = (err as Error).message
+      expect(message).toContain('首次使用需要下载语音模型')
+      expect(message).toContain('138MB')
+      expect(message).toContain('hf-mirror.com')
+    }
+  })
+
+  it('挂在转写阶段就不套下载那段话，原话透出去', async () => {
+    const body = `${JSON.stringify({ type: 'status', stage: 'loading_model', model: 'base', weightsMb: 138 })}\n${JSON.stringify(
+      { type: 'start', duration: 12 },
+    )}\n${JSON.stringify({ type: 'error', stage: 'transcribing', detail: 'ffmpeg exited with code 1' })}\n`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-ndjson' } })),
+    )
+    const err = await new LocalASRProvider().transcribe('/tmp/不存在.wav', {}).catch((e) => e)
+    expect((err as Error).message).toBe('ffmpeg exited with code 1')
+  })
+
+  it('阶段与出处要跟着进度回调上抛，界面才拿得到「这一档正在从哪读」', async () => {
+    const seen: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          `${JSON.stringify({ type: 'status', stage: 'loading_model', model: 'small', weightsMb: 461, modelSource: 'directory', missingFiles: ['config.json'] })}\n{"type":"done"}\n`,
+          { status: 200, headers: { 'content-type': 'application/x-ndjson' } },
+        ),
+      ),
+    )
+    await new LocalASRProvider().transcribe('/tmp/不存在.wav', {
+      localModel: 'small',
+      onProgress: (p) => seen.push(p),
+    })
+    expect(seen).toContainEqual({
+      percent: 10,
+      stage: 'loading_model',
+      model: { tier: 'small', weightsMb: 461, source: 'directory', missingFiles: ['config.json'] },
+    })
+  })
+
+  it('引擎点名的四份文件与指纹表是同一份清单', async () => {
+    const src = await readFile('python-asr/main.py', 'utf-8')
+    const declared = src.match(/MODEL_FILES\s*=\s*\(([^)]*)\)/)?.[1] ?? ''
+    const engineFiles = [...declared.matchAll(/"([^"]+)"/g)].map((m) => m[1])
+    expect(engineFiles.length, 'python-asr/main.py 里的 MODEL_FILES 形状变了').toBeGreaterThan(0)
+    for (const [tier, source] of Object.entries(ASR_MODEL_SOURCES)) {
+      expect([...source.files].map((f) => f.path).sort(), `${tier} 档的文件名与引擎那份不一致`).toEqual(
+        [...engineFiles].sort(),
+      )
+    }
   })
 })
 

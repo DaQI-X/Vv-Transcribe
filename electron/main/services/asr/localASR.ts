@@ -22,10 +22,26 @@ const PYTHON_ASR_URL = 'http://127.0.0.1:8000'
  * 首次转写要在 loading_model 阶段从 hf-mirror 拉权重，弱网/离线时 Python 抛回来的是
  * huggingface_hub 的英文报错原文，用户看到的是「一段看不懂的英文 + 只能重新上传」。
  * 挂在哪一步由引擎随 error 事件给出，体积按档位由 status 事件给出，这里只补「怎么办」，原文进日志。
+ *
+ * 但「怎么办」不能只有一句：#436 之后这一档可能压根没联网——权重是「按需组件」按指纹表装好的那份。
+ * 那两种情况劝人去访问 hf-mirror 是句谎话，会把人引到错的地方查半天，所以按引擎自报的出处分三条说。
  */
 function explainLocalFailure(detail: string, stage: string | null, modelInfo: ASRModelInfo | null): string {
   if (stage !== 'loading_model') return detail || '本地转写失败'
   logger.error(TAG, 'Whisper model load failed', { detail })
+  const missing = modelInfo?.missingFiles ?? []
+  if (missing.length > 0) {
+    return (
+      `本地转写模型的权重文件不完整（缺 ${missing.join('、')}）。` +
+      '这与网络无关：请到「设置 → 关于与更新 → 按需组件」找到这一档点「重新下载」，装完再转写。'
+    )
+  }
+  if (modelInfo?.source === 'directory') {
+    return (
+      `本地转写模型读不出来（${modelInfo.tier} 档吃的是「按需组件」装好的那份，这一步不联网）。` +
+      '请到「设置 → 关于与更新 → 按需组件」找到这一档点「重新下载」。'
+    )
+  }
   const size = modelInfo?.weightsMb ? `（${modelInfo.tier} 档约 ${modelInfo.weightsMb}MB）` : ''
   return (
     `首次使用需要下载语音模型${size}，这一步没有完成。` +
@@ -132,6 +148,8 @@ export class LocalASRProvider implements ASRProvider {
         stage?: string
         model?: string
         weightsMb?: number
+        modelSource?: string
+        missingFiles?: string[]
       }
 
       if (event.type === 'start') {
@@ -139,7 +157,13 @@ export class LocalASRProvider implements ASRProvider {
       } else if (event.type === 'status') {
         // 加载/下载模型期间一条片段也不会有，只能把阶段透给宿主
         lastStage = (event.stage as ASRStage) ?? lastStage
-        lastModelInfo = { tier: event.model || tier, weightsMb: event.weightsMb ?? null }
+        lastModelInfo = {
+          tier: event.model || tier,
+          weightsMb: event.weightsMb ?? null,
+          // 引擎没发这两位（旧引擎、或手动起的服务）就当没说，退回原先那句「去确认网络」
+          source: event.modelSource === 'directory' || event.modelSource === 'repo' ? event.modelSource : undefined,
+          missingFiles: Array.isArray(event.missingFiles) ? event.missingFiles : undefined,
+        }
         options.onProgress?.({ percent: 10, stage: event.stage as ASRStage, model: lastModelInfo })
       } else if (event.type === 'segment') {
         const segment: ASRSegment = {

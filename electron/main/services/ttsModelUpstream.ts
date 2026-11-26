@@ -60,19 +60,21 @@ export interface UpstreamModelSource {
 }
 
 /**
- * 国内直连 huggingface.co 基本取不动，正站留作「关掉加速也照样能取」的兜底由界面文案说明，
- * 代码里只认这一个源。换源自检（同 VV_COMPONENTS_MANIFEST_URL 的思路）用 VV_TTS_MODEL_BASE：
- * 指纹钉在代码里，把前缀指到本机静态服务也只能喂出内容相同的东西，撑不开「换成别人的文件」。
+ * 国内直连 huggingface.co 基本取不动，所以镜像是第一腿；正站留作第二腿，给的是「镜像整体挂了
+ * 也还有出路」——hf-mirror 是公益反代而不是自家 CDN，它挂的那天正站对境外用户仍然可取（#412）。
+ * 取哪条不由出口 IP 的国家码决定，也不由人手动切：下载器按「3 秒没进够 1MB」那把尺判死才换腿
+ * （见 componentService 的 budget），慢不等于坏，换错源反而更慢。
+ * 换源自检用 VV_TTS_MODEL_BASE：它把两腿一起换成前缀，而指纹钉在代码里，
+ * 指到本机静态服务也只能喂出内容相同的东西，撑不开「换成别人的文件」。
  */
-const UPSTREAM_BASE = 'https://hf-mirror.com'
+const MIRROR_BASE = 'https://hf-mirror.com'
+const ORIGIN_BASE = 'https://huggingface.co'
 
-export function upstreamBase(): string {
-  return process.env.VV_TTS_MODEL_BASE || UPSTREAM_BASE
-}
-
-/** 一个文件的下载地址。commit 是钉死的，不是分支名 */
-export function upstreamFileUrl(source: UpstreamModelSource, file: UpstreamModelFile): string {
-  return `${upstreamBase()}/${source.repo}/resolve/${source.commit}/${file.path}`
+/** 一个文件的全部候选地址，顺序即取件顺序。commit 是钉死的，不是分支名 */
+export function upstreamFileUrls(source: UpstreamModelSource, file: UpstreamModelFile): string[] {
+  const override = process.env.VV_TTS_MODEL_BASE
+  const bases = override ? [override] : [MIRROR_BASE, ORIGIN_BASE]
+  return bases.map((base) => `${base}/${source.repo}/resolve/${source.commit}/${file.path}`)
 }
 
 /** 提交号的前 7 位，界面当版本号用（和 git 里认一个提交的习惯一致） */

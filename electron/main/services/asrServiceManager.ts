@@ -25,7 +25,8 @@ import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { app } from 'electron'
-import { isModelCached } from './asrModelUsage'
+import { isModelCached, localWeightsComplete } from './asrModelUsage'
+import { asrModelDir } from './asrModelUpstream'
 import { loadSettings, normalizeEngineAuth, normalizeLocalModel, type LocalModelTier } from './settingsService'
 import { logger } from './logger'
 
@@ -356,9 +357,18 @@ export async function startASRService(tierOverride?: LocalModelTier): Promise<bo
   // 这一项界面上没有格子（#353 收尾撤的），出路是手改 settings.json 再重启应用——配置缓在内存里，
   // 不重启不会重读，而下一次 spawn 读的就是那一个新值。
   const requireAuth = normalizeEngineAuth(settings.asrEngineAuth) === 'require'
-  const modelCached = isModelCached(tier)
+  // 两棵树（#434）：应用按指纹表自取的组件目录，与引擎自己去 hf-mirror 拉的 HF 缓存。
+  // 前者优先——那四个文件的字节是验过 SHA256 的；只有旧缓存时维持原样，不为这份改动让用户重下 461MB。
+  const weightsFromApp = localWeightsComplete(tier)
   // cached=false 意味着这次启动没给 HF_HUB_OFFLINE=1，首次转写会先去 hf-mirror 拉权重
-  logger.info(TAG, 'Whisper tier', { tier, cached: modelCached, override: tierOverride !== undefined })
+  const modelCached = weightsFromApp || isModelCached(tier)
+  logger.info(TAG, 'Whisper tier', {
+    tier,
+    cached: modelCached,
+    // 报「权重从哪棵树来」：出问题时最先要分的就是这个——组件目录没被吃到，与缓存没命中，是两条不同的路
+    source: weightsFromApp ? 'components' : modelCached ? 'hf-cache' : 'none',
+    override: tierOverride !== undefined,
+  })
   // 只报开关状态：那串凭证本身进日志等于把 8000 端口的钥匙抄进一个能被人读走的文件
   logger.info(TAG, 'Engine auth handed to spawn', { requireAuth })
 
@@ -370,6 +380,8 @@ export async function startASRService(tierOverride?: LocalModelTier): Promise<bo
       ...(requireAuth ? { VV_ASR_TOKEN: engineToken } : {}),
       HF_ENDPOINT: 'https://hf-mirror.com',
       ...(modelCached ? { HF_HUB_OFFLINE: '1' } : {}),
+      // 目录路径由 asrModelDir 说，与下载器的落点是同一个函数；引擎那边的读法在 python-asr/main.py
+      ...(weightsFromApp ? { VV_ASR_MODEL_DIR: asrModelDir(tier) } : {}),
       ...(ffmpegPath ? { FFMPEG_PATH: ffmpegPath } : {}),
       ...(ffprobePath ? { FFPROBE_PATH: ffprobePath } : {}),
     },
@@ -581,6 +593,45 @@ export async function ensureLocalTier(tier: LocalModelTier): Promise<EngineActio
     to: tier,
   })
   return restartLocalEngine(tier)
+}
+
+/**
+ * 引擎进程此刻还在不在。同步——调用方（按需组件那两行的闸门）要的是「有没有人可能开着这几个文件」，
+ * 而 spawn 出去还没握完手的那个进程一样开着，所以这里判的是进程而不是 `asrReady`。
+ */
+export function isLocalEngineRunning(): boolean {
+  return asrProcess !== null || restartInFlight !== null
+}
+
+/**
+ * 应用内停掉本地转写引擎，不重开（#434 的配套，与配音那边的 `tts:localStop` 同一个理由）。
+ *
+ * 为什么必须有：引擎转写完不会自己退，而「按需组件」里 Whisper 权重那两行要动
+ * `components/asr-models/<档位>` 这棵目录——没有这个入口，用户在同一个会话里永远换不了也删不掉，
+ * 只能退出应用重开（那不是谨慎，是死路）。
+ *
+ * 停完不会自动再起：下一次本地转写照原样报「引擎未运行」，出路是那两颗已存在的「重启本地引擎」
+ * （设置 → 转写配置，以及按需组件这一栏刚补的那颗）。这里刻意不做懒起——「有转写就自己 spawn」
+ * 正是 #274 那次两个引擎抢 8000 的现场，要做得连同启动时序一起验，不该塞进一个闸门配套里。
+ */
+export async function stopLocalEngineOnRequest(): Promise<{
+  ok: boolean
+  /** 「此刻引擎确实没在跑」：按下这一刻本来就没在跑、或没停成，都是 false——界面据此说「本来就没在跑」而不是「已停止」 */
+  stopped: boolean
+  error: string | null
+}> {
+  const wasRunning = isLocalEngineRunning()
+  await stopASRService()
+  if (isLocalEngineRunning()) {
+    // stopped 给 false，与配音那侧同一个口径：它说的是「此刻引擎确实没在跑」，
+    // 动文件那侧拿到 false 就该知道进程可能还在，宁可让人再点一次
+    return { ok: false, stopped: false, error: '本地转写引擎没能停下来，请稍后再试，或完全退出应用后重新启动' }
+  }
+  // 这两个是「上一次那台引擎」的结论：进程没了还留着，界面会把旧失败原因念成新状态
+  bootedTier = null
+  asrError = wasRunning ? '本地转写引擎已停止，需要时到「设置 → 转写配置」点「重启本地引擎」' : asrError
+  if (wasRunning) logger.info(TAG, 'Engine stopped on request')
+  return { ok: true, stopped: wasRunning, error: null }
 }
 
 /** 获取 ASR 服务状态；未就绪时 error 为可直接展示给用户的原因 */

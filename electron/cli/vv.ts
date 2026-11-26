@@ -73,7 +73,7 @@ interface FacadeProgressRow {
   progress?: number
   segment?: { startTime: number; endTime: number; text: string }
   stage?: string
-  model?: { tier?: string; weightsMb?: number }
+  model?: { tier?: string; weightsMb?: number; download?: { done: number; total: number } }
 }
 type FacadeRow = FacadeResultRow | FacadeProgressRow | { type: string; error?: string }
 
@@ -346,8 +346,14 @@ export interface CliIo {
   onJobId: (jobId: string) => void
 }
 
+/**
+ * 阶段名 → 终端那一行。三个成员对应 `ASRStage`（见 `asr/types.ts`）：少一个就退化成把内部的
+ * 键名直接甩给用户读，而 tests/stageLabels.test.ts 就是拦这个的。
+ */
 const STAGE_LABEL: Record<string, string> = {
+  downloading_model: '模型权重下载中',
   loading_model: '模型装载中',
+  waiting_order: '已提交，等对方出结果',
   transcribing: '转写中',
 }
 
@@ -457,7 +463,7 @@ async function streamJob(port: number, token: string, jobId: string, args: CliAr
   const decoder = new TextDecoder()
   let pending = ''
   let result: FacadeResultRow | null = null
-  const shown = { segments: 0, finished: false }
+  const shown = { segments: 0, finished: false, stages: new Map<string, number>() }
   /*
     Ctrl-C 落点实测过一次：信号打在 `reader.read()` 的 await 上，那一支的 AbortError 不由上面那个
     fetch 的 try/catch 接（它只管建连接），于是整个 run 带着一个 Node 栈退出、退成 1 而不是 130。
@@ -924,8 +930,16 @@ function parseRow(line: string): FacadeRow | null {
  * `shown` 是这次运行里已经打过的：收尾那条 progress=100 会来两次（引擎流式那一单的最后一条、
  * 作业体自己收口那一条），dev 实测就刷出两行「转写完成，收结果」——同一条消息打两遍，
  * 读起来像是出了两段而实际只有一段收尾。
+ *
+ * `stages` 管取件那一段的刷屏：宿主下载器每 200ms 报一次进度，照打就是几百行
+ * 「模型权重下载中」。口径是「比上一行多走完 5% 才再说一次」——终端上要的是「还在动」，
+ * 不是每一个包；换阶段则必打，装载完/开始排队这些拐点漏了读起来就像整段没进展。
  */
-function report(row: FacadeRow, shown: { segments: number; finished: boolean }, io: CliIo): void {
+function report(
+  row: FacadeRow,
+  shown: { segments: number; finished: boolean; stages: Map<string, number> },
+  io: CliIo,
+): void {
   if (row.type !== 'progress') return
   const event = row as FacadeProgressRow
   if (event.segment) {
@@ -934,8 +948,20 @@ function report(row: FacadeRow, shown: { segments: number; finished: boolean }, 
     return
   }
   if (event.stage) {
-    const model = event.model?.tier ? `（${event.model.tier}）` : ''
-    io.stderr(`${STAGE_LABEL[event.stage] ?? event.stage}${model}\n`)
+    const taken = event.model?.download
+    // 有实测字节就报字节（这是这一档唯一有分母的段），否则退回报档位名
+    const detail =
+      taken && taken.total > 0
+        ? `（${formatBytes(taken.done)} / ${formatBytes(taken.total)}）`
+        : event.model?.tier
+          ? `（${event.model.tier}）`
+          : ''
+    const ratio = taken && taken.total > 0 ? Math.min(1, taken.done / taken.total) : 1
+    const last = shown.stages.get(event.stage)
+    if (last === undefined || ratio - last >= 0.05) {
+      shown.stages.set(event.stage, ratio)
+      io.stderr(`${STAGE_LABEL[event.stage] ?? event.stage}${detail}\n`)
+    }
     return
   }
   if (event.progress === 100 && !shown.finished) {

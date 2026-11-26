@@ -1,14 +1,17 @@
 /**
  * 按需组件的下载与占用管理（#230）
  *
- * 覆盖的是本地配音那三样东西：引擎二进制（按平台-架构各一份）与两份模型（三平台共用一份）。
- * 它们都不进安装包（1.0.6 的范围决定），所以第一次用必须能在应用内取到；「要下多少、下到哪、
- * 失败了怎么办」这三件事就是本模块的职责。界面入口在设置 → 关于与更新。
+ * 覆盖的是不进安装包的那几样东西：本地配音的引擎二进制（按平台-架构各一份）、两份配音模型，
+ * 以及两档本地转写的 Whisper 权重（147.9MB / 486.2MB，#434 收进来）。
+ * 配音那三样从 1.0.6 起就是「缺哪个下哪个」；权重那两档以前由引擎自己去 hf-mirror 拉、落在 HuggingFace
+ * 的通用缓存里，宿主既看不到进度也验不了指纹（慢网下就是「转写卡住了」），#434 把它们并到同一条链上——
+ * 于是第一次用每一样都能应用内取到，「要下多少、下到哪、失败了怎么办」这三件事归本模块说。
+ * 界面入口在设置 → 关于与更新。
  *
  * 两条来源，一个下载器（#237 拍板「引擎发在自己 Release、模型不替第三方权重做二次分发」之后分成这样）：
  * - 引擎二进制是我们自己的产物 → 由清单（components-manifest.json）指版本与指纹，资产在我们仓库的 Release 上；
- * - 模型是第三方训练出来的 → 不进清单，钉在上游提交号上，逐文件从上游客仓取（表在 ttsModelUpstream.ts，
- *   为什么模型不转发到我们 Release 那份理由写在那份文件头上）。
+ * - 模型是第三方训练出来的 → 不进清单，钉在上游提交号上，逐文件从上游客仓取（配音在 ttsModelUpstream.ts，
+ *   转写权重在 asrModelUpstream.ts；为什么模型不转发到我们 Release 那份理由写在前者文件头上）。
  * 「清单坏了」和「上游飘了」是两种故障，闸门不同，别指望一条链路替另一条把关。
  *
  * 走清单那一条的信任模型照 ytDlpUpdate（自家清单），四条收紧点写在这儿而不是抄一遍：
@@ -40,12 +43,21 @@ import {
   modelRootDir,
 } from './localTtsEngine'
 import { hasActiveTTSSynthesis } from './ttsService'
+import { isLocalEngineRunning } from './asrServiceManager'
+import { LOCAL_MODEL_TIERS } from './settingsService'
+import {
+  ASR_MODEL_ROW_TITLES,
+  ASR_MODEL_SOURCES,
+  asrModelDir,
+  asrModelFileUrls,
+} from './asrModelUpstream'
 import {
   UPSTREAM_MODEL_SOURCES,
-  upstreamFileUrl,
+  upstreamFileUrls,
   upstreamTableDigest,
   upstreamTotalBytes,
   upstreamVersion,
+  type UpstreamModelFile,
   type UpstreamModelSource,
 } from './ttsModelUpstream'
 
@@ -126,6 +138,13 @@ interface ComponentSpec {
   manifestKey?: () => string
   /** 从上游客仓逐文件取（模型）。给了它就不读清单：版本、指纹、体积全在这份代码里 */
   upstream?: UpstreamModelSource
+  /**
+   * 上游那条路每个文件的候选地址。不给就用配音那两腿（同一套 HF resolve 拼法）。
+   * 单开这一位是因为 ASR 那两档自测口子换的是 `VV_ASR_MODEL_BASE`，与配音的
+   * `VV_TTS_MODEL_BASE` 是两个变量：离线自检时只能把一类组件指到本机静态服务，
+   * 共用一个口子会把另一类也带走。
+   */
+  fileUrls?: (source: UpstreamModelSource, file: UpstreamModelFile) => string[]
   /** 落点。binary 是文件，archive 是目录 */
   target: () => string
   /** 目录型组件专用：装完必须都在的条目。名字以 / 结尾表示只要「下面有东西」 */
@@ -145,6 +164,18 @@ interface ComponentSpec {
 function busyReason(): string | null {
   if (hasActiveTTSSynthesis()) return '有一批配音正在逐段合成，等它跑完（或先取消这一批）再动组件'
   if (isLocalTtsEngineRunning()) return '本地配音引擎还在后台运行，先点「停止本地配音引擎」再动组件'
+  return null
+}
+
+/**
+ * Whisper 权重那两行的闸门：本地转写引擎在跑就拦住。
+ * 引擎是开机就起的常驻进程（`index.ts` 里的 `startASRService`），所以这一条几乎总是先命中——
+ * 出路是面板上那颗「停止本地转写引擎」，与配音那侧同一套道理：不留这颗按钮，同一会话里永远动不了文件。
+ * 正在逐段转写时不额外判一次：那时引擎必然在跑，同一句话已经够准，而「转写中」这条状态在
+ * transcribeJob 里，本模块引它会把 `transcribeJob → componentService` 的调用方向拐成环（#375 定的方向）。
+ */
+function asrBusyReason(): string | null {
+  if (isLocalEngineRunning()) return '本地转写引擎还在后台运行，先点上面的「停止本地转写引擎」再动这一行'
   return null
 }
 
@@ -188,10 +219,11 @@ const MODEL_REQUIRED: Record<(typeof LOCAL_TTS_ENGINES)[number], string[]> = {
 }
 
 /**
- * 三个组件，两种来源：引擎那条要读清单才知道版本，两份模型条的版本与指纹是 ttsModelUpstream.ts 里
- * 钉死的那个提交（VITS 17 个文件 / 135,454,939 字节，Kokoro 375 个文件 / 426,573,262 字节，
- * 都是 2026-10-28~29 本机逐文件算出来的）——所以「未安装，下载约 135.5MB」这句在没点「检查清单」时
- * 也答得出来，不拿 0 或「不知道」冒充已知。
+ * 五个组件，两种来源：引擎那条要读清单才知道版本，四份模型条的版本与指纹都钉在代码里
+ * （配音两份在 ttsModelUpstream.ts：VITS 17 个文件 / 135,454,939 字节，Kokoro 375 个文件 /
+ * 426,573,262 字节，都是 2026-10-28~29 本机逐文件算出来的；转写权重两档在 asrModelUpstream.ts：
+ * base 4 个文件 / 147,882,941 字节，small 4 个文件 / 486,212,372 字节，2026-11-26 本机算的）
+ * ——所以「未安装，下载约 135.5MB」这句在没点「检查清单」时也答得出来，不拿 0 或「不知道」冒充已知。
  * hint 里一律不重复体积：那一格由表算，写死了就会出现「129MB」与「135.5MB」并排（同一份东西、
  * 一个按 1024 进位一个按 1000 进位），用户只会当成两个不同的包。
  * maxExtractBytes / maxFiles 这两位目前没人设：它们属于「清单指一个归档」那条路（还留在 doInstall 里，
@@ -230,6 +262,25 @@ const SPECS: ComponentSpec[] = [
     required: MODEL_REQUIRED[LOCAL_TTS_ENGINES[1]],
     busy: busyReason,
   },
+  // 两档 Whisper 权重（#434）：走的是与配音模型完全相同的逐文件取件链——候选源、逐字节进度、
+  // .part 续传、SHA256、取消，一行都不重写。落点由 asrModelDir 说，引擎那边吃的是同一个函数
+  // （spawn 时下发 VV_ASR_MODEL_DIR），所以「下到哪儿」和「加载哪儿」不会分叉。
+  //
+  // 这里不给 required：那一位是「代码里的表 vs 引擎的必需清单」的对账口子（配音那两份来自
+  // python-tts/main.py 的 ENGINES）。ASR 这边没有第二个来源——那四个文件是 faster-whisper 内部
+  // 点名的（见 asrModelUpstream 的头注释），拿 ASR_MODEL_SOURCES 自己对自己的 keys 恒真，
+  // 写上只会让下一个读代码的人以为有闸。真正拦「半份文件」的是 asrModelUsage.localWeightsComplete：
+  // 四个文件都在且字节逐个相等才算权重齐，不齐就不给引擎下发离线标志。
+  ...LOCAL_MODEL_TIERS.map((tier) => ({
+    id: `asr-model-${tier}`,
+    title: ASR_MODEL_ROW_TITLES[tier].title,
+    kind: 'archive' as const,
+    hint: ASR_MODEL_ROW_TITLES[tier].hint,
+    upstream: ASR_MODEL_SOURCES[tier],
+    fileUrls: asrModelFileUrls,
+    target: () => asrModelDir(tier),
+    busy: asrBusyReason,
+  })),
 ]
 
 const SPEC_BY_ID = new Map(SPECS.map((spec) => [spec.id, spec]))
@@ -337,7 +388,8 @@ let lastManifest: unknown | null = null
 /**
  * 两个入口都答 404 时记下「这一版没有清单这份文件」。它和 lastManifest 仍是两位：
  * 后者说「查到了什么」，这一位说「查过、服务器答的是没有」。靠清单找包的只有引擎那一条，
- * 钉了 HF 指纹的两份模型不读清单，所以这一位牵连不到它们——VITS 在清单 404 的那一版照样下得动。
+ * 钉了 HF 指纹的四份（两份配音模型 + 两档 Whisper 权重）都不读清单，所以这一位牵连不到它们——
+ * VITS 在清单 404 的那一版照样下得动。
  */
 let manifestAbsent = false
 
@@ -1100,8 +1152,9 @@ async function doInstall(
           throw new Error(`指纹表里的路径不合规矩：${file.path}`)
         }
         await downloadToPart(
-          // 模型那条只有一个源（上游 hf-mirror，见 ttsModelUpstream），换不成候选表
-          [upstreamFileUrl(source, file)],
+          // 四份模型都是两腿候选（镜像在前、正站在后，见各自的 upstreamFileUrls），
+          // 换腿由下面的字节/时间判死决定，不看出口 IP 的国家码
+          (spec.fileUrls ?? upstreamFileUrls)(source, file),
           join(filesDir, file.path),
           {
             version: entry.version,

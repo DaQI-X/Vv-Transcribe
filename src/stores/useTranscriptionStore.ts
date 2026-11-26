@@ -6,6 +6,18 @@
 import { create } from 'zustand'
 import type { TranscriptionSegment, TranscriptionStatus } from '@/types/transcription'
 
+/**
+ * 引擎随状态事件上报的模型信息，形状与 electron/preload/index.d.ts 那处一致（跨 IPC 的手抄一份）。
+ * - download 是宿主自己取件那一段（#435）的实测字节——只传字节，单位留给渲染层唯一的 formatBytes。
+ * - source 是引擎自报的出处（#436）：'directory' ＝吃「按需组件」装好的那份、这一步不联网。
+ */
+export interface TranscriptionModelInfo {
+  tier: string
+  weightsMb: number | null
+  source?: 'directory' | 'repo'
+  download?: { done: number; total: number }
+}
+
 interface TranscriptionState {
   filePath: string | null
   fileName: string | null
@@ -13,10 +25,10 @@ interface TranscriptionState {
   duration: number | null
   status: TranscriptionStatus
   progress: number
-  /** 引擎上报的阶段，如本地首次转写的 loading_model；无阶段事件时为 null */
+  /** 引擎阶段性状态：首转取件 downloading_model、装载 loading_model、排队 waiting_order；无阶段事件时为 null */
   stage: string | null
   /** 引擎自报的档位与权重体积，首次转写的「要下载多大」这句提示靠它 */
-  modelInfo: { tier: string; weightsMb: number | null } | null
+  modelInfo: TranscriptionModelInfo | null
   segments: TranscriptionSegment[]
   error: string | null
   jobId: string | null
@@ -34,7 +46,7 @@ interface TranscriptionState {
   setStatus: (status: TranscriptionStatus) => void
   setProgress: (progress: number) => void
   setStage: (stage: string | null) => void
-  setModelInfo: (modelInfo: { tier: string; weightsMb: number | null } | null) => void
+  setModelInfo: (modelInfo: TranscriptionModelInfo | null) => void
   setJobId: (jobId: string | null) => void
   setAsrProvider: (provider: 'local' | 'cloud') => void
   setAsrLanguage: (language: string) => void
@@ -54,7 +66,7 @@ const initialState = {
   status: 'idle' as TranscriptionStatus,
   progress: 0,
   stage: null as string | null,
-  modelInfo: null as { tier: string; weightsMb: number | null } | null,
+  modelInfo: null as TranscriptionModelInfo | null,
   segments: [] as TranscriptionSegment[],
   error: null,
   jobId: null,

@@ -96,6 +96,8 @@ const api = {
     ipcRenderer.invoke('asr:start', filePath, options),
   cancelTranscription: (jobId: string) => ipcRenderer.invoke('asr:cancel', jobId),
   restartLocalEngine: () => ipcRenderer.invoke('asr:restartEngine'),
+  // 按需组件里 Whisper 权重那两行的出路：引擎常驻，不停下就动不了那两个目录（#434）
+  stopLocalEngine: () => ipcRenderer.invoke('asr:stopEngine'),
   // 只读磁盘量一遍本地档位的权重占用；主进程那次读数与引擎无关，转写进行中也可以问
   getLocalModelUsage: () => ipcRenderer.invoke('asr:localModelUsage'),
 
@@ -105,7 +107,9 @@ const api = {
       progress: number
       segment?: unknown
       stage?: string
-      model?: { tier: string; weightsMb: number | null }
+      // download 是 #435 那一段取件的实测字节（只有 stage=downloading_model 时带）：
+      // 这里给字节不给「多少 MB」，单位由渲染层唯一的 formatBytes 说
+      model?: { tier: string; weightsMb: number | null; download?: { done: number; total: number } }
     }) => void
   ) => {
     const listener = (
@@ -115,7 +119,7 @@ const api = {
         progress: number
         segment?: unknown
         stage?: string
-        model?: { tier: string; weightsMb: number | null }
+        model?: { tier: string; weightsMb: number | null; download?: { done: number; total: number } }
       }
     ) => callback(data)
     ipcRenderer.on('asr:progress', listener)

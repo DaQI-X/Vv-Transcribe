@@ -11,7 +11,7 @@
  */
 import { BrowserWindow } from 'electron'
 import { measureLocalModelUsage, type LocalModelUsage } from '../services/asrModelUsage'
-import { restartLocalEngine } from '../services/asrServiceManager'
+import { restartLocalEngine, stopLocalEngineOnRequest } from '../services/asrServiceManager'
 import { cancelTranscribeJob, hasActiveTranscription, startTranscribeJob } from '../services/transcribeJob'
 import { failOkError, ipcHandle } from './guard'
 
@@ -55,6 +55,30 @@ export function registerASRHandlers() {
       return restartLocalEngine()
     },
     failOkError
+  )
+
+  /**
+   * 按需组件那一栏的出路（#434）：Whisper 权重那两行要动 `components/asr-models/<档位>`，
+   * 而引擎是开机就起的常驻进程、转写完也不退——没有这颗「停止」，同一会话里那两行永远点不动。
+   * 转写进行中拒绝停：那会把正在推的 NDJSON 截断，与上面 `asr:restartEngine` 同一条理由。
+   * 停完不会自己起，界面那一栏备着一颗「重启本地转写引擎」走 `asr:restartEngine` 走回去。
+   */
+  ipcHandle(
+    'asr:stopEngine',
+    async (): Promise<{ ok: boolean; stopped: boolean; error: string | null }> => {
+      if (hasActiveTranscription()) {
+        return {
+          ok: false,
+          // 拒绝这一趟引擎照跑，所以是 false：与 ttsHandlers 里同一支的口径一致，
+          // 也与本文件下面那句定义一致（stopped ＝「此刻引擎确实没在跑」）
+          stopped: false,
+          error: '转写正在进行中，停引擎会中断当前任务。请等它跑完，或先点取消',
+        }
+      }
+      return stopLocalEngineOnRequest()
+    },
+    // stopped 跟着配音那侧的口径：它说的是「此刻引擎确实没在跑」，炸在这一刻时未知，只能给 false
+    (message) => ({ ok: false, stopped: false, error: message })
   )
 
   /**

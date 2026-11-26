@@ -21,12 +21,17 @@
  * 别家程序与别的模型也在里面（本机就有三份 sherpa 的配音模型），把整层报成本应用的占用是虚账。
  * 从快照解析不到的东西一律不计——`.lock`/`.refs`/`*.incomplete` 住在 `blobs/` 那一层而不是快照里，
  * 它们是「还没下完」的证据，不是这一档的占用；解析不过去的悬空软链同理。
+ *
+ * #434 之后这一档可能有**两棵树**：旧那棵是引擎自己去 hf-mirror 拉的 HF 缓存，新那棵是应用按
+ * `asrModelUpstream` 的指纹表自取的 `userData/components/asr-models/<档位>`。两棵都量、都计入占用，
+ * 「在不在本地」任一棵齐了即算（见 isModelCached）——界面与 spawn 必须给同一个答案。
  */
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { readdir, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { LOCAL_MODEL_TIERS, type LocalModelTier } from './settingsService'
+import { ASR_MODEL_SOURCES, asrModelDir, hasAsrModelDownload } from './asrModelUpstream'
 
 /** faster-whisper 的权重文件名：它在不在，决定这一档算不算「已下载」 */
 const WEIGHT_FILE = 'model.bin'
@@ -52,6 +57,28 @@ function repoDir(tier: string): string {
 }
 
 /**
+ * 应用自己取件那一棵树（#434：下载器落在 `userData/components/asr-models/<档位>`）里，
+ * 这一档的四个文件是否都在、字节是否与指纹表一致。
+ *
+ * 只对数量与尺寸，不对内容：内容在装的那一刻已由 SHA256 验过（`downloadToPart`），事后逐枚重算是
+ * 145MB/483MB 两趟全盘读，为一次启动付这个代价不值。尺寸对不上就当它不在——手工塞进来的半份文件
+ * 比没塞更坏（引擎加载时会在 CTranslate2 内部炸成一句看不懂的话）。
+ */
+export function localWeightsComplete(tier: string): boolean {
+  if (!hasAsrModelDownload(tier)) return false
+  const dir = asrModelDir(tier)
+  if (!existsSync(dir)) return false
+  try {
+    return ASR_MODEL_SOURCES[tier].files.every((file) => {
+      const abs = join(dir, file.path)
+      return existsSync(abs) && statSync(abs).size === file.bytes
+    })
+  } catch {
+    return false
+  }
+}
+
+/**
  * 这一档的权重是否已在本地。快照里的 `model.bin` 是指向 blobs 的软链，只有权重完整下载过才解析得到，
  * 所以判它而不是判仓库目录在不在。
  *
@@ -62,8 +89,12 @@ function repoDir(tier: string): string {
  *
  * 必须按档位判断：缓存里有 base 不代表有 small。用户在设置里切到 small 后如果照 base 的
  * 命中结果下发离线标志，首次转写会连不上 hf-mirror，报一个「模型没下载完」却又下载不了的死结。
+ *
+ * 两棵树任一到齐都算「在本地」（#434）：旧那棵是引擎自己去 hf-mirror 拉的 HF 缓存，新那棵是应用
+ * 按指纹表自取的组件目录。哪棵在就用哪棵，所以 offline 这一票两边都有资格投。
  */
 export function isModelCached(tier: string): boolean {
+  if (localWeightsComplete(tier)) return true
   const snapshots = join(repoDir(tier), 'snapshots')
   if (!existsSync(snapshots)) return false
   try {
@@ -131,7 +162,12 @@ async function measureTier(tier: LocalModelTier, sizes: Map<string, number>): Pr
     // 同一档位可能被 checkout 过两个 revision：每一版的文件都真的占着盘，逐版收完再合计
     if (await collectSnapshot(join(snapshotsPath, rev.name), sizes)) cached = true
   }
-  return cached
+  // 应用自取那棵树（#434）也占盘，同样逐文件 realpath 后收进来。两棵都装过时这一档报的是两份之和，
+  // 那是真话不是重复计数——磁盘上确实有两份东西；把它们并成一份属于 #416 的活儿
+  await collectSnapshot(asrModelDir(tier), sizes)
+  // 「算不算已缓存」必须与 isModelCached 同一把尺（尺寸齐了才算），不然界面会说「已缓存」、
+  // spawn 却按没缓存下发在线许可——那正是本模块开头要避免的分叉
+  return cached || localWeightsComplete(tier)
 }
 
 function sumBytes(sizes: Map<string, number>): number {

@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { X, Volume2, Loader2, Ban } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
-import { useTranscriptionStore } from '@/stores/useTranscriptionStore'
+import { useTranscriptionStore, type TranscriptionModelInfo } from '@/stores/useTranscriptionStore'
 import { formatBytes } from '@/utils/formatBytes'
 
 function UploadingView({ fileName, fileSize }: { fileName: string | null; fileSize: number | null }) {
@@ -39,11 +39,12 @@ function ProcessingView({ fileName, progress, stage, model, onCancel, cancelling
   fileName: string | null
   progress: number
   stage: string | null
-  model: { tier: string; weightsMb: number | null } | null
+  model: TranscriptionModelInfo | null
   onCancel: () => void
   cancelling: boolean
 }) {
   const loadingModel = stage === 'loading_model'
+  const downloading = stage === 'downloading_model'
   /**
    * 「提交完还要等对方出结果」那一段（1.1.2 讯飞，#343）。进度条在这一段是**钉住的**：
    * 对方只给一个没有实测依据的 `taskEstimateTime`，按它换算百分比就是编数（口径见 `ASRStage`）。
@@ -52,9 +53,23 @@ function ProcessingView({ fileName, progress, stage, model, onCancel, cancelling
    */
   const waitingOrder = stage === 'waiting_order'
   // 体积由引擎随状态事件报来（各档位权重差 3 倍多），写死一个数会对另一档撒谎
-  const downloadNote = model?.weightsMb
-    ? `首次使用需下载模型（${model.tier} 档约 ${model.weightsMb}MB），完成后不再需要`
-    : '首次使用需下载模型，完成后不再需要'
+  const weightsNote = model?.weightsMb ? `（${model.tier} 档约 ${model.weightsMb}MB）` : ''
+  /**
+   * 取件那一段的字节由宿主自己量（#435），所以这里能报「已取多少 / 共多少」——引擎自己下载时
+   * 给不出这个数，它只报档位。`total` 在首个响应头之前是 0，那时只报已取，别写成「/ 0B」。
+   */
+  const download = model?.download
+  const takenNote = download
+    ? `（已取 ${formatBytes(download.done)}${download.total > 0 ? ` / ${formatBytes(download.total)}` : ''}）`
+    : ''
+  /**
+   * 这一档的权重可能出自「按需组件」装好的那份（`source === 'directory'`，#436）——那时
+   * 装载阶段压根不联网，劝人去确认网络会把人引到错的地方。宿主取件失败回退给引擎时也是这句。
+   */
+  const fromComponents = model?.source === 'directory'
+  const loadingNote = fromComponents
+    ? `${model?.tier} 档吃的是本机已装好的那份权重，这一步不联网，只是把模型读进内存`
+    : `首次使用需下载模型${weightsNote}，完成后不再需要`
 
   return (
     <div className="status-container">
@@ -95,18 +110,22 @@ function ProcessingView({ fileName, progress, stage, model, onCancel, cancelling
 
         <div className="processing-text">
           <span className="processing-text__title">
-            {waitingOrder
-              ? '已提交，等对方出结果'
-              : loadingModel
-                ? '正在加载语音模型'
-                : 'ASR 识别转写处理中'}
+            {downloading
+              ? '正在下载模型权重'
+              : waitingOrder
+                ? '已提交，等对方出结果'
+                : loadingModel
+                  ? '正在加载语音模型'
+                  : 'ASR 识别转写处理中'}
           </span>
           <span className="processing-text__desc">
-            {waitingOrder
-              ? '音频已经交给服务商，正在排队转写。这一段对方不报真实进度，条子会停在 20% 不动——不是卡住了，长音频等上几分钟到几十分钟都算正常。取消只是不再等这一单，重传要重新排一次队'
-              : loadingModel
-                ? downloadNote
-                : 'AI 正在分析音频内容，自动识别语音并生成文字'}
+            {downloading
+              ? `首次转写这档模型要先取回权重${takenNote}，由应用自己下，慢也能取消。模型只需成功下载一次，之后本机离线可用`
+              : waitingOrder
+                ? '音频已经交给服务商，正在排队转写。这一段对方不报真实进度，条子会停在 20% 不动——不是卡住了，长音频等上几分钟到几十分钟都算正常。取消只是不再等这一单，重传要重新排一次队'
+                : loadingModel
+                  ? loadingNote
+                  : 'AI 正在分析音频内容，自动识别语音并生成文字'}
           </span>
         </div>
 

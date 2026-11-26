@@ -20,6 +20,7 @@ import {
 } from '../services/componentService'
 import { hasActiveTTSSynthesis } from '../services/ttsService'
 import { isLocalTtsEngineRunning } from '../services/localTtsEngine'
+import { isLocalEngineRunning as isLocalAsrEngineRunning } from '../services/asrServiceManager'
 import { logger } from '../services/logger'
 import { failOkError, ipcHandle } from './guard'
 
@@ -92,9 +93,10 @@ export function registerComponentHandlers() {
   )
 
   /**
-   * 这几个文件现在能不能动。两种占用分开报：引擎进程还活着有「停止」按钮可点，
-   * 一批正在逐段合成则只能等或去配音页取消——在这里停引擎会让剩下的段落全失败。
-   * 两个读的都是主进程内存里的状态，本身炸不了；万一炸了回「没在跑」是安全的一侧，
+   * 这几个文件现在能不能动。三种占用分开报，因为界面给的不一样：
+   * 配音引擎进程还活着有「停止」按钮可点，一批正在逐段合成则只能等或去配音页取消——
+   * 在这里停引擎会让剩下的段落全失败；转写引擎（#434）同理，它常驻，权重那两行必须能停才动得了。
+   * 三个读的都是主进程内存里的状态，本身炸不了；万一炸了回「没在跑」是安全的一侧，
    * 因为后面真要动文件时 install/remove 各自还有一道 busy 判定兜着。
    */
   ipcHandle(
@@ -102,8 +104,9 @@ export function registerComponentHandlers() {
     () => ({
       engineRunning: isLocalTtsEngineRunning(),
       synthesizing: hasActiveTTSSynthesis(),
+      asrEngineRunning: isLocalAsrEngineRunning(),
     }),
-    () => ({ engineRunning: false, synthesizing: false })
+    () => ({ engineRunning: false, synthesizing: false, asrEngineRunning: false })
   )
 }
 

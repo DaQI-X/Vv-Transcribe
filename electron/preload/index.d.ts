@@ -517,6 +517,12 @@ export interface ElectronAPI {
   cancelTranscription: (jobId: string) => Promise<{ ok: boolean; error: string | null }>
   /** 应用内重启本地引擎。转写进行中会被拒绝；最长可能等 60 秒（首次要下载模型） */
   restartLocalEngine: () => Promise<{ ok: boolean; error: string | null }>
+  /**
+   * 停掉后台的本地转写引擎，不重开（#434）。按需组件里 Whisper 权重那两行动目录前必须先停——
+   * 引擎开机常驻、转写完也不退。转写进行中主进程会拒绝，理由由它原话给出。
+   * stopped=false 且 ok=true 表示按下这一刻本来就没在跑，界面那句该说「本来就没在跑」而不是「已停止」。
+   */
+  stopLocalEngine: () => Promise<{ ok: boolean; stopped: boolean; error: string | null }>
   /** 本地档位权重各占多少盘（只读磁盘，转写进行中也能问）；见 LocalModelUsage */
   getLocalModelUsage: () => Promise<LocalModelUsage>
 
@@ -525,10 +531,10 @@ export interface ElectronAPI {
       jobId: string
       progress: number
       segment?: TranscribedSegment
-      /** 引擎阶段性状态，目前只有本地首次转写的 'loading_model' */
+      /** 引擎阶段性状态：首转取件（downloading_model）、装载（loading_model）、讯飞那类排队（waiting_order） */
       stage?: string
-      /** 随 status 事件下发的档位与权重体积，界面用它说清「这次要下载多大」 */
-      model?: { tier: string; weightsMb: number | null }
+      /** 引擎自报的档位与权重体积，界面用它说清「这次要下载多大」；download/source 见 `ASRModelInfo` 的注释 */
+      model?: { tier: string; weightsMb: number | null; source?: 'directory' | 'repo'; download?: { done: number; total: number } }
     }) => void
   ) => () => void
 
@@ -694,8 +700,8 @@ export interface ElectronAPI {
   installComponent: (id: string) => Promise<ComponentResult>
   cancelComponentInstall: (id: string) => Promise<{ ok: boolean; error: string | null }>
   removeComponent: (id: string) => Promise<ComponentResult>
-  /** 这几个文件现在能不能动；两种占用分开报，界面给的不一样 */
-  getComponentBusy: () => Promise<{ engineRunning: boolean; synthesizing: boolean }>
+  /** 这几个文件现在能不能动；三种占用分开报，界面给的不一样（asrEngineRunning 管权重那两行，#434） */
+  getComponentBusy: () => Promise<{ engineRunning: boolean; synthesizing: boolean; asrEngineRunning: boolean }>
   onComponentProgress: (callback: (data: ComponentProgress) => void) => () => void
 
   /** error 非 null 是「查不了」，与 found:false 的「词库里没有这个词」是两句话 */
