@@ -106,6 +106,12 @@ export function ComponentsSection() {
   /** 失败一律走 toast；看着像系统拦住了写入/执行时，顺手给一个能点的「打开隐私设置」 */
   const reportFailure = useCallback((result: ComponentResult) => {
     const message = result.error || '操作失败'
+    if (result.canceled) {
+      // 用户自己按的取消，与链接转写那两条链路口径一致（FileUploader 用的也是 info）：
+      // 红色失败条会让人以为下载坏了，继而反复重试
+      toast.info(message)
+      return
+    }
     if (result.systemSettingsHint) {
       toast.error(
         message,

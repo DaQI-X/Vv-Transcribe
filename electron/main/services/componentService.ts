@@ -286,6 +286,11 @@ export interface ComponentResult {
   state?: ComponentState
   /** 失败特征像「系统拦住了写入/执行」，界面据此给「打开隐私设置」按钮 */
   systemSettingsHint?: boolean
+  /**
+   * 用户自己按了「取消下载」。与转写那一侧同名（见 transcribeJob 的 canceled）：
+   * 界面要靠它把这条回成中性提示，不然点取消的人收到的是红色失败。
+   */
+  canceled?: boolean
 }
 
 export interface ComponentCheckResult {
@@ -1189,6 +1194,12 @@ async function doInstall(
   } catch (err) {
     await rm(staging, { recursive: true, force: true }).catch(() => {})
     const message = err instanceof Error ? err.message : String(err)
+    if (inFlight.reason === 'cancelled') {
+      // 取消不是故障。这条以前和真失败共用下面的 ERROR，界面拿到 ok:false 就弹红 toast，
+      // 于是用户自己按的那颗「取消下载」换回来一句看起来像下载坏了的提示
+      logger.info(TAG, 'install canceled', { id, message })
+      return { ok: false, canceled: true, error: '已取消下载' }
+    }
     logger.error(TAG, 'install failed', { id, message })
     const hint = isBlockedBySystem(err)
     return {

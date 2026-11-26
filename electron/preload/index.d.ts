@@ -203,6 +203,8 @@ export interface ComponentResult {
   state?: ComponentState
   /** 失败特征像「系统拦住了写入/执行」，界面据此给「打开隐私设置」按钮 */
   systemSettingsHint?: boolean
+  /** 用户自己按的「取消下载」，不是故障：界面据此走中性提示 */
+  canceled?: boolean
 }
 
 export interface ComponentCheckResult {
