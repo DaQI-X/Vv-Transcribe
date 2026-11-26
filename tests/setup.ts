@@ -20,7 +20,15 @@ const electronState = vi.hoisted(() => ({
   appVersion: '1.0.8-test',
 }))
 
-electronState.userData = join(tmpdir(), 'vv-test-userdata')
+/**
+ * 每个 worker 一份目录：本仓库按文件开 worker（35 个文件 = 35 个进程），以前它们都往同一个
+ * userData 里写日志，而每个 worker 收尾都要递归删它——删的那个人正好撞上别人往里补一层
+ * logs/，就得到一句 `ENOTEMPTY: directory not empty, rmdir .../vv-test-userdata/logs`。
+ * 下面那句 rm 是无人接的 Promise，于是它以 unhandled rejection 的形式把整条 `pnpm test` 判红，
+ * 而 CI 的 test job 跑的就是这一条。它是抖动不是定场：这一轮撞见一次，连跑三次又不复现，
+ * 但一次就够把发版闸门挡住。
+ */
+electronState.userData = join(tmpdir(), `vv-test-userdata-${process.pid}`)
 
 vi.mock('electron', () => {
   /**
@@ -105,6 +113,12 @@ vi.mock('electron', () => {
   }
 })
 
-afterAll(() => {
-  void rm(electronState.userData, { recursive: true, force: true })
+afterAll(async () => {
+  /**
+   * 要 await：不 await 时 worker 直接退了，删的动作根本跑不完（实测 tmp 里每次留下一二十个
+   * 目录）。而删不掉本身不该算测试失败——logger 是异步 append，收尾那一写可能正把 logs/ 补回来，
+   * 让递归删撞见 ENOTEMPTY；那句 rethrow 会变成 unhandled rejection 把整条 `pnpm test` 判红，
+   * CI 的 test job 跑的正是这一条。留一个 tmp 目录是代价，判红不是。
+   */
+  await rm(electronState.userData, { recursive: true, force: true }).catch(() => {})
 })

@@ -8,12 +8,23 @@
  * 形状与签名收在 `iflytekAsr.ts`，这里只按 `asrVendorUsesOrderFlow` 分叉，不自己拼一份。
  */
 import type { ASRProvider, ASRSegment, ASRProgress } from './types'
+import type { AsrReadResult, AsrRequestShape } from './asrVendor'
 import { toSimplified } from './simplifyChinese'
 import { asrFileProblem, asrVendorUsesOrderFlow, buildAsrRequest, readAsrResponse } from './asrVendor'
 import { iflytekFailTypeMessage, runIflytekOrderFlow } from './iflytekAsr'
 import { logger } from '../logger'
 
 const TAG = 'CloudASR'
+
+/**
+ * multipart 这一趟的绝对上限，与讯飞那档轮询的上限（`iflytekAsr.POLL_DEADLINE_MS`）同宽。
+ * 为什么这一趟要有、而本地那一档没有：本地引擎是 NDJSON 逐段回话的，看得见进展，取消也能
+ * 立刻落在读流上；这一趟从头到尾只有一个最终响应，中间任何一环（走人的代理、对方面前的
+ * 排队、用户自己架在那台机器上的 CPU 推理）都不回话，没有进展可判就只能给一条足够宽的绝对线。
+ * 取 60 分钟是为了不误杀真活儿：50MB 素材在 1Mbps 上行上也只要七八分钟，
+ * 而自建服务拿 CPU 转三小时音频确实可能要几十分钟。
+ */
+const CLOUD_DEADLINE_MS = 60 * 60_000
 
 interface CloudASRConfig {
   apiKey: string
@@ -85,6 +96,8 @@ export class CloudASRProvider implements ASRProvider {
       return this.transcribeByOrder(audioBuffer, fileName, options)
     }
 
+    options.onProgress?.({ percent: 10 })
+
     // 一家的字段名与头部（含鉴权）都在这一个调用里问出来，两个调用点（这里 + 测试连接）不许各拼一遍
     const shape = buildAsrRequest(this.config.vendor, {
       apiBase: this.config.apiBase,
@@ -100,29 +113,7 @@ export class CloudASRProvider implements ASRProvider {
       form.append(key, value)
     }
 
-    options.onProgress?.({ percent: 10 })
-
-    const response = await fetch(shape.url, {
-      method: 'POST',
-      // 鉴权与这一家的协议头全在 shape.headers 里，这里不补 Bearer：
-      // 补一次就是「自检发一份头、真转写发另一份」，而那条分歧正是 #220/#227 记的东西
-      headers: shape.headers,
-      body: form,
-      signal: this.abortController.signal,
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      // 带上最终 URL：用户照文档粘的就是这条路径，看不出应用在后面又接了一层，
-      // 「404」这三个字本身没法定位，念出打出去的那条地址才能自查
-      throw new Error(
-        `云端转写接口返回 ${response.status}（POST ${shape.url}）：${errorText.slice(0, 200) || '对方没有附带说明'}`
-      )
-    }
-
-    options.onProgress?.({ percent: 80 })
-
-    const read = await readAsrResponse(response)
+    const read = await this.postWithinDeadline(shape, form, this.abortController.signal, options.onProgress)
 
     const segments: ASRSegment[] = read.segments.map((seg) => ({
       startTime: seg.start,
@@ -142,6 +133,66 @@ export class CloudASRProvider implements ASRProvider {
     options.onProgress?.({ percent: 100 })
 
     return segments
+  }
+
+  /**
+   * 发这一趟 multipart，到点没回就把自家这趟中止掉（`CLOUD_DEADLINE_MS` 那段写了为什么只有一道
+   * 绝对线可用）。中止走 `this.abortController`：界面那颗取消和宿主传进来的 signal 都转发在它上面，
+   * 再另起一个信号就成了「取消」与「超时」两件事，而其中一件是没人停得下来的。
+   */
+  private async postWithinDeadline(
+    shape: AsrRequestShape,
+    form: FormData,
+    signal: AbortSignal,
+    onProgress?: (progress: ASRProgress) => void,
+  ): Promise<AsrReadResult> {
+    let timedOut = false
+    const deadline = setTimeout(() => {
+      timedOut = true
+      logger.warn(TAG, 'Cloud transcription exceeded its deadline', {
+        vendor: this.config.vendor,
+        waitedMs: CLOUD_DEADLINE_MS,
+      })
+      this.abortController?.abort()
+    }, CLOUD_DEADLINE_MS)
+    // 这条 timer 不该参与「进程能不能退」的判断：真要退出时它可能还剩五十多分钟
+    deadline.unref()
+
+    try {
+      const response = await fetch(shape.url, {
+        method: 'POST',
+        // 鉴权与这一家的协议头全在 shape.headers 里，这里不补 Bearer：
+        // 补一次就是「自检发一份头、真转写发另一份」，而那条分歧正是 #220/#227 记的东西
+        headers: shape.headers,
+        body: form,
+        signal,
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        // 带上最终 URL：用户照文档粘的就是这条路径，看不出应用在后面又接了一层，
+        // 「404」这三个字本身没法定位，念出打出去的那条地址才能自查
+        throw new Error(
+          `云端转写接口返回 ${response.status}（POST ${shape.url}）：${errorText.slice(0, 200) || '对方没有附带说明'}`
+        )
+      }
+
+      onProgress?.({ percent: 80 })
+
+      return await readAsrResponse(response)
+    } catch (err) {
+      // 「等不到」和「被取消」在 fetch 那边是同一句 This operation was aborted，
+      // 但给用户的出路完全不同：一句是他自己按的，另一句是这一家一小时没回
+      if (timedOut) {
+        throw new Error(
+          `云端转写等了 ${CLOUD_DEADLINE_MS / 60_000} 分钟也没有回音，这一趟已中止（POST ${shape.url}）。` +
+            '素材很长、或这家服务前面在排队时本来就可能这么久，可以稍后拿同一份音频再试一次'
+        )
+      }
+      throw err
+    } finally {
+      clearTimeout(deadline)
+    }
   }
 
   /**

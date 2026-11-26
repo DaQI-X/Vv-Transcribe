@@ -35,6 +35,7 @@ import { mkdir, rm, writeFile, stat, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { logger } from './logger'
 import { probeFile, resolveFfmpegBinary } from './audioProcessor'
+import { terminateWithEscalation, KILL_GRACE_MS } from './childKill'
 import {
   clipFingerprint,
   clipFormat,
@@ -795,17 +796,49 @@ function packChunks(units: TimelineUnit[]): TimelineUnit[][] {
   return chunks
 }
 
+/**
+ * 一次拼接/转码最多允许占多久。这是一条故意放得很宽的绝对闸，不是性能目标：
+ * 这一步读的全是本机文件（上一趟刚写出来的 PCM），没有网络参与，所以任何一趟真要跑到
+ * 分钟级以上，就不是「慢」而是卡在某个坏文件上了——而拼轨是整批配音的最后一步，
+ * 挂在这儿等于已经花出去的合成费用全打水漂，界面还会永远停在「拼接中」。
+ */
+const FFMPEG_CALL_TIMEOUT_MS = 300_000
+
 /** 直接 spawn：几百路输入 + 复杂图，fluent-ffmpeg 的链式写法接不住这个形状 */
 function runFfmpeg(args: string[]): Promise<void> {
   const bin = resolveFfmpegBinary()
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['-hide_banner', '-loglevel', 'error', '-y', ...args])
+    // -nostdin：不给 ffmpeg 留一条「等键盘输入」的路。这里的 stdin 是个没人写的管道，
+    // 万一某个构建在这上面等，那一趟就永远不会自己结束
+    const child = spawn(bin, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...args])
     let stderr = ''
+    let settled = false
+    const timer = setTimeout(() => {
+      logger.warn('TtsService', 'ffmpeg call timed out', { args: args.length, timeoutMs: FFMPEG_CALL_TIMEOUT_MS })
+      terminateWithEscalation(child, KILL_GRACE_MS, 'ffmpeg concat')
+      if (settled) return
+      settled = true
+      reject(
+        new Error(
+          `配音轨拼接卡住了（超过 ${FFMPEG_CALL_TIMEOUT_MS / 60_000} 分钟没有结束），已中止。` +
+            '可以重试一次；若反复卡在同一步，说明某一段的音频文件本身有问题'
+        )
+      )
+    }, FFMPEG_CALL_TIMEOUT_MS)
+    timer.unref()
     child.stderr.on('data', (chunk) => {
       stderr = (stderr + chunk.toString()).slice(-4000)
     })
-    child.on('error', (err) => reject(new Error(`没能启动 ffmpeg：${err.message}`)))
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      if (settled) return
+      settled = true
+      reject(new Error(`没能启动 ffmpeg：${err.message}`))
+    })
     child.on('close', (code) => {
+      clearTimeout(timer)
+      if (settled) return
+      settled = true
       if (code === 0) {
         resolve()
         return

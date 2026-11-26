@@ -101,7 +101,10 @@ export async function startTranscribeJob(
     // 界面一次只放一条转写：开工就把上一份素材的临时媒体回收掉，本次这份留着给播放器回放
     releaseMediaSessionsExcept(options.mediaSessionId ?? null)
 
-    const extractResult = await extractAudio(filePath)
+    // 信号要在提取阶段就递进去：一段长素材的提取能跑几分钟，而「取消」那颗按钮在这几分钟里
+    // 就已经点得动了。以前不递，取消只能等 ffmpeg 自己跑完（作业记录早被 cancelTranscribeJob 摘掉，
+    // 盘上却还留着一条没人认领的 ffmpeg 在写几百 MB 的 WAV）
+    const extractResult = await extractAudio(filePath, { signal: signal.signal })
     logger.info(TAG, 'Audio extracted', { jobId })
     await dropCookies()
     const state = activeJobs.get(jobId)
@@ -166,12 +169,19 @@ export async function startTranscribeJob(
 
     return { jobId, success: true, segments: result.segments, provider: result.provider }
   } catch (err) {
-    // 取消是用户按的，不是故障：canceled 标出来，读日志的人才不会把它当成一次转写失败找上门
-    logger.error(TAG, 'Job failed', {
-      jobId,
-      message: err instanceof Error ? err.message || err.name : String(err),
-      canceled: signal.signal.aborted,
-    })
+    const message = err instanceof Error ? err.message : '转写失败'
+    // 用户主动取消时 signal.aborted 为真：回传 canceled 让渲染层退回初始态而不是弹「处理失败」
+    const canceled = signal.signal.aborted
+    if (canceled) {
+      // 取消是用户按的，不是故障（与 #429 同一口径落成 INFO）。
+      // 这一条以前也记 ERROR，于是拿日志排查的人会先看见一句「转写失败」，而盘上什么都没坏
+      logger.info(TAG, 'Job canceled', { jobId, file: basename(filePath) })
+    } else {
+      logger.error(TAG, 'Job failed', {
+        jobId,
+        message: message || (err instanceof Error ? err.name : String(err)),
+      })
+    }
     // 提取阶段就失败、或中途被取消：cookies 一样要删，媒体留着（界面上的转写结果还在，
     // 这份媒体会在下次开工或应用退出时被回收，不会一直摊在 /tmp）
     await dropCookies()
@@ -181,9 +191,6 @@ export async function startTranscribeJob(
     }
     activeJobs.delete(jobId)
 
-    const message = err instanceof Error ? err.message : '转写失败'
-    // 用户主动取消时 signal.aborted 为真：回传 canceled 让渲染层退回初始态而不是弹「处理失败」
-    const canceled = signal.signal.aborted
     return { jobId, success: false, canceled, error: canceled ? '转写已取消' : message }
   }
 }

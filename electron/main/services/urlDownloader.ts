@@ -16,6 +16,7 @@ import { logger } from './logger'
 import { userDataPath } from './userDataStore'
 import { addHistoryRecord } from './historyService'
 import { fetchCookiesFromUrl, cleanupBrowserTemp } from './browserCookieFetcher'
+import { terminateWithEscalation, KILL_GRACE_MS } from './childKill'
 
 /** 解析这一步只取元信息，正常几秒；卡住（站点风控挂住连接）不能让界面永远转圈 */
 const META_TIMEOUT_MS = 45_000
@@ -214,11 +215,9 @@ function runYtDlpProbe(
     }
     const timer = setTimeout(() => {
       logger.warn('UrlDownloader', 'yt-dlp probe timed out', { path, args, timeoutMs })
-      try {
-        proc.kill()
-      } catch {
-        /* 已经退了 */
-      }
+      // 只发 SIGTERM 的那版会让「超时」变成「这台机器上多了一个不退出的进程」：done(null) 已经
+      // 先返回了，调用方以为探完接着往下走，而这条 yt-dlp 还占着那份二进制不放
+      terminateWithEscalation(proc, KILL_GRACE_MS, 'yt-dlp probe')
       done(null)
     }, timeoutMs)
     try {
@@ -353,11 +352,7 @@ function runYtDlpMeta(
       done({ json: null, stderr, signal, timedOut })
     const timer = setTimeout(() => {
       logger.warn('UrlDownloader', 'yt-dlp metadata timed out', { path, timeoutMs: META_TIMEOUT_MS })
-      try {
-        proc.kill()
-      } catch {
-        /* 已经退了 */
-      }
+      terminateWithEscalation(proc, KILL_GRACE_MS, 'yt-dlp meta')
       fail(null, true)
     }, META_TIMEOUT_MS)
 
@@ -702,11 +697,10 @@ export async function downloadMedia(
         stall = setTimeout(() => {
           logger.warn('UrlDownloader', 'download stalled', { sessionId, stallMs: STALL_TIMEOUT_MS })
           session.abortReason = 'stalled'
-          try {
-            proc.kill('SIGTERM')
-          } catch {
-            /* 已经退了 */
-          }
+          // 这里以前只发 SIGTERM：yt-dlp 卡在「等对方把字节送过来」的那个读上时连 SIGTERM
+          // 都能不应，于是进程留着、session.proc 也一直指着它——这一单既不回结果也退不掉，
+          // 而同一个链接再点一次下载，会被「这个链接正在下载中」那句一直挡着
+          terminateWithEscalation(proc, KILL_GRACE_MS, 'yt-dlp download')
         }, STALL_TIMEOUT_MS)
       }
       const finish = (value: DownloadResult) => {
@@ -884,11 +878,9 @@ export function cancelMediaDownload(sessionId: string): void {
   if (!session?.proc) return
   logger.userAction('Media download canceled', { sessionId })
   session.abortReason = 'canceled'
-  try {
-    session.proc.kill('SIGTERM')
-  } catch {
-    /* 已经退了 */
-  }
+  // 取消那颗按钮以前只发 SIGTERM：它要真把进程收掉才算取消，否则用户点完看到的仍是
+  // 「正在下载中」，而 releaseMediaSession 已经把临时目录删了——一个还在写已删文件的进程
+  terminateWithEscalation(session.proc, KILL_GRACE_MS, 'yt-dlp cancel')
 }
 
 /** 丢掉会话连同它的临时目录（cookies 也在里面） */

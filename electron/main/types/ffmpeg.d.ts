@@ -7,6 +7,8 @@ declare module 'fluent-ffmpeg' {
     on(event: 'end', callback: () => void): FfmpegCommand
     on(event: 'error', callback: (err: Error) => void): FfmpegCommand
     on(event: string, callback: (...args: unknown[]) => void): FfmpegCommand
+    /** 库自己只发这一个信号，不留 SIGTERM 到点再升级的余地（那层在 childKill.ts） */
+    kill(signal?: string): FfmpegCommand
     save(outputPath: string): void
   }
 

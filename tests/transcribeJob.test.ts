@@ -251,6 +251,14 @@ describe('失败与取消：回的是值，账也摘干净', () => {
     expect(hasActiveTranscription()).toBe(false)
     // 取消不算故障：这句是 #358 那条日志口径的一部分
     expect(calls.addHistoryRecord).not.toHaveBeenCalled()
+    /**
+     * #428：signal 要一路递进提取那一步。以前不递，取消只是把作业记录摘掉，
+     * 盘上却留一条没人认领的 ffmpeg 在写几百 MB 的 WAV（长素材的提取能跑几分钟，
+     * 那几分钟里取消按钮早就点得动了）。判 aborted 而不只判「传了个对象」：
+     * 传错一个新建的 AbortController 也能过前者，却正好是这条修复会被改坏的方式。
+     */
+    const extractOptions = calls.extractAudio.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined
+    expect(extractOptions?.signal?.aborted).toBe(true)
   })
 
   it('取消一个不存在的 jobId 也算 ok：那说明任务早跑完了，不是这步失败', async () => {
