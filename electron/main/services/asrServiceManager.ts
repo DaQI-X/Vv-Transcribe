@@ -27,6 +27,7 @@ import { existsSync } from 'node:fs'
 import { app } from 'electron'
 import { isModelCached, localWeightsComplete } from './asrModelUsage'
 import { asrModelDir } from './asrModelUpstream'
+import { classifyEngineTrees } from './engineOwnership'
 import { loadSettings, normalizeEngineAuth, normalizeLocalModel, type LocalModelTier } from './settingsService'
 import { logger } from './logger'
 
@@ -193,10 +194,17 @@ async function isOurEngine(pid: number): Promise<boolean> {
  * 把躺在端口上的上一代引擎收掉。
  * 应用被强杀或崩溃时 before-quit 不会跑，引擎就会作为孤儿（PPID=1）永远占着 8000；
  * 光靠 boot_id 握手只能做到「不采信它」，用户重启应用照样起不来，得能自己清掉才行。
- * 只杀命令行确认为我们自己二进制的那些进程，别人的程序一律不碰；
+ *
+ * 但「同名」不等于「是我们的残尸」：另一份正在运行的 Vv Transcribe 的引擎也叫这个名字，
+ * 而本应用在 app ready 就无条件跑一次 startASRService（`electron/main/index.ts`）。#445 之前
+ * 这里只按二进制名判，于是双开那一刻后起的那份会把前一份正在用的引擎连根杀掉，对面的转写当场截断。
+ * 现在收之前先问一次归属（`engineOwnership.ts`）：只收孤儿、收自己这轮没退净的，判不了也收手。
+ *
  * 成败以「端口上没有监听者」为准，不能拿 /health 没应答当成功——正在推理的引擎也可能顾不上回。
  */
-async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held'> {
+async function reapForeignEngine(): Promise<
+  'cleared' | 'not-ours' | 'held-by-other-instance' | 'unknown-owner' | 'still-held'
+> {
   const listeners = await listPortPids()
   if (listeners.length === 0) return 'not-ours'
 
@@ -206,15 +214,21 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
   }
   if (targets.length === 0) return 'not-ours'
 
-  // PyInstaller 的引导进程是监听者的父进程，握着那份临时解包目录，一并收掉
-  for (const pid of [...targets]) {
-    const out = await capture('ps', ['-o', 'ppid=', '-p', String(pid)])
-    const ppid = Number(out.trim())
-    if (Number.isInteger(ppid) && ppid > 1 && (await isOurEngine(ppid))) targets.push(ppid)
+  const trees = await classifyEngineTrees(targets, isOurEngine)
+  if (trees.verdict !== 'clear-to-reap') {
+    // 有主就整批不碰：宁可这份实例报「用不了」，也不能去打断别那份手头的活儿。
+    // 判不出归属（树走到一半查不动）也走这里——回收是尽力而为，误杀的代价比少杀一次大
+    const outcome = trees.verdict === 'held-by-live-instance' ? 'held-by-other-instance' : 'unknown-owner'
+    logger.warn(TAG, 'Engine on the port is not a leftover, leaving it running', {
+      verdict: trees.verdict,
+      pids: targets.join(', '),
+    })
+    return outcome
   }
 
-  logger.warn(TAG, 'Reaping leftover engine processes', { pids: targets.join(', ') })
-  for (const pid of targets) {
+  const killList = trees.pids
+  logger.warn(TAG, 'Reaping leftover engine processes', { pids: killList.join(', ') })
+  for (const pid of killList) {
     if (process.platform === 'win32') {
       runTaskkill(pid)
       continue
@@ -329,7 +343,11 @@ export async function startASRService(tierOverride?: LocalModelTier): Promise<bo
       asrError =
         reaped === 'not-ours'
           ? '8000 端口被其他程序占用，本地转写无法启动，请关闭占用该端口的程序后重新启动'
-          : '上一代本地转写服务未能自动清理，请在活动监视器中结束 vv-asr-server 进程后重新启动 Vv Transcribe'
+          : reaped === 'held-by-other-instance'
+            ? '另一份 Vv Transcribe 正在使用本机转写引擎，这一份实例连不上它。请先完全退出另一份，再点「重启本地引擎」'
+            : reaped === 'unknown-owner'
+              ? '端口上的转写服务没能确认归属，为免打断正在使用的实例，这一份不会自动回收它。请完全退出所有 Vv Transcribe 后重新启动'
+              : '上一代本地转写服务未能自动清理，请在活动监视器中结束 vv-asr-server 进程后重新启动 Vv Transcribe'
       logger.warn(TAG, 'Port still occupied after reap', { port: ASR_PORT, outcome: reaped })
       return false
     }
@@ -437,7 +455,7 @@ function readyFailureMessage(outcome: 'ready' | 'foreign' | 'died' | 'timeout'):
     case 'ready':
       return null
     case 'foreign':
-      return '8000 端口上的转写服务不属于本次启动。点「重启本地引擎」可自动回收并重开；反复出现请完全退出 Vv Transcribe 后重新启动'
+      return '8000 端口上的转写服务不属于本次启动。点「重启本地引擎」可自动回收并重开；本机若还开着另一份 Vv Transcribe，请先退出它（那台引擎属于它，不会被回收）'
     case 'died':
       return '本地转写引擎启动后立即退出，可点「重启本地引擎」再试；若反复出现请重新安装 Vv Transcribe'
     case 'timeout':

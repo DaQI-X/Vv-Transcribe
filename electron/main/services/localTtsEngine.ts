@@ -25,6 +25,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { logger } from './logger'
 import { componentsDir } from './userDataStore'
+import { classifyEngineTrees } from './engineOwnership'
 import { UPSTREAM_MODEL_SOURCES, hasInAppModelDownload, upstreamTotalBytes } from './ttsModelUpstream'
 // 相对路径而非 @/ 别名：主进程这条 build 链没有配别名，用 @/ 只有打包时才炸，tsc 却是过的
 import { formatBytes } from '../../../src/utils/formatBytes'
@@ -216,8 +217,14 @@ async function isOurEngine(pid: number): Promise<boolean> {
  * 把躺在 8010 上的上一代引擎收掉（抄 ASR 那段，教训也一样：应用被强杀时 before-quit 不跑，
  * 引擎会作为孤儿永远占着端口，光靠握手只能做到「不采信它」，用户重开应用照样起不来）。
  * 只杀命令行确认是我们自己二进制的那些进程。
+ *
+ * #445 起收之前先问归属：本地配音是懒启动（第一次配音/试听才起），所以撞上「另一份实例的引擎
+ * 正在配音批次里」的时刻比转写那边更靠后、更伤——那一刀会把用户刚合成到一半的段落全截断。
+ * 判式与 ASR 共用 `engineOwnership.ts`，两边必须一模一样，否则总有一边还在互杀。
  */
-async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held'> {
+async function reapForeignEngine(): Promise<
+  'cleared' | 'not-ours' | 'held-by-other-instance' | 'unknown-owner' | 'still-held'
+> {
   const listeners = await listPortPids()
   if (listeners.length === 0) return 'not-ours'
 
@@ -227,15 +234,19 @@ async function reapForeignEngine(): Promise<'cleared' | 'not-ours' | 'still-held
   }
   if (targets.length === 0) return 'not-ours'
 
-  // PyInstaller 的引导进程是监听者的父进程，握着那份临时解包目录，一并收掉
-  for (const pid of [...targets]) {
-    const out = await capture('ps', ['-o', 'ppid=', '-p', String(pid)])
-    const ppid = Number(out.trim())
-    if (Number.isInteger(ppid) && ppid > 1 && (await isOurEngine(ppid))) targets.push(ppid)
+  const trees = await classifyEngineTrees(targets, isOurEngine)
+  if (trees.verdict !== 'clear-to-reap') {
+    const outcome = trees.verdict === 'held-by-live-instance' ? 'held-by-other-instance' : 'unknown-owner'
+    logger.warn(TAG, 'Engine on the port is not a leftover, leaving it running', {
+      verdict: trees.verdict,
+      pids: targets.join(', '),
+    })
+    return outcome
   }
 
-  logger.warn(TAG, 'Reaping leftover engine processes', { pids: targets.join(', ') })
-  for (const pid of targets) {
+  const killList = trees.pids
+  logger.warn(TAG, 'Reaping leftover engine processes', { pids: killList.join(', ') })
+  for (const pid of killList) {
     if (process.platform === 'win32') {
       runTaskkill(pid)
       continue
@@ -382,7 +393,11 @@ async function startEngine(engine: LocalTtsEngineId): Promise<void> {
       lastError =
         reaped === 'not-ours'
           ? `${TTS_PORT} 端口被其他程序占用，本地配音无法启动，请关闭占用该端口的程序后再试`
-          : '上一代本地配音服务没能自动清理，请在活动监视器（或任务管理器）中结束 vv-tts-server 进程后再试'
+          : reaped === 'held-by-other-instance'
+            ? '另一份 Vv Transcribe 正在使用本地配音引擎，这一份实例连不上它。请先完全退出另一份再试'
+            : reaped === 'unknown-owner'
+              ? '端口上的配音服务没能确认归属，为免打断正在使用的实例，这一份不会自动回收它。请完全退出所有 Vv Transcribe 后再试'
+              : '上一代本地配音服务没能自动清理，请在活动监视器（或任务管理器）中结束 vv-tts-server 进程后再试'
       throw new Error(lastError)
     }
   }
@@ -462,7 +477,7 @@ function readyFailureMessage(outcome: 'ready' | 'foreign' | 'died' | 'timeout'):
     case 'ready':
       return null
     case 'foreign':
-      return `${TTS_PORT} 端口上的配音服务不属于本次启动。点「重启本地配音引擎」可自动回收并重开；反复出现请完全退出 Vv Transcribe 后重新启动`
+      return `${TTS_PORT} 端口上的配音服务不属于本次启动。点「重启本地配音引擎」可自动回收并重开；本机若还开着另一份 Vv Transcribe，请先退出它（那台引擎属于它，不会被回收）`
     case 'died':
       return '本地配音引擎启动后立即退出，可点「重启本地配音引擎」再试；若反复出现请重新下载该组件'
     case 'timeout':
