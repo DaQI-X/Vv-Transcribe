@@ -7,11 +7,15 @@
 /** binary=一个可执行文件，archive=解压成一个目录 */
 export type ComponentKind = 'binary' | 'archive'
 
+/** tts=本地字幕配音用的引擎/模型，asr=本地转写用的 Whisper 权重（面板按这一位分组） */
+export type ComponentPurpose = 'tts' | 'asr'
+
 export interface ComponentState {
   id: string
   /** 名字与说明都由主进程的白名单给，界面不自己拼 */
   title: string
   kind: ComponentKind
+  purpose: ComponentPurpose
   hint: string
   installed: boolean
   /** 磁盘实际占用（目录已展开求和），没装是 0 */
@@ -48,6 +52,8 @@ export interface ComponentResult {
   systemSettingsHint?: boolean
   /** 用户自己按的「取消下载」，不是故障：界面据此走中性提示 */
   canceled?: boolean
+  /** 这一行的货其实住在组件目录之外（那一棵树），调用方自己决定要不要接着清 */
+  outsideOnly?: boolean
 }
 
 export interface ComponentCheckResult {

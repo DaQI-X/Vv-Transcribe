@@ -94,6 +94,21 @@ interface MediaSession {
 
 const sessions = new Map<string, MediaSession>()
 
+/**
+ * 临时媒体（音频、视频、cookies、TTS 中间产物）的目录名前缀。
+ * 启动清扫 `sweepStaleMediaTempDirs` 与「清空本机数据」那一份清单都认它，两处各写一份字面量，
+ * 将来改前缀就会有一头漏掉——漏的那头不是难看，是把用户的媒体留在 /tmp 里没人删。
+ */
+export const MEDIA_TEMP_PREFIX = 'transcribe-'
+
+/**
+ * 现在正被会话占着的临时目录（#416）。「清空本机数据」删 /tmp 那一层时必须跳过它们，
+ * 否则正在回放的那条音轨会在下一次 seek 时读到没了的文件。
+ */
+export function activeMediaTempDirs(): string[] {
+  return [...sessions.values()].map((s) => s.tempDir)
+}
+
 /** 获取 ffmpeg 二进制路径（适配打包环境） */
 function getFfmpegPath(): string | null {
   const isPackaged = process.env.NODE_ENV === 'production' || app.isPackaged
@@ -987,7 +1002,7 @@ export async function sweepStaleMediaTempDirs(): Promise<number> {
   } catch {
     return 0
   }
-  for (const name of entries.filter((n) => n.startsWith('transcribe-'))) {
+  for (const name of entries.filter((n) => n.startsWith(MEDIA_TEMP_PREFIX))) {
     const dir = join(root, name)
     try {
       const info = await stat(dir)

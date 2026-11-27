@@ -46,7 +46,6 @@ import {
   type LocalTtsDetail,
 } from '../services/localTtsEngine'
 import { logger } from '../services/logger'
-import { clearClipCache, clipCacheStats } from '../services/ttsClipCache'
 import { addHistoryRecord } from '../services/historyService'
 import { engineBinaryInManifest } from '../services/componentService'
 import { failOkError, failSuccessError, ipcHandle } from './guard'
@@ -269,37 +268,6 @@ export function registerTTSHandlers() {
       return { ok: true }
     },
     failOkError
-  )
-
-  /**
-   * 配音片段缓存占多少（#362）。缓存是「看不见但在长」的那类东西——它落在 userData 而不是临时目录，
-   * 启动清扫不会动它，所以它必须有一个能看见体积、也能一键清掉的地方，否则用户只能在盘满那天发现。
-   * error 非空时那两个数字不许读：`bytes: 0` 长成「没占地方」就是一句谎。
-   */
-  ipcHandle(
-    'tts:cacheStats',
-    async (): Promise<{ bytes: number; clips: number; error: string | null }> => {
-      const { bytes, clips } = await clipCacheStats()
-      return { bytes, clips, error: null }
-    },
-    (message) => ({ bytes: 0, clips: 0, error: message })
-  )
-
-  /**
-   * 清掉整层缓存。正在逐段配音时拒绝：那一轮的 clips 还指着缓存里的文件，
-   * 边跑边删会让拼接读到没落盘的音频（与 #241「测试连接不许打断配音」同一个理由）。
-   */
-  ipcHandle(
-    'tts:cacheClear',
-    async (): Promise<{ ok: boolean; freed: number; error: string | null }> => {
-      if (hasActiveTTSSynthesis()) {
-        return { ok: false, freed: 0, error: '正在配音，先等这一批跑完再清缓存' }
-      }
-      const freed = await clearClipCache()
-      logger.userAction('TTS clip cache cleared', { freed })
-      return { ok: true, freed, error: null }
-    },
-    (message) => ({ ok: false, freed: 0, error: message })
   )
 
   /**

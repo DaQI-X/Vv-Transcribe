@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Download, RefreshCw, Square, Trash2 } from 'lucide-react'
 import { toast } from '@/components/ui/Toast'
 import { getElectronAPI } from '@/hooks/useElectronAPI'
-import type { ComponentPhase, ComponentProgress, ComponentResult, ComponentState } from '@/types/component'
+import type { ComponentPhase, ComponentProgress, ComponentPurpose, ComponentResult, ComponentState } from '@/types/component'
 import { formatBytes } from '@/utils/formatBytes'
 
 /** 阶段名按主进程真正在做的事分三种说；「下载中 30%」套在解压上是骗人 */
@@ -39,6 +39,16 @@ const ACTION_LABEL: Record<ComponentState['action'], string> = {
   repair: '重新下载',
   none: '',
 }
+
+/**
+ * 分组标题（#440）：五行的名字都不带用途，混在一列里就是「快速档语音模型」和「VITS」并排——
+ * 用户看不出哪几行删了会影响转写。判式取主进程带来的 `purpose`，不按 id 前缀猜。
+ * 顺序按应用的主流程：先转写再配音。
+ */
+const GROUPS: { purpose: ComponentPurpose; label: string }[] = [
+  { purpose: 'asr', label: '本地转写用' },
+  { purpose: 'tts', label: '字幕配音用' },
+]
 
 /**
  * 一行状态：已装的说版本和占用，没装的说要多大；清单取不到下载包时不能给「可下载」的错觉。
@@ -285,6 +295,77 @@ export function ComponentsSection() {
   const totalBytes = (states ?? []).reduce((sum, s) => sum + s.bytes, 0)
   const anyInstalling = Object.keys(pending).some((id) => pending[id] === 'install')
 
+  /** 一行的样子与动作全在这一段里，分组只套一层标题——两处各写一份迟早漏掉一颗按钮 */
+  const renderRow = (s: ComponentState) => {
+    const p = progress[s.id]
+    const task = pending[s.id]
+    const percent = p && p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : null
+    return (
+      <div className="vv-component-row" key={s.id}>
+        <div className="vv-component-row__head">
+          <span className="vv-component-row__name">{s.title}</span>
+          <span className="vv-component-row__meta">{describe(s)}</span>
+        </div>
+        <div className="vv-component-row__hint">{s.hint}</div>
+
+        {p && (
+          <div className="vv-component-progress">
+            <div className="media-progress__bar">
+              <div
+                className="media-progress__fill"
+                style={{ width: `${percent === null ? 100 : percent}%`, opacity: percent === null ? 0.35 : 1 }}
+              />
+            </div>
+            <span className="vv-component-progress__text">
+              {PHASE_LABEL[p.phase]}
+              {p.step ? ` ${p.step}` : ''} {formatBytes(p.done)}
+              {p.total > 0 ? ` / ${formatBytes(p.total)}` : ''}
+              {percent !== null ? `（${percent}%）` : ''}
+            </span>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          {s.action !== 'none' && s.inManifest !== false && (
+            <button
+              type="button"
+              onClick={() => void handleInstall(s.id)}
+              disabled={!!p || task === 'remove' || busy?.synthesizing === true}
+              className="settings-modal__save-btn"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 14px', fontSize: 12 }}
+            >
+              <Download size={12} />
+              {task === 'install' ? '处理中...' : ACTION_LABEL[s.action]}
+              {s.action === 'update' && s.remoteVersion ? `到 v${s.remoteVersion}` : ''}
+            </button>
+          )}
+          {p && (
+            <button
+              type="button"
+              onClick={() => void handleCancel(s.id)}
+              disabled={task === 'cancel'}
+              className="settings-modal__dict-update-btn"
+            >
+              {task === 'cancel' ? '取消中...' : '取消下载'}
+            </button>
+          )}
+          {s.installed && !p && (
+            <button
+              type="button"
+              onClick={() => void handleRemove(s.id)}
+              disabled={task === 'remove' || busy?.synthesizing === true}
+              className="settings-modal__dict-update-btn"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              <Trash2 size={12} />
+              {task === 'remove' ? '删除中...' : '删除'}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="settings-form-group">
       <label className="settings-form-label">按需组件</label>
@@ -348,79 +429,26 @@ export function ComponentsSection() {
             : `合计占用 ${formatBytes(totalBytes)}`}
         </span>
       </div>
+      {/*
+        这段说明原先只讲配音，可下面还站着两行转写权重（#440）——读到「本地配音用的引擎和模型」
+        的人会以为那两行是别处来的。口径改成「不随安装包分发的组件」，再点一句删不到引擎旧缓存这件事，
+        因为面板里的「删除」只动应用自己下载的副本（#439 那台机器就是这么显示着已安装的）。
+      */}
       <span className="settings-form-hint">
-        本地配音用的引擎和模型不随安装包分发，缺哪个下哪个：引擎取我们仓库的 Release 资产，
+        下面这些组件不随安装包分发，缺哪个下哪个：引擎取我们仓库的 Release 资产，
         模型取 HuggingFace 上游仓库里钉死的那个提交。两条都按文件指纹校验过才会替换现有组件，
-        中途失败或取消都不会留下半份。
+        中途失败或取消都不会留下半份。这里的「删除」只清应用自己下载的副本；
+        本地转写引擎早先自己拉过一份模型缓存，那份要在「清空本机数据」里整体清。
         {busy?.synthesizing && '（有一批字幕配音正在逐段合成，等它跑完或先取消这一批，才能动组件）'}
       </span>
 
-      {(states ?? []).map((s) => {
-        const p = progress[s.id]
-        const task = pending[s.id]
-        const percent = p && p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : null
+      {GROUPS.map((g) => {
+        const rows = (states ?? []).filter((s) => s.purpose === g.purpose)
+        if (rows.length === 0) return null
         return (
-          <div className="vv-component-row" key={s.id}>
-            <div className="vv-component-row__head">
-              <span className="vv-component-row__name">{s.title}</span>
-              <span className="vv-component-row__meta">{describe(s)}</span>
-            </div>
-            <div className="vv-component-row__hint">{s.hint}</div>
-
-            {p && (
-              <div className="vv-component-progress">
-                <div className="media-progress__bar">
-                  <div
-                    className="media-progress__fill"
-                    style={{ width: `${percent === null ? 100 : percent}%`, opacity: percent === null ? 0.35 : 1 }}
-                  />
-                </div>
-                <span className="vv-component-progress__text">
-                  {PHASE_LABEL[p.phase]}
-                  {p.step ? ` ${p.step}` : ''} {formatBytes(p.done)}
-                  {p.total > 0 ? ` / ${formatBytes(p.total)}` : ''}
-                  {percent !== null ? `（${percent}%）` : ''}
-                </span>
-              </div>
-            )}
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {s.action !== 'none' && s.inManifest !== false && (
-                <button
-                  type="button"
-                  onClick={() => void handleInstall(s.id)}
-                  disabled={!!p || task === 'remove' || busy?.synthesizing === true}
-                  className="settings-modal__save-btn"
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 14px', fontSize: 12 }}
-                >
-                  <Download size={12} />
-                  {task === 'install' ? '处理中...' : ACTION_LABEL[s.action]}
-                  {s.action === 'update' && s.remoteVersion ? `到 v${s.remoteVersion}` : ''}
-                </button>
-              )}
-              {p && (
-                <button
-                  type="button"
-                  onClick={() => void handleCancel(s.id)}
-                  disabled={task === 'cancel'}
-                  className="settings-modal__dict-update-btn"
-                >
-                  {task === 'cancel' ? '取消中...' : '取消下载'}
-                </button>
-              )}
-              {s.installed && !p && (
-                <button
-                  type="button"
-                  onClick={() => void handleRemove(s.id)}
-                  disabled={task === 'remove' || busy?.synthesizing === true}
-                  className="settings-modal__dict-update-btn"
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                >
-                  <Trash2 size={12} />
-                  {task === 'remove' ? '删除中...' : '删除'}
-                </button>
-              )}
-            </div>
+          <div key={g.purpose} className="vv-component-group">
+            <div className="vv-component-group__title">{g.label}</div>
+            {rows.map(renderRow)}
           </div>
         )
       })}

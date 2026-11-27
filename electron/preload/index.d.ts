@@ -169,6 +169,8 @@ export interface ComponentState {
   title: string
   /** binary=一个可执行文件，archive=解压成一个目录 */
   kind: 'binary' | 'archive'
+  /** tts=本地字幕配音那三行，asr=本地转写的两档权重（界面按这一位分组，#440） */
+  purpose: 'tts' | 'asr'
   /** 这一项是干什么用的，界面直接印出来 */
   hint: string
   installed: boolean
@@ -205,12 +207,48 @@ export interface ComponentResult {
   systemSettingsHint?: boolean
   /** 用户自己按的「取消下载」，不是故障：界面据此走中性提示 */
   canceled?: boolean
+  /** 这一行的货其实住在组件目录之外（那一棵树），调用方自己决定要不要接着清 */
+  outsideOnly?: boolean
 }
 
 export interface ComponentCheckResult {
   ok: boolean
   error: string | null
   components: ComponentState[]
+}
+
+/** 本机数据与缓存（#416）：与 electron/main/services/localDataAudit.ts 的同名类型对齐 */
+export type LocalDataGroup = 'cache' | 'component' | 'personal'
+
+export interface LocalDataItem {
+  id: string
+  group: LocalDataGroup
+  label: string
+  detail: string
+  /** 打开弹窗时默认勾不勾：只有纯派生物默认勾 */
+  defaultOn: boolean
+  bytes: number
+  files: number | null
+  /** 这一项体积读不出来时给的原因；非空时那个 0 不许被读成「没占地方」 */
+  error: string | null
+}
+
+export interface LocalDataAudit {
+  items: LocalDataItem[]
+  /** 默认勾上的那几项合计 */
+  cacheBytes: number
+  totalBytes: number
+  error: string | null
+}
+
+export interface LocalDataClearResult {
+  ok: boolean
+  freed: number
+  cleared: string[]
+  failed: { id: string; error: string }[]
+  /** 不算故障、但用户应当知道的那一句 */
+  note: string | null
+  error: string | null
 }
 
 /**
@@ -622,13 +660,6 @@ export interface ElectronAPI {
   }>
   /** 没另存就清空这批时回收整批中间产物（另存成功后同样回收） */
   releaseVoiceBatch: (jobId: string) => Promise<{ ok: boolean; error?: string | null }>
-  /**
-   * 配音片段缓存占多少（#362）。这一层落在 userData、启动清扫不动它，所以它必须看得见体积。
-   * error 非空时 bytes/clips 两个数字都不许读——读成 0 就是说「没占地方」，那是句谎。
-   */
-  getVoiceClipCacheStats: () => Promise<{ bytes: number; clips: number; error: string | null }>
-  /** 清掉整层片段缓存。正在逐段配音时主进程会拒绝（ok:false + error），那一轮的片段还指着这些文件 */
-  clearVoiceClipCache: () => Promise<{ ok: boolean; freed: number; error: string | null }>
   onVoiceProgress: (callback: (data: VoiceProgress) => void) => () => void
 
   /**
@@ -705,6 +736,10 @@ export interface ElectronAPI {
   /** 这几个文件现在能不能动；三种占用分开报，界面给的不一样（asrEngineRunning 管权重那两行，#434） */
   getComponentBusy: () => Promise<{ engineRunning: boolean; synthesizing: boolean; asrEngineRunning: boolean }>
   onComponentProgress: (callback: (data: ComponentProgress) => void) => () => void
+
+  /** 本机数据与缓存（#416）：清单只读磁盘不联网；删除只认清单里那些 id，传别的整批拒绝 */
+  getLocalDataInventory: () => Promise<LocalDataAudit>
+  clearLocalData: (ids: string[]) => Promise<LocalDataClearResult>
 
   /** error 非 null 是「查不了」，与 found:false 的「词库里没有这个词」是两句话 */
   lookupWord: (word: string) => Promise<{ found: boolean; explanation?: string; error?: string | null }>

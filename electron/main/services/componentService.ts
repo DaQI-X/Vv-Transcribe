@@ -51,6 +51,7 @@ import {
   asrModelDir,
   asrModelFileUrls,
 } from './asrModelUpstream'
+import { asrWeightState } from './asrModelUsage'
 import {
   UPSTREAM_MODEL_SOURCES,
   upstreamFileUrls,
@@ -127,11 +128,16 @@ const MANIFEST_ABSENT_HINT = '这一版还没有发布组件清单（404），�
 /** binary＝落点是一个文件；archive＝落点是一个目录（解包来的，或逐文件取来的，见下面 upstream） */
 export type ComponentKind = 'binary' | 'archive'
 
+/** 这一行归哪个功能用：本地配音那三行、本地转写那两档权重（#440 分组用） */
+export type ComponentPurpose = 'tts' | 'asr'
+
 /** 一个组件在代码侧的全部真相：从哪儿取、落到哪、必需文件、体积上限、什么时候算「正在用」 */
 interface ComponentSpec {
   id: string
   title: string
   kind: ComponentKind
+  /** 归哪个功能用，原样带到界面分组（见 ComponentState.purpose） */
+  purpose: ComponentPurpose
   /** 界面括号里那句「要下多少」的账。数字取 2026-10-28 本机实测，跨平台不同的那份不编数 */
   hint: string
   /** 取清单 assets 里哪一条。与 upstream 二选一，两个都没有＝这一版本不给应用内下载 */
@@ -147,6 +153,21 @@ interface ComponentSpec {
   fileUrls?: (source: UpstreamModelSource, file: UpstreamModelFile) => string[]
   /** 落点。binary 是文件，archive 是目录 */
   target: () => string
+  /**
+   * 「装没装、算哪一版、占多少」由谁说了算。不给＝默认那条：看 `target()` 在不在，版本读记账文件。
+   *
+   * 只有 Whisper 权重那两行需要它（#439）：同一档权重可能住在**两棵树**里——1.2.4 之前由引擎
+   * 自己拉进 `~/.cache/huggingface/hub`，1.2.5 起由应用按指纹表取到 `target()` 那一层。只认自家
+   * 那棵，老机器上「转写成功、组件行却显示下载」会同时成立，用户照着点就白下一份还多占一份盘；
+   * 而 `existsSync` 不看字节，半份文件又会被报成「已安装，占用 0 B」。两头都由这一个探针答。
+   */
+  probe?: () => Promise<{ installed: boolean; version: string | null; bytes: number }>
+  /**
+   * 探针认出的那一棵**删不到**的树，按组件 id 记。
+   * 只给有 `probe` 的行：那一行的「已安装」可能来自 `target()` 之外，用户按删除却只动自家目录，
+   * 那句「本来就不在组件目录里」必须点名另一棵在哪，否则看着像按钮坏了。
+   */
+  probeOutside?: string
   /** 目录型组件专用：装完必须都在的条目。名字以 / 结尾表示只要「下面有东西」 */
   required?: string[]
   /** 清单那条路专用：解包体积与文件数的代码侧上限，兜住清单把数字写错的情况。上游逐文件取用不到 */
@@ -234,6 +255,7 @@ const SPECS: ComponentSpec[] = [
     id: 'vv-tts-server',
     title: COMPONENT_ROW_TITLES.engineBinary,
     kind: 'binary',
+    purpose: 'tts',
     hint: '引擎二进制，三平台各一份，体积按平台差异较大',
     manifestKey: PLATFORM_KEY,
     target: () => join(componentsDir(), 'vv-tts-server', PLATFORM_KEY(), engineBinaryName()),
@@ -243,6 +265,7 @@ const SPECS: ComponentSpec[] = [
     id: `tts-model-${LOCAL_TTS_ENGINES[0]}`,
     title: COMPONENT_ROW_TITLES.models[LOCAL_TTS_ENGINES[0]].row,
     kind: 'archive',
+    purpose: 'tts',
     hint: '中文配音模型，取自 HuggingFace 上游仓库里钉死的那个提交',
     upstream: UPSTREAM_MODEL_SOURCES[LOCAL_TTS_ENGINES[0]],
     target: () => join(modelRootDir(), LOCAL_TTS_ENGINES[0]),
@@ -253,6 +276,7 @@ const SPECS: ComponentSpec[] = [
     id: `tts-model-${LOCAL_TTS_ENGINES[1]}`,
     title: COMPONENT_ROW_TITLES.models[LOCAL_TTS_ENGINES[1]].row,
     kind: 'archive',
+    purpose: 'tts',
     hint: '中英文配音模型，取自 HuggingFace 上游仓库里钉死的那个提交',
     // 与 VITS 同一套路：钉 commit + 逐文件 sha256，不碰清单。这份表 375 个文件、426,573,262 字节
     // （2026-10-29 本机逐个算的，其中 7 个 LFS 还实下过一遍），espeak-ng-data/ 那几百个文件全在里面。
@@ -275,10 +299,14 @@ const SPECS: ComponentSpec[] = [
     id: `asr-model-${tier}`,
     title: ASR_MODEL_ROW_TITLES[tier].title,
     kind: 'archive' as const,
+    purpose: 'asr' as const,
     hint: ASR_MODEL_ROW_TITLES[tier].hint,
     upstream: ASR_MODEL_SOURCES[tier],
     fileUrls: asrModelFileUrls,
     target: () => asrModelDir(tier),
+    // 这两行的「已安装」不能只看 target()：老机器的权重住在引擎自己拉的 HF 缓存里（#439）
+    probe: () => asrWeightState(tier),
+    probeOutside: '它在本地引擎自己的 HuggingFace 缓存目录里',
     busy: asrBusyReason,
   })),
 ]
@@ -301,6 +329,12 @@ export interface ComponentState {
   id: string
   title: string
   kind: ComponentKind
+  /**
+   * 这一行是给哪个功能用的（#440）。五行的名字都不带用途，混在一列里用户分不清哪几行删了会影响
+   * 转写，而面板顶部只剩一句「本地配音用的引擎和模型不随安装包分发」——分组标题由主进程给，
+   * 界面照这一位分列，不按 id 前缀猜（那是第二份判式）。
+   */
+  purpose: ComponentPurpose
   hint: string
   installed: boolean
   /** 磁盘实际占用（目录已展开求和），没装是 0 */
@@ -342,6 +376,12 @@ export interface ComponentResult {
    * 界面要靠它把这条回成中性提示，不然点取消的人收到的是红色失败。
    */
   canceled?: boolean
+  /**
+   * 「删除」这一行的货其实住在组件目录之外（#439 那台机器的权重在引擎自己的 HF 缓存里）。
+   * 调用方要把它和真失败分开：#416 的「清空本机数据」正是接着去删那一棵树，
+   * 这句拒绝在清理结果里冒出来只会让人以为没删掉。
+   */
+  outsideOnly?: boolean
 }
 
 export interface ComponentCheckResult {
@@ -693,10 +733,12 @@ async function buildState(
   inManifest?: boolean | null
 ): Promise<ComponentState> {
   const target = spec.target()
-  const installed = existsSync(target)
-  const record = installed ? (await readInstalled())[spec.id] : undefined
-  const bytes = installed ? await diskBytes(target) : 0
-  const localVersion = installed ? (record?.version ?? null) : null
+  // 有探针的行由它答（同一把尺用在两处：目录存在性不再单独成立，见 ComponentSpec.probe）
+  const probed = spec.probe ? await spec.probe() : null
+  const installed = probed ? probed.installed : existsSync(target)
+  const record = installed && !probed ? (await readInstalled())[spec.id] : undefined
+  const bytes = probed ? probed.bytes : installed ? await diskBytes(target) : 0
+  const localVersion = installed ? (probed ? probed.version : record?.version ?? null) : null
   let action: ComponentState['action'] = 'install'
   if (installed) {
     if (remote === null) action = 'repair'
@@ -707,6 +749,7 @@ async function buildState(
     id: spec.id,
     title: spec.title,
     kind: spec.kind,
+    purpose: spec.purpose,
     hint: spec.hint,
     installed,
     bytes,
@@ -1352,7 +1395,14 @@ export async function removeComponent(id: string): Promise<ComponentResult> {
 
   const target = spec.target()
   if (!existsSync(target)) {
-    return { ok: false, error: `${spec.title} 本来就不在组件目录里，没有可删除的东西` }
+    // 探针说「已安装」而自家目录是空的：那一行的货在另一棵树上，这一删本来就删不到它
+    return {
+      ok: false,
+      outsideOnly: !!spec.probeOutside,
+      error: spec.probeOutside
+        ? `${spec.title} 在组件目录里没有副本（${spec.probeOutside}），这一行只能删应用自己下载的那一份`
+        : `${spec.title} 本来就不在组件目录里，没有可删除的东西`,
+    }
   }
   try {
     await rm(target, { recursive: true, force: true })

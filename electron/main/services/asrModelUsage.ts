@@ -34,7 +34,7 @@ import { LOCAL_MODEL_TIERS, type LocalModelTier } from './settingsService'
 import { ASR_MODEL_SOURCES, asrModelDir, hasAsrModelDownload } from './asrModelUpstream'
 // 「这一档一共多少字节」由同一份通用实现说（componentService 报 remoteBytes 用的也是它），
 // 这里再 reduce 一遍 files.bytes 就是第二把尺（#438）
-import { upstreamTotalBytes } from './ttsModelUpstream'
+import { upstreamTotalBytes, upstreamVersion } from './ttsModelUpstream'
 
 /**
  * 权重文件名，也是指纹表缺位时（认不出的档位）唯一的判据。
@@ -71,6 +71,16 @@ export function hubCacheDir(): string {
 
 function repoDir(tier: string): string {
   return join(hubCacheDir(), `${REPO_DIR_PREFIX}${tier}`)
+}
+
+/**
+ * 引擎旧路那棵树在盘上的位置（#416「清空本机数据」要能点名删它）。
+ *
+ * 只回 `Systran/faster-whisper-<档位>` 这两条，不回 `hub/` 整层：那层是 HuggingFace 的通用缓存，
+ * 本机此刻就还站着三份别家的配音模型，整层删掉是拿别人的东西冲自己的账。
+ */
+export function asrEngineRepoDirs(): string[] {
+  return LOCAL_MODEL_TIERS.map((tier) => repoDir(tier))
 }
 
 /**
@@ -201,18 +211,40 @@ async function collectSnapshot(revDir: string, sizes: Map<string, number>): Prom
   return names
 }
 
-/** 一档的落盘情况：真身→字节数收进 sizes，另回一句「这一档的权重齐了没」 */
-async function measureTier(tier: LocalModelTier, sizes: Map<string, number>): Promise<boolean> {
+/** 一档在盘上的实况 */
+interface TierWeights {
+  /** 与 `isModelCached` 同一把尺：两棵树任一棵凑齐必需文件 */
+  complete: boolean
+  /**
+   * 盘上那一版权重对应的提交号前 7 位（界面当版本号用）。
+   * 缓存里可能是表外的一版（上游仓库动过 `main` 而本机是更早那次拉的），那种就报它自己的号，
+   * 让组件行落在「更新」而不是「已安装」——这一档确实不是本版钉的那枚。
+   */
+  version: string | null
+}
+
+/**
+ * 一档的落盘情况：真身→字节数收进 sizes，并报「齐了没」与「齐的是哪一版」。
+ *
+ * 版本能报出来是因为 HF 缓存的快照目录名**就是**当初解析到的那个 commit（本机两档实测：
+ * `snapshots/ebe41f70…`、`snapshots/536b0662…`，与指纹表钉的两枚一字不差）。
+ */
+async function inspectTier(tier: LocalModelTier, sizes: Map<string, number>): Promise<TierWeights> {
   const snapshotsPath = join(repoDir(tier), 'snapshots')
   const snapshots = await readDir(snapshotsPath)
   const required = requiredFiles(tier)
-  let cached = false
+  const source = ASR_MODEL_SOURCES[tier] ?? null
+  const pinned = source ? upstreamVersion(source) : null
+  let version: string | null = null
   for (const rev of snapshots ?? []) {
     if (!rev.isDirectory()) continue
     // 同一档位可能被 checkout 过两个 revision：每一版的文件都真的占着盘，逐版收完再合计
     const names = await collectSnapshot(join(snapshotsPath, rev.name), sizes)
     // 每一版各自算齐不齐：只在一版里凑齐四枚也算（另一版的残件不能把整档判成没下载）
-    if (required.every((name) => names.has(name))) cached = true
+    if (!required.every((name) => names.has(name))) continue
+    // 钉死那一版优先认领：缓存里有两版时，界面该报「就是本版认的那枚」，而不是 readdir 的第一枚
+    if (source && rev.name === source.commit) version = pinned
+    else if (version === null) version = rev.name.slice(0, 7)
   }
   // 应用自取那棵树（#434）也占盘，同样逐文件 realpath 后收进来。两棵都装过时这一档报的是两份之和，
   // 那是真话不是重复计数——磁盘上确实有两份东西；把它们并成一份属于 #416 的活儿。
@@ -220,13 +252,39 @@ async function measureTier(tier: LocalModelTier, sizes: Map<string, number>): Pr
   await collectSnapshot(asrModelDir(tier), sizes)
   // 「算不算已缓存」必须与 isModelCached 同一把尺（尺寸齐了才算），不然界面会说「已缓存」、
   // spawn 却按没缓存下发在线许可——那正是本模块开头要避免的分叉
-  return cached || localWeightsComplete(tier)
+  const appTree = localWeightsComplete(tier)
+  return { complete: version !== null || appTree, version: appTree ? (pinned ?? version) : version }
 }
 
 function sumBytes(sizes: Map<string, number>): number {
   let bytes = 0
   for (const size of sizes.values()) bytes += size
   return bytes
+}
+
+/** 组件面板那一行要的三样，一次盘上遍历给全 */
+export interface AsrWeightState {
+  installed: boolean
+  /** 与 `ASR_MODEL_SOURCES[tier].commit` 前 7 位同源；盘上是表外那一版时报那一版的号 */
+  version: string | null
+  bytes: number
+}
+
+/**
+ * 「这一档的权重在不在本地、算哪一版、占多少」——按需组件面板那两行唯一的出处（#439）。
+ *
+ * 为什么这一行不能沿用组件下载器默认的 `existsSync(target)`：同一档权重有两个可能的落点
+ * （1.2.4 之前由引擎自己拉进 `~/.cache/huggingface/hub`，1.2.5 起由应用按指纹表取到
+ * `userData/components/asr-models/<档位>`）。老机器的权重只在前一棵，只看自家目录就会出现
+ * 「转写明明成功、组件行写着未安装，下载约 486.2MB」——用户照着点就白下一份，还多占一份盘。
+ * 反过来 `existsSync` 也不看字节，半份文件会被报成「已安装，占用 0 B」。两头都收在这一个函数里：
+ * 判式与 `isModelCached`（spawn 下发离线标志那把尺）、与占用那一行（`measureLocalModelUsage`）同源。
+ */
+export async function asrWeightState(tier: string): Promise<AsrWeightState> {
+  if (!hasAsrModelDownload(tier)) return { installed: false, version: null, bytes: 0 }
+  const sizes = new Map<string, number>()
+  const { complete, version } = await inspectTier(tier, sizes)
+  return { installed: complete, version, bytes: complete ? sumBytes(sizes) : 0 }
 }
 
 /**
@@ -240,14 +298,14 @@ export async function measureLocalModelUsage(): Promise<LocalModelUsage> {
     const tiers: LocalModelTierUsage[] = []
     for (const tier of LOCAL_MODEL_TIERS) {
       const sizes = new Map<string, number>()
-      const cached = await measureTier(tier, sizes)
+      const { complete } = await inspectTier(tier, sizes)
       // 两档共用同一枚真身时合计只算一份，各档那一行仍然报自己读到的量
       for (const [real, size] of sizes) {
         if (!union.has(real)) union.set(real, size)
       }
       tiers.push({
         tier,
-        cached,
+        cached: complete,
         bytes: sumBytes(sizes),
         // 表里没有这一档（认不出的档位）就报 null：界面宁可少说半句，也不报一个抄来的数
         downloadBytes: hasAsrModelDownload(tier) ? upstreamTotalBytes(ASR_MODEL_SOURCES[tier]) : null,

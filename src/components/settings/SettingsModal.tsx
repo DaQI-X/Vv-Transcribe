@@ -61,6 +61,7 @@ import {
   modelPresenceTag,
 } from '@/utils/localTtsEngines'
 import { ComponentsSection } from '@/components/settings/ComponentsSection'
+import { LocalDataSection } from '@/components/settings/LocalDataSection'
 import { ProfileList } from '@/components/settings/ProfileList'
 import {
   ProfileDialog,
@@ -425,12 +426,11 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     null
   )
   /**
-   * 配音片段缓存占多少（#362）。这一层落在 userData、启动清扫从不碰它，所以它必须自己报体积：
-   * 一个只会长、又没人告诉用户它在哪的目录，跟没做这个功能一样糟。
-   * null＝还没读到（或这一次没读出来），界面那格留空，不许当成 0 显示成「没占地方」。
+   * 「按需组件」那一栏的重读开关（#416）。「本机数据与缓存」把组件那一项清完之后，
+   * 上面那五行还停在删除前的状态——不重挂一次就等于在屏幕上继续报「已安装」。
+   * 换 key 是最省事的那条路：那一栏本来就是挂载时自己读盘（无 props），重挂等于重新对账。
    */
-  const [clipCache, setClipCache] = useState<{ bytes: number; clips: number } | null>(null)
-  const [clipCacheClearing, setClipCacheClearing] = useState(false)
+  const [componentsKey, setComponentsKey] = useState(0)
   /** 导出诊断包（#358）在跑的那一会儿：中间要弹一次原生保存面板，重复点会叠出第二扇 */
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
   const api = getElectronAPI()
@@ -1051,23 +1051,6 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
     }
   }, [tab, api, values.asrProvider, modelUsageTick])
 
-  /**
-   * 片段缓存的体积只在开到「关于与更新」时读一次：那一步要把整层目录 readdir 一遍再逐个 stat，
-   * 而这一行不显示的时候读它没有任何读者。error 非空时保持 null——读不到就说读不到，
-   * 不能把主进程失败值里那份占位的 0 演成「缓存是空的」。
-   */
-  useEffect(() => {
-    if (tab !== 'about' || !api) return
-    let cancelled = false
-    void api.getVoiceClipCacheStats().then((res) => {
-      if (cancelled || res.error) return
-      setClipCache({ bytes: res.bytes, clips: res.clips })
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [tab, api])
-
   const handleTestConnection = async (kind: 'asr' | 'ai' | 'tts') => {
     if (!api || testingRef.current) return
     testingRef.current = true
@@ -1353,29 +1336,6 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
    * 实现放在 utils/userData，保存失败的 toast 用的是同一个（措辞必须与主进程那句话对上）。
    */
   const handleOpenUserDataDirectory = () => void openUserDataDirectory()
-
-  /**
-   * 清空配音片段缓存（#362）。这一删不可逆但只丢「省钱的派生物」——下一批配音会重新调接口、
-   * 重新花钱，产物本身（配音轨、历史记录里勾了留住的副本）一个字节都不动。
-   * 正在逐段配音时主进程直接拒绝并把原因回在 error 里，这里只负责弹出来。
-   */
-  const handleClearClipCache = async () => {
-    if (!api || clipCacheClearing) return
-    setClipCacheClearing(true)
-    try {
-      const res = await api.clearVoiceClipCache()
-      if (res.error) {
-        toast.error(res.error)
-        return
-      }
-      toast.success(`已清空配音片段缓存，释放 ${formatBytes(res.freed)}`)
-      setClipCache({ bytes: 0, clips: 0 })
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '清空配音片段缓存失败')
-    } finally {
-      setClipCacheClearing(false)
-    }
-  }
 
   const copyContactEmail = async (email: string) => {
     try {
@@ -1915,7 +1875,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 </span>
               </div>
 
-              <ComponentsSection />
+              <ComponentsSection key={componentsKey} />
 
               <div className="settings-form-group">
                 <label className="settings-form-label">运行日志</label>
@@ -1935,50 +1895,12 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                 </span>
               </div>
 
-              <div className="settings-form-group">
-                <label className="settings-form-label">本机数据</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <button
-                    type="button"
-                    onClick={handleOpenUserDataDirectory}
-                    className="settings-modal__dict-update-btn"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                  >
-                    <FolderOpen size={12} />
-                    打开数据目录
-                  </button>
-                </div>
-                <span className="settings-form-hint">
-                  设置（settings.json）、按需下载的配音引擎与组件都在这里。设置没能解析时，
-                  原件会以 settings.json.corrupt-时间戳 的名字留在同一层，可以从那份文件里找回
-                </span>
-              </div>
-
-              <div className="settings-form-group">
-                <label className="settings-form-label">配音片段缓存</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span className="settings-form-hint" style={{ margin: 0 }}>
-                    {clipCache
-                      ? clipCache.clips === 0
-                        ? '还没有存下的片段'
-                        : `${clipCache.clips} 段，占 ${formatBytes(clipCache.bytes)}`
-                      : '体积读取中…'}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void handleClearClipCache()}
-                    disabled={clipCacheClearing || clipCache?.clips === 0}
-                    className="settings-modal__dict-update-btn"
-                  >
-                    {clipCacheClearing ? '清空中...' : '清空缓存'}
-                  </button>
-                </div>
-                <span className="settings-form-hint">
-                  同一句文本、同一套配音参数配过一次就存下来，改几个字重出一版时只重配改过的那几段，
-                  没改的段不再调用接口。换配音方案、模型、音色或倍速都会让旧片段作废；只有换 API Key 不作废，它不改听感。
-                  清掉不影响已经配好的音轨和历史记录，只是下一批要重新调接口
-                </span>
-              </div>
+              {/*
+                原先这两格（「本机数据」只有一颗打开目录，「配音片段缓存」只能清一样东西）并成了
+                下面这一栏：同一个 userData 里的落点分两处报体积，用户看不出还剩多少。
+                onCleared 用来把上面那栏「按需组件」重读一遍——组件删完还挂着「已安装」就是谎话。
+              */}
+              <LocalDataSection onCleared={() => setComponentsKey((prev) => prev + 1)} />
 
               {/* 只在 mac 出现：门面三平台都能起，但 `vv` 那层只随 mac 安装包交付，
                   在没有它的平台上摆这一格就是许一个装不出来的承诺（见 electron-builder.cjs 的 darwin 分支）。 */}
@@ -2012,7 +1934,7 @@ export function SettingsModal({ tab, onClose }: SettingsModalProps) {
                   <span className="settings-form-hint">
                     开＝这台机器上的另一个进程也能把音频交给这个应用转写、拿回字幕：终端里的「vv」命令和
                     接了 MCP 的 AI 客户端走的就是这一条。边界四条：只监听本机（127.0.0.1，局域网里别人连不进来）；
-                    每次运行一枚随机口令，存在上面「本机数据」那个目录里的一个私有文件，界面上不显示、
+                    每次运行一枚随机口令，存在上面「本机数据与缓存」那一栏点名的目录里的一个私有文件，界面上不显示、
                     也不进诊断包，应用退出就删掉；从这个入口出去的只有文件路径、语言和「用哪一套配置」，
                     API Key 一个字节都不经过它；关着的时候那个端口根本不存在。点「保存设置」当场生效，不用重启
                   </span>

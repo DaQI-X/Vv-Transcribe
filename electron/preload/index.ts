@@ -148,9 +148,6 @@ const api = {
   cancelVoiceJob: (jobId: string) => ipcRenderer.invoke('tts:cancel', jobId),
   saveVoiceTrack: (jobId: string) => ipcRenderer.invoke('tts:saveTrack', jobId),
   releaseVoiceBatch: (jobId: string) => ipcRenderer.invoke('tts:releaseBatch', jobId),
-  // 配音片段缓存（#362）：这一层落在 userData、启动清扫不动它，所以体积与「清掉」都得给界面一个入口
-  getVoiceClipCacheStats: () => ipcRenderer.invoke('tts:cacheStats'),
-  clearVoiceClipCache: () => ipcRenderer.invoke('tts:cacheClear'),
   // 本地配音引擎：只读状态（不会因此拉起引擎）、应用内重启与停止
   // profileId 是「问哪一套配音配置里的引擎」，不传就是问当前默认那套
   getLocalVoiceStatus: (engine?: string, profileId?: string) =>
@@ -243,6 +240,9 @@ const api = {
       ipcRenderer.removeListener('component:progress', listener)
     }
   },
+  // 本机数据与缓存（#416）：清单只读磁盘，删除按勾选项逐条走主进程已有的出口
+  getLocalDataInventory: () => ipcRenderer.invoke('data:inventory'),
+  clearLocalData: (ids: string[]) => ipcRenderer.invoke('data:clear', ids),
   // 下载进度是事件推回来的（37MB 在慢网里要跑几分钟），不包一层渲染层就看不见它在动
   onYtDlpProgress: (callback: (data: { received: number; total: number }) => void) => {
     const listener = (

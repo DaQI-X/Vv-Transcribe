@@ -2584,6 +2584,159 @@ input, textarea, [contenteditable="true"] { user-select: text; }
   cursor: not-allowed;
 }
 
+.vv-component-group__title {
+  margin-top: 14px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.vv-component-group__title + .vv-component-row {
+  margin-top: 6px;
+}
+
+/*
+ * 本机数据与缓存（#416）：弹窗里的清单项。名字 + 体积靠右同一行，说明换行跟在下面——
+ * 把「占多少」和「删了会怎样」摊在同一行会挤成一团，而这两件事都得让人看清才敢勾。
+ * 只列必要属性，不写 transition: all（同一份宽度与边框一起动会让弹窗抖一下）。
+ */
+.vv-localdata-dialog {
+  width: 520px;
+}
+
+.vv-localdata-group {
+  margin-top: 14px;
+}
+
+.vv-localdata-group__title {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.vv-localdata-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+.vv-localdata-item:hover {
+  border-color: var(--brand-blue);
+}
+
+.vv-localdata-item input {
+  width: 14px;
+  height: 14px;
+  margin-top: 1px;
+  accent-color: var(--brand-blue);
+  flex-shrink: 0;
+}
+
+.vv-localdata-item__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vv-localdata-item__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vv-localdata-item__label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.vv-localdata-item__size {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.vv-localdata-item__detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.vv-localdata-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.vv-localdata-note--warn {
+  /* 全局只有 brand-blue / error / 三档文本色，没有 amber 这一档：这条是「读不全」不是「删坏了」，
+     套 error 红会把一句提示读成事故，所以靠图标和这档稍重的文本色区分 */
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.vv-localdata-result {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vv-localdata-result__freed {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.vv-localdata-result__line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.vv-localdata-result__line--fail {
+  color: var(--error-color);
+}
+
+.vv-localdata-confirm {
+  padding: 6px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--error-color);
+  background: transparent;
+  font-size: 12px;
+  color: var(--error-color);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.vv-localdata-confirm:hover:not(:disabled) {
+  background: var(--error-color);
+  color: #fff;
+}
+
+.vv-localdata-confirm:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* 按需组件：一组件一行，状态行 + 说明 + 进度 + 动作，纵向排开，避免一行里挤下三种信息 */
 .vv-component-row {
   display: flex;

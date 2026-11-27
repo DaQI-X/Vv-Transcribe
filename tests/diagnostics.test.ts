@@ -183,6 +183,7 @@ describe('方案与组件', () => {
         id: 'vv-tts-server',
         title: '本地配音引擎',
         kind: 'binary',
+        purpose: 'tts',
         hint: '',
         installed: true,
         bytes: 15 * 1024 * 1024,
